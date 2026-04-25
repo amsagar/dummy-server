@@ -1,0 +1,103 @@
+spring:
+  application:
+    name: pods-ai-agent
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
+      - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/pods_ai_agent
+    username: postgres
+    password: ivoyant
+    driver-class-name: org.postgresql.Driver
+  ai:
+    openai:
+      api-key: "dummy-key"
+    azure:
+      openai:
+        endpoint: "https://dummy-endpoint.openai.azure.com/"
+        api-key: "dummy-key"
+    anthropic:
+      api-key: "dummy-key"
+    ollama:
+      base-url: "http://localhost:11434"
+pods:
+  auth:
+    jwt-secret: "pods-agent-jwt-secret-key-change-in-production-123456789012345"
+    jwt-expiration-ms: 86400000
+  encryption:
+    key: "d13b66074da5bb8e7db8a52c4a968e813a8407fee56d5549f932e4c1e80e0355"
+  models:
+    allowed-providers: openai, azure, azure_openai, anthropic, google-vertex, ollama
+  runtime:
+    summary-token-threshold: 2000
+    auto-routing-low-threshold: 400
+    auto-routing-medium-threshold: 1400
+    tool-auto-pick-min-score: 30
+    tool-auto-pick-ambiguity-delta: 10
+    tool-loop-max-steps: 4
+    worker-task-timeout-ms: 20000
+    summary-retain-recent-messages: 8
+    context-window-utilization-percent: 85
+    min-history-messages-to-keep: 6
+    enable-prompt-window-guard: true
+    include-skill-content-in-system-prompt: true
+    max-skill-content-chars: 12000
+    max-skill-files-per-skill: 6
+    enable-message-sanitization: true
+    enable-budget-hints: true
+    budget-hint-warn-percent: 50
+    budget-hint-elevated-percent: 70
+    budget-hint-critical-percent: 85
+    enable-anthropic-prompt-caching-hints: false
+    anthropic-chars-per-token: 3.5
+    open-ai-chars-per-token: 4.0
+    ollama-chars-per-token: 4.2
+    include-full-skill-files: false
+    include-mcp-prompt-hints: false
+    strict-scope-only: true
+    allow-capabilities-queries: true
+    out-of-scope-refusal-message: "I can’t answer this because it is outside my allowed skills/tools scope."
+    persist-internal-events: false
+    enable-experimental-tools: true
+    enabled-experimental-tool-names: [ ]
+    allowed-permission-scopes: [ filesystem, shell, web, workflow, memory, integration, http_proxy ]
+  skills:
+    blob:
+      connection-string: "DefaultEndpointsProtocol=https;AccountName=openfga;AccountKey=3qRPjRUAleZDRiDuHaZxCcrPFLAABAeLK/lSIuIDPTTo1CBgnzFIg+TvPvynr1sL5EtL7aIofTix+AStN2labg==;EndpointSuffix=core.windows.net"
+      container: "ai-skills"
+      allow-in-memory-fallback: false
+  cors:
+    allowed-origins:
+      - "http://localhost:3000"
+      - "http://localhost:5173"
+    allowed-methods:
+      - GET
+      - POST
+      - PATCH
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed-headers:
+      - "*"
+    exposed-headers: [ ]
+    allow-credentials: false
+    max-age: 3600
+    path-pattern: "/api/**"
+  mcp:
+    oauth:
+      default-client-id: ""
+      default-client-secret: ""
+      default-redirect-uri: "http://localhost:5173/oauth2/callback"
+      default-scopes: ""
+      default-authorization-url: ""
+      default-token-url: ""
+logging:
+  level:
+    root: INFO
+    com.pods.agent: DEBUG
+    org.springframework.ai: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+server:
+  compression:
+    enabled: false

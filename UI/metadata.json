@@ -1,0 +1,6 @@
+{
+  "name": "PODS OV Agent",
+  "description": "Internal operations tool for order validation, diagnostics, and real-time monitoring of PODS systems.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
