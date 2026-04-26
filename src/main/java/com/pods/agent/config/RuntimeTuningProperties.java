@@ -55,6 +55,29 @@ public class RuntimeTuningProperties {
     private boolean skillShortlistFallbackToCatalogOnMiss = true;
     private int qualityExpansionMaxRetries = 2;
     private int maxToolCallbacksPerTurn = 120;
+    private ToolRetrieval toolRetrieval = new ToolRetrieval();
+
+    public static class ToolRetrieval {
+        private int topK = 40;
+        private double scoreFloor = 0.25;
+        private double memoryBoostWeight = 0.15;
+        private boolean indexSyncEnabled = true;
+        private boolean indexSyncAsync = true;
+
+        public int getTopK() { return topK; }
+        public void setTopK(int topK) { this.topK = topK; }
+        public double getScoreFloor() { return scoreFloor; }
+        public void setScoreFloor(double scoreFloor) { this.scoreFloor = scoreFloor; }
+        public double getMemoryBoostWeight() { return memoryBoostWeight; }
+        public void setMemoryBoostWeight(double memoryBoostWeight) { this.memoryBoostWeight = memoryBoostWeight; }
+        public boolean isIndexSyncEnabled() { return indexSyncEnabled; }
+        public void setIndexSyncEnabled(boolean indexSyncEnabled) { this.indexSyncEnabled = indexSyncEnabled; }
+        public boolean isIndexSyncAsync() { return indexSyncAsync; }
+        public void setIndexSyncAsync(boolean indexSyncAsync) { this.indexSyncAsync = indexSyncAsync; }
+    }
+
+    public ToolRetrieval getToolRetrieval() { return toolRetrieval; }
+    public void setToolRetrieval(ToolRetrieval toolRetrieval) { this.toolRetrieval = toolRetrieval; }
 
     public long getSummaryTokenThreshold() {
         return summaryTokenThreshold;

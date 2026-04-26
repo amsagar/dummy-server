@@ -352,3 +352,34 @@ CREATE INDEX IF NOT EXISTS idx_cost_usage_session_id ON agent.cost_usage (sessio
 CREATE INDEX IF NOT EXISTS idx_hitl_interactions_session_id ON agent.hitl_interactions (session_id);
 CREATE INDEX IF NOT EXISTS idx_hook_mappings_hook_point ON agent.hook_mappings (hook_point);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_id ON agent.runtime_traces (session_id);
+
+-- ── Embedding model registrations + tool vector index ─────────────────────────
+ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS model_kind TEXT NOT NULL DEFAULT 'chat';
+ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supported_models_default_per_kind
+    ON agent.supported_models (model_kind) WHERE is_default = TRUE;
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS agent.agent_tool_embeddings (
+    tool_id        TEXT PRIMARY KEY REFERENCES agent.agent_tools (id) ON DELETE CASCADE,
+    model_provider TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    dimensions     INTEGER NOT NULL,
+    content_hash   TEXT NOT NULL,
+    embedding      vector(3072),
+    updated_at     BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_embeddings_model
+    ON agent.agent_tool_embeddings (model_provider, model_id);
+CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
+    ON agent.agent_tool_embeddings USING hnsw (embedding vector_cosine_ops);
+
+
+-- ALTER TABLE agent.agent_tool_embeddings
+-- ALTER COLUMN embedding TYPE halfvec(3072);
+--
+-- CREATE INDEX idx_tool_embeddings_hnsw
+--     ON agent.agent_tool_embeddings
+--     USING hnsw (embedding halfvec_cosine_ops);

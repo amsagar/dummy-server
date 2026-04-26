@@ -5,6 +5,8 @@ import com.pods.agent.domain.AgentTool;
 import com.pods.agent.config.RuntimeTuningProperties;
 import com.pods.agent.repository.AgentDomainRepository;
 import com.pods.agent.repository.AgentToolRepository;
+import com.pods.agent.service.tool.ToolEmbeddingIndexService;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -17,14 +19,17 @@ public class ToolRegistryService {
     private final AgentDomainRepository domainRepository;
     private final AgentToolRepository toolRepository;
     private final RuntimeTuningProperties runtimeTuningProperties;
+    private final ObjectProvider<ToolEmbeddingIndexService> toolEmbeddingIndexServiceProvider;
     private final Map<String, AgentTool> enabledToolCache = new ConcurrentHashMap<>();
 
     public ToolRegistryService(AgentDomainRepository domainRepository,
                                AgentToolRepository toolRepository,
-                               RuntimeTuningProperties runtimeTuningProperties) {
+                               RuntimeTuningProperties runtimeTuningProperties,
+                               ObjectProvider<ToolEmbeddingIndexService> toolEmbeddingIndexServiceProvider) {
         this.domainRepository = domainRepository;
         this.toolRepository = toolRepository;
         this.runtimeTuningProperties = runtimeTuningProperties;
+        this.toolEmbeddingIndexServiceProvider = toolEmbeddingIndexServiceProvider;
         refresh();
     }
 
@@ -37,6 +42,13 @@ public class ToolRegistryService {
             if (tool.isEnabled() && domain != null && domain.isEnabled() && isRuntimeEnabled(tool)) {
                 enabledToolCache.put(tool.getId(), tool);
             }
+        }
+        try {
+            ToolEmbeddingIndexService idx = toolEmbeddingIndexServiceProvider == null ? null : toolEmbeddingIndexServiceProvider.getIfAvailable();
+            if (idx != null) {
+                idx.syncFromCache(List.copyOf(enabledToolCache.values()));
+            }
+        } catch (Exception ignored) {
         }
     }
 

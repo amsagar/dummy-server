@@ -72,14 +72,38 @@ public class ModelRepository {
      * @param encryptedKey AES-256-GCM encrypted API key, or null to keep existing
      */
     public void upsert(ModelConfig model, String encryptedKey) {
+        String kind = model.getModelKind() == null || model.getModelKind().isBlank() ? "chat" : model.getModelKind();
         var params = new MapSqlParameterSource()
                 .addValue("providerID", model.getProviderId())
                 .addValue("modelId", model.getModelId())
                 .addValue("displayName", model.getDisplayName())
                 .addValue("enabled", model.isEnabled())
                 .addValue("encryptedKey", encryptedKey)
-                .addValue("baseUrl", model.getBaseUrl());
+                .addValue("baseUrl", model.getBaseUrl())
+                .addValue("modelKind", kind)
+                .addValue("isDefault", model.isDefaultModel())
+                .addValue("embeddingDimensions", model.getEmbeddingDimensions());
         namedJdbc.update(sql.getQuery("MODEL.UPSERT"), params);
+    }
+
+    public List<ModelConfig> findByKind(String kind) {
+        return jdbc.query(sql.getQuery("MODEL.FIND_BY_KIND"), rowMapper, kind);
+    }
+
+    public Optional<ModelConfig> findEmbeddingDefault() {
+        List<ModelConfig> results = jdbc.query(sql.getQuery("MODEL.FIND_EMBEDDING_DEFAULT"), rowMapper);
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+    }
+
+    public void setDefault(String providerID, String modelID, String kind) {
+        var clearParams = new MapSqlParameterSource().addValue("modelKind", kind);
+        namedJdbc.update(sql.getQuery("MODEL.CLEAR_DEFAULT_FOR_KIND"), clearParams);
+        var setParams = new MapSqlParameterSource()
+                .addValue("providerID", providerID)
+                .addValue("modelId", modelID)
+                .addValue("modelKind", kind);
+        namedJdbc.update(sql.getQuery("MODEL.SET_DEFAULT"), setParams);
+        log.info("[ModelRepository] Default {} model = {}/{}", kind, providerID, modelID);
     }
 
     /** Tuple holding raw credentials (never leave the service layer). */

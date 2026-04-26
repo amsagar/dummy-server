@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Bot,
   Cpu,
+  Layers,
   Wrench,
   FolderTree,
   Server,
@@ -30,6 +31,7 @@ import { cn } from "@/lib/utils";
 
 import ChatPage from "./pages/ChatPage";
 import ModelsPage from "./pages/ModelsPage";
+import EmbeddingModelsPage from "./pages/EmbeddingModelsPage";
 import ToolsPage from "./pages/ToolsPage";
 import ToolDomainPage from "./pages/ToolDomainPage";
 import SkillsPage from "./pages/SkillsPage";
@@ -52,6 +54,7 @@ function Sidebar() {
   const navItems = [
     { icon: Bot, name: "AI Chat", path: "/chat" },
     { icon: Cpu, name: "Models", path: "/models" },
+    { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
@@ -181,6 +184,7 @@ function Header() {
   const pageTitle: Record<string, string> = {
     "/chat": "AI Chat",
     "/models": "Models",
+    "/embedding-models": "Embedding Models",
     "/tools": "Tools",
     "/tools/": "Tools",
     "/skills": "Skills",
@@ -242,6 +246,7 @@ export default function App() {
               <Route element={<RequireAuth />}>
                 <Route path="/chat" element={<ChatPage />} />
                 <Route path="/models" element={<ModelsPage />} />
+                <Route path="/embedding-models" element={<EmbeddingModelsPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/tools/:domainId" element={<ToolDomainPage />} />
                 <Route path="/skills" element={<SkillsPage />} />

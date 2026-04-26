@@ -23,7 +23,16 @@ export interface ModelConfig {
   source: 'catalog' | 'db';
   hasKey: boolean;
   baseUrl?: string;
+  /** "chat" or "embedding". Defaults to "chat" on the server when omitted. */
+  modelKind?: 'chat' | 'embedding';
+  /** True if this model is the system default for its kind. */
+  defaultModel?: boolean;
+  /** Vector dimensions — only meaningful for embedding models. */
+  embeddingDimensions?: number;
 }
+
+/** Convenience alias — same shape as ModelConfig but always modelKind === "embedding". */
+export type EmbeddingModelConfig = ModelConfig;
 
 /** A provider entry returned by GET /api/v1/providers */
 export interface ProviderEntry {

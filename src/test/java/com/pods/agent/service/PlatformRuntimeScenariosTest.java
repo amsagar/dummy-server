@@ -32,7 +32,7 @@ class PlatformRuntimeScenariosTest {
                 AgentTool.builder().id("t2").domainId("d2").name("blocked").enabled(true).build()
         ));
 
-        ToolRegistryService registry = new ToolRegistryService(domainRepository, toolRepository, new RuntimeTuningProperties());
+        ToolRegistryService registry = new ToolRegistryService(domainRepository, toolRepository, new RuntimeTuningProperties(), null);
         List<AgentTool> enabled = registry.getEnabledTools();
         assertEquals(1, enabled.size());
         assertEquals("allowed", enabled.get(0).getName());

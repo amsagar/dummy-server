@@ -11,6 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import yaml from "js-yaml";
+import { EmbeddingSetupBanner } from "@/components/EmbeddingSetupBanner";
 
 type ToolActionModal = "none" | "tool-action-options" | "openapi" | "curl" | "auth" | "override-auth";
 const TOOLS_PAGE_SIZE = 10;
@@ -430,6 +431,7 @@ export default function ToolDomainPage() {
 
   return (
     <div className="space-y-6">
+      <EmbeddingSetupBanner />
       <div className="flex items-center justify-between gap-2">
         <div className="space-y-1">
           <h3 className="text-xl font-semibold text-[#123262]">Tools in Domain</h3>

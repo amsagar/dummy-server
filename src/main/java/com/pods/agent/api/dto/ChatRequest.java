@@ -26,6 +26,9 @@ public class ChatRequest {
      */
     private ModelRef model;
 
+    /** Optional per-request embedding model override (for tool retrieval). */
+    private ModelRef embeddingModel;
+
     /**
      * Legacy flat modelId, e.g. "anthropic/claude-opus-4-6".
      * Ignored when model is provided.

@@ -444,6 +444,9 @@ public class ChatService {
         if (resolved != null) {
             state.setModel(resolved);
         }
+        if (request.getEmbeddingModel() != null) {
+            state.setEmbeddingModel(request.getEmbeddingModel());
+        }
         return state;
     }
 

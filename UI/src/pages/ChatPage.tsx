@@ -441,6 +441,14 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState<string>(
     localStorage.getItem("lastModelId") || ""
   );
+  // Per-request embedding model override. Empty string = "use system default".
+  // TODO: wire embedding model selection — render a small picker in the composer
+  // (label "Embed") sourced from api.embeddingModels.list({ enabledOnly: true }).
+  const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState<string>(
+    localStorage.getItem("lastEmbeddingModelId") || ""
+  );
+  // Suppress unused-setter warning until the picker UI is wired in.
+  void setSelectedEmbeddingModel;
   // Provider-first selector: track selected provider separately
   const [selectedProvider, setSelectedProvider] = useState<string>(
     localStorage.getItem("lastModelId")?.split("/")[0] || ""
@@ -1023,6 +1031,7 @@ export default function ChatPage() {
           message: userMessage,
           sessionId: sessionId || undefined,
           model: selectedModel ? parseModelRefKey(selectedModel) : undefined,
+          embeddingModel: selectedEmbeddingModel ? parseModelRefKey(selectedEmbeddingModel) : null,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           modelSelectionMode,
           attachments: activeAttachments.length > 0 ? activeAttachments : undefined,

@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
+import { EmbeddingSetupBanner } from "@/components/EmbeddingSetupBanner";
 
 export default function ToolsPage() {
   const queryClient = useQueryClient();
@@ -382,6 +383,7 @@ export default function ToolsPage() {
 
   return (
     <div className="space-y-6">
+      <EmbeddingSetupBanner />
       <div className="space-y-1">
         <h3 className="text-xl font-semibold text-[#123262]">Tools Workspace</h3>
         <p className="text-sm text-gray-600">Manage domains first, then open a domain to manage its tools on a dedicated page.</p>

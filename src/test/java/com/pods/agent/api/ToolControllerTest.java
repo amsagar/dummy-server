@@ -37,7 +37,8 @@ class ToolControllerTest {
                 toolRepository,
                 toolImportService,
                 toolRegistryService,
-                frameworkToolPackService
+                frameworkToolPackService,
+                new tools.jackson.databind.ObjectMapper()
         );
 
         ResponseEntity<?> response = controller.listDomains();

@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
+import { EmbeddingSetupBanner } from "@/components/EmbeddingSetupBanner";
 
 export default function McpRegistryPage() {
   const navigate = useNavigate();
@@ -245,6 +246,7 @@ export default function McpRegistryPage() {
 
   return (
     <div className="space-y-6">
+      <EmbeddingSetupBanner />
       <div className="space-y-1">
         <h3 className="text-xl font-semibold text-[#123262]">MCP Registry</h3>
         <p className="text-sm text-gray-600">Register remote MCP servers, auto-detect auth, test connectivity, and manage tools on a dedicated page.</p>

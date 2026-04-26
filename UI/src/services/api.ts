@@ -77,6 +77,40 @@ export const api = {
     return fetch(`${BASE_URL}${path}`, { method: 'POST', body: form, headers: token ? { Authorization: `Bearer ${token}` } : undefined }).then(handleResponse);
   },
   getChatStreamUrl: () => `${BASE_URL}/chat`,
+  embeddingModels: {
+    list: () => fetch(`${BASE_URL}/embedding-models`, { headers: getHeaders() }).then(handleResponse),
+    upsert: (payload: {
+      providerID: string;
+      modelID: string;
+      displayName?: string;
+      apiKey?: string;
+      baseUrl?: string;
+      dimensions?: number;
+      enabled: boolean;
+    }) => fetch(`${BASE_URL}/embedding-models`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    }).then(handleResponse),
+    setDefault: (providerID: string, modelID: string) => fetch(
+      `${BASE_URL}/embedding-models/${encodeURIComponent(providerID)}/${encodeURIComponent(modelID)}/default`,
+      { method: 'POST', headers: getHeaders() }
+    ).then(handleResponse),
+    setEnabled: (providerID: string, modelID: string, enabled: boolean) => fetch(
+      `${BASE_URL}/embedding-models/${encodeURIComponent(providerID)}/${encodeURIComponent(modelID)}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST', headers: getHeaders() }
+    ).then(handleResponse),
+    delete: (providerID: string, modelID: string) => fetch(
+      `${BASE_URL}/embedding-models/${encodeURIComponent(providerID)}/${encodeURIComponent(modelID)}`,
+      { method: 'DELETE', headers: getHeaders() }
+    ).then(handleResponse),
+  },
+  tools: {
+    reindex: () => fetch(`${BASE_URL}/admin/tools/reindex`, {
+      method: 'POST',
+      headers: getHeaders(),
+    }).then(handleResponse),
+  },
   auth: {
     signup: (email: string, password: string) => fetch(`${BASE_URL}/auth/signup`, {
       method: 'POST',

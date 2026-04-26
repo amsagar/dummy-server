@@ -34,7 +34,7 @@ class ToolRegistryServiceTest {
         when(domainRepository.findAll()).thenReturn(List.of(domain));
         when(toolRepository.findAll()).thenReturn(List.of(webfetch));
 
-        ToolRegistryService service = new ToolRegistryService(domainRepository, toolRepository, runtimeTuningProperties);
+        ToolRegistryService service = new ToolRegistryService(domainRepository, toolRepository, runtimeTuningProperties, null);
 
         assertNotNull(service.getEnabledToolByName("webfetch"));
     }
@@ -58,7 +58,7 @@ class ToolRegistryServiceTest {
         when(domainRepository.findAll()).thenReturn(List.of(domain));
         when(toolRepository.findAll()).thenReturn(List.of(webfetch));
 
-        ToolRegistryService service = new ToolRegistryService(domainRepository, toolRepository, runtimeTuningProperties);
+        ToolRegistryService service = new ToolRegistryService(domainRepository, toolRepository, runtimeTuningProperties, null);
 
         assertNull(service.getEnabledToolByName("webfetch"));
     }

@@ -66,6 +66,16 @@ public class ModelConfig {
     /** Custom provider endpoint URL (Azure, Ollama, self-hosted). Null = use provider default. */
     private String baseUrl;
 
+    /** "chat" or "embedding". Defaults to "chat". */
+    @Builder.Default
+    private String modelKind = "chat";
+
+    /** Whether this model is the default for its kind. */
+    private boolean defaultModel;
+
+    /** Required when modelKind = "embedding"; null otherwise. */
+    private Integer embeddingDimensions;
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /** Returns a ModelRef for this config — use when passing to ModelProviderRouter. */
