@@ -4,6 +4,7 @@ import com.pods.agent.domain.AgentTool;
 import com.pods.agent.agent.MemoryTools;
 import com.pods.agent.service.mcp.McpRuntimeAdapter;
 import com.pods.agent.service.workspace.WorkspaceContextHolder;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -22,6 +24,7 @@ import java.nio.file.PathMatcher;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.HashMap;
@@ -33,6 +36,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 @Service
+@Slf4j
 public class ToolExecutionService {
     private static final Set<String> ALLOWED_METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE");
     private static final int MAX_RETRIES = 2;
@@ -46,21 +50,24 @@ public class ToolExecutionService {
     private final McpClientService mcpClientService;
     private final McpRuntimeAdapter mcpRuntimeAdapter;
     private final MemoryTools memoryTools;
+    private final HttpToolAuthService httpToolAuthService;
     private final Map<String, CircuitState> circuits = new ConcurrentHashMap<>();
 
     public ToolExecutionService(ObjectMapper objectMapper) {
-        this(objectMapper, null, null, null);
+        this(objectMapper, null, null, null, null);
     }
 
     @Autowired
     public ToolExecutionService(ObjectMapper objectMapper,
                                 McpClientService mcpClientService,
                                 McpRuntimeAdapter mcpRuntimeAdapter,
-                                MemoryTools memoryTools) {
+                                MemoryTools memoryTools,
+                                HttpToolAuthService httpToolAuthService) {
         this.objectMapper = objectMapper;
         this.mcpClientService = mcpClientService;
         this.mcpRuntimeAdapter = mcpRuntimeAdapter;
         this.memoryTools = memoryTools;
+        this.httpToolAuthService = httpToolAuthService;
     }
 
     public ExecutionResult execute(AgentTool tool, String userText) {
@@ -94,15 +101,38 @@ public class ToolExecutionService {
         if (endpoint == null) {
             return new ExecutionResult(false, null, "Invalid tool endpoint");
         }
+        Map<String, Object> args = parseArgs(userText);
+        Set<String> consumedKeys = new HashSet<>();
+        endpoint = hydratePathParams(endpoint, args, consumedKeys);
+        List<String> unresolvedPathParams = unresolvedPathParams(endpoint);
+        if (!unresolvedPathParams.isEmpty()) {
+            return new ExecutionResult(false, null, "Missing required path params: " + String.join(", ", unresolvedPathParams));
+        }
+        if ("GET".equals(method) || "DELETE".equals(method)) {
+            endpoint = appendQueryParams(endpoint, extractQueryParams(args, consumedKeys));
+        }
+
         String body = tool.getSampleRequest() != null && !tool.getSampleRequest().isBlank()
                 ? tool.getSampleRequest()
                 : "{\"query\":\"" + sanitize(userText) + "\"}";
         Map<String, String> headers = parseHeaders(tool.getRequestSchema());
+        if (httpToolAuthService != null) {
+            try {
+                headers.putAll(httpToolAuthService.resolveHeaders(tool));
+                endpoint = appendQueryParams(endpoint, httpToolAuthService.resolveQueryParams(tool));
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "Tool auth resolution failed: " + e.getMessage());
+            }
+        }
         headers.putIfAbsent("Content-Type", "application/json");
 
         Exception last = null;
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             try {
+                log.info("[ToolExecutionService] http tool={} attempt={} curl={}",
+                        tool.getName(),
+                        attempt + 1,
+                        asCurl(method, endpoint, headers, ("GET".equals(method) || "DELETE".equals(method)) ? null : body));
                 HttpRequest.Builder req = HttpRequest.newBuilder()
                         .uri(URI.create(endpoint))
                         .timeout(Duration.ofSeconds(15));
@@ -113,12 +143,20 @@ public class ToolExecutionService {
                     req.method(method, HttpRequest.BodyPublishers.ofString(body));
                 }
                 HttpResponse<String> response = httpClient.send(req.build(), HttpResponse.BodyHandlers.ofString());
+                log.info("[ToolExecutionService] http tool={} status={} response={}",
+                        tool.getName(),
+                        response.statusCode(),
+                        truncate(response.body(), 1200));
                 if (response.statusCode() >= 200 && response.statusCode() < 300) {
                     state.reset();
                     return new ExecutionResult(true, response.body(), null);
                 }
                 last = new RuntimeException("HTTP " + response.statusCode() + ": " + truncate(response.body(), 500));
             } catch (Exception e) {
+                log.info("[ToolExecutionService] http tool={} attempt={} error={}",
+                        tool.getName(),
+                        attempt + 1,
+                        e.getMessage());
                 last = e;
             }
         }
@@ -545,13 +583,91 @@ public class ToolExecutionService {
             return null;
         }
         try {
-            URI uri = new URI(normalized);
+            // OpenAPI-imported tool endpoints can include URI template placeholders
+            // like /resource/{id}. Validate a safe form but preserve the original.
+            String validationCandidate = normalized.replaceAll("\\{[^}/]+}", "placeholder");
+            URI uri = new URI(validationCandidate);
             if (uri.getHost() == null || uri.getScheme() == null) return null;
             if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())) return null;
             return normalized;
         } catch (URISyntaxException e) {
             return null;
         }
+    }
+
+    private String appendQueryParams(String endpoint, Map<String, String> queryParams) {
+        if (endpoint == null || endpoint.isBlank() || queryParams == null || queryParams.isEmpty()) {
+            return endpoint;
+        }
+        StringBuilder builder = new StringBuilder(endpoint);
+        builder.append(endpoint.contains("?") ? "&" : "?");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : queryParams.entrySet()) {
+            if (!first) builder.append("&");
+            first = false;
+            builder.append(URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
+            builder.append("=");
+            builder.append(URLEncoder.encode(entry.getValue() == null ? "" : entry.getValue(), StandardCharsets.UTF_8));
+        }
+        return builder.toString();
+    }
+
+    private String hydratePathParams(String endpoint, Map<String, Object> args, Set<String> consumedKeys) {
+        if (endpoint == null || endpoint.isBlank() || args == null || args.isEmpty()) return endpoint;
+        String hydrated = endpoint;
+        java.util.regex.Matcher matcher = Pattern.compile("\\{([^}/]+)}").matcher(endpoint);
+        while (matcher.find()) {
+            String key = matcher.group(1);
+            if (key == null || key.isBlank()) continue;
+            Object value = findArgIgnoreCase(args, key);
+            if (value == null) continue;
+            String encoded = URLEncoder.encode(String.valueOf(value), StandardCharsets.UTF_8);
+            hydrated = hydrated.replace("{" + key + "}", encoded);
+            consumedKeys.add(key.toLowerCase());
+        }
+        return hydrated;
+    }
+
+    private List<String> unresolvedPathParams(String endpoint) {
+        List<String> missing = new ArrayList<>();
+        if (endpoint == null || endpoint.isBlank()) return missing;
+        java.util.regex.Matcher matcher = Pattern.compile("\\{([^}/]+)}").matcher(endpoint);
+        while (matcher.find()) {
+            String key = matcher.group(1);
+            if (key != null && !key.isBlank()) {
+                missing.add(key);
+            }
+        }
+        return missing;
+    }
+
+    private Map<String, String> extractQueryParams(Map<String, Object> args, Set<String> consumedKeys) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (args == null || args.isEmpty()) return out;
+        for (Map.Entry<String, Object> entry : args.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.isBlank()) continue;
+            String normalized = key.toLowerCase();
+            if ("query".equals(normalized) || consumedKeys.contains(normalized)) continue;
+            Object value = entry.getValue();
+            if (value == null) continue;
+            if (value instanceof Number || value instanceof Boolean || value instanceof String) {
+                out.put(key, String.valueOf(value));
+                consumedKeys.add(normalized);
+            }
+        }
+        return out;
+    }
+
+    private Object findArgIgnoreCase(Map<String, Object> args, String key) {
+        if (args == null || args.isEmpty() || key == null) return null;
+        if (args.containsKey(key)) return args.get(key);
+        for (Map.Entry<String, Object> entry : args.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
     }
 
     private Map<String, String> parseHeaders(String requestSchema) {
@@ -576,6 +692,37 @@ public class ToolExecutionService {
     private static String truncate(String text, int max) {
         if (text == null || text.length() <= max) return text;
         return text.substring(0, max - 3) + "...";
+    }
+
+    private String asCurl(String method, String endpoint, Map<String, String> headers, String body) {
+        StringBuilder out = new StringBuilder("curl -X ").append(method).append(" '").append(endpoint).append("'");
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                out.append(" -H '")
+                        .append(entry.getKey())
+                        .append(": ")
+                        .append(maskHeaderValue(entry.getKey(), entry.getValue()))
+                        .append("'");
+            }
+        }
+        if (body != null && !body.isBlank()) {
+            out.append(" --data '").append(sanitizeSingleQuotes(truncate(body, 1000))).append("'");
+        }
+        return out.toString();
+    }
+
+    private String maskHeaderValue(String key, String value) {
+        if (value == null) return "";
+        String k = key == null ? "" : key.toLowerCase();
+        if (k.contains("authorization") || k.contains("token") || k.contains("api-key") || k.contains("apikey")) {
+            return "***";
+        }
+        return value;
+    }
+
+    private String sanitizeSingleQuotes(String value) {
+        if (value == null) return "";
+        return value.replace("'", "'\"'\"'");
     }
 
     private String extractMcpError(String result) {

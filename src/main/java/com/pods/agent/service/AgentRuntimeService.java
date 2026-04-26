@@ -3,6 +3,8 @@ package com.pods.agent.service;
 import com.pods.agent.agent.AgentOrchestrator;
 import com.pods.agent.agent.AgentSession;
 import com.pods.agent.agent.SseEventSender;
+import com.pods.agent.agent.tool.AgentToolCallbackFactory;
+import org.springframework.ai.tool.ToolCallback;
 import com.pods.agent.api.dto.ChatState;
 import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuntimeTuningProperties;
@@ -21,6 +23,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -31,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -56,12 +60,15 @@ public class AgentRuntimeService {
                                   String reason,
                                   String clarificationPrompt,
                                   List<String> candidates) {}
+    private record CatalogCandidate(AgentTool tool, double score, List<String> requiredArgs, List<String> missingArgs) {}
     private record LoopStepOutcome(LoopDirective directive, String response) {}
 
     private static final Set<String> STOP_WORDS = Set.of(
             "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "get", "give", "how", "i", "in",
             "is", "it", "me", "my", "of", "on", "or", "please", "show", "the", "to", "we", "with", "you", "your"
     );
+    private static final Pattern UUID_PATTERN = Pattern.compile(
+            "\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\\b");
     private final AgentOrchestrator orchestrator;
     private final ToolRegistryService toolRegistryService;
     private final GuardrailPolicyEngine policyEngine;
@@ -78,6 +85,11 @@ public class AgentRuntimeService {
     private final ContextSummarizationService summarizationService;
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final ObjectMapper objectMapper;
+    private final MemoryService memoryService;
+    private final AgentToolCallbackFactory agentToolCallbackFactory;
+    private final Map<String, Map<String, Double>> toolMemorySignals = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Double>> toolDomainMemorySignals = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Double>> skillMemorySignals = new ConcurrentHashMap<>();
 
     private final ExecutorService parallelExecutor = Executors.newFixedThreadPool(4);
 
@@ -96,7 +108,9 @@ public class AgentRuntimeService {
                                McpRuntimeAdapter mcpRuntimeAdapter,
                                ContextSummarizationService summarizationService,
                                RuntimeTuningProperties runtimeTuningProperties,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               MemoryService memoryService,
+                               AgentToolCallbackFactory agentToolCallbackFactory) {
         this.orchestrator = orchestrator;
         this.toolRegistryService = toolRegistryService;
         this.policyEngine = policyEngine;
@@ -113,6 +127,8 @@ public class AgentRuntimeService {
         this.summarizationService = summarizationService;
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.objectMapper = objectMapper;
+        this.memoryService = memoryService;
+        this.agentToolCallbackFactory = agentToolCallbackFactory;
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender) {
@@ -155,9 +171,8 @@ public class AgentRuntimeService {
             return response;
         }
 
-        String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
         String mcpContext = buildMcpContext();
-        return runModelDrivenCoreLoop(session, normalizedUserText, state, sender, turnId, runtimeMode, selectedSkillContext, mcpContext);
+        return runModelDrivenCoreLoop(session, normalizedUserText, state, sender, turnId, runtimeMode, mcpContext);
     }
 
     private String runModelDrivenCoreLoop(AgentSession session,
@@ -166,182 +181,82 @@ public class AgentRuntimeService {
                                           SseEventSender sender,
                                           String turnId,
                                           String runtimeMode,
-                                          String selectedSkillContext,
                                           String mcpContext) {
-        StringBuilder observationContext = new StringBuilder();
-        StringBuilder streamedAssistantText = new StringBuilder();
-        Set<String> seenToolSignatures = new HashSet<>();
-        int step = 1;
+        String stepId = "step-1";
+        transitionState(session.getSessionId(), turnId, sender, PlannerState.PLAN, "model-driven-" + stepId + "-plan");
+        sender.sendTaskStarted(session.getSessionId(), stepId, "MODEL_STEP");
+        sender.sendStepStarted(session.getSessionId(), 1, null);
+        saveSessionEvent(session.getSessionId(), turnId, "step.started", "{\"step\":1}");
 
-        while (true) {
-            String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, observationContext.toString());
-            String stepId = "step-" + step;
-            transitionState(session.getSessionId(), turnId, sender, PlannerState.PLAN, "model-driven-" + stepId + "-plan");
-            sender.sendTaskStarted(session.getSessionId(), stepId, "MODEL_STEP");
-            sender.sendStepStarted(session.getSessionId(), step, null);
-            saveSessionEvent(session.getSessionId(), turnId, "step.started",
-                    "{\"step\":" + step + "}");
-
-            List<Map<String, Object>> toolCatalog = toolRegistryService.getEnabledTools().stream()
-                    .limit(80)
-                    .map(runtimeToolDescriptorService::toDescriptor)
-                    .toList();
-
-            AgentOrchestrator.StepDecision decision = orchestrator.decideNextStep(
-                    session,
-                    stepContext,
-                    state,
-                    toolCatalog,
-                    step);
-            log.debug("[AgentRuntime] Step decision: sessionId={}, turnId={}, step={}, mode={}, reason={}, finishReason={}, toolCalls={}",
-                    session.getSessionId(),
-                    turnId,
-                    step,
-                    decision != null ? decision.mode() : "null",
-                    decision != null ? decision.reason() : "null",
-                    decision != null ? decision.finishReason() : "null",
-                    decision != null && decision.toolCalls() != null ? decision.toolCalls().size() : 0);
-
-            String assistantStepText = decision != null ? decision.assistantMessage() : "";
-            if (assistantStepText != null && !assistantStepText.isBlank()) {
-                streamAssistantText(sender, streamedAssistantText, assistantStepText);
-            }
-
-            String finishReason = decision != null && decision.finishReason() != null
-                    ? decision.finishReason().trim().toLowerCase(Locale.ROOT)
-                    : "";
-            if ("compact".equals(finishReason) || shouldCompactLoopContext(session, state)) {
-                compactSessionInLoop(session, state, sender, turnId, step);
-                sender.sendTaskDone(session.getSessionId(), stepId, "COMPACT");
-                sender.sendStepFinished(session.getSessionId(), step, "compact", false);
-                saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                        "{\"step\":" + step + ",\"mode\":\"compact\"}");
-                step++;
-                continue;
-            }
-            if ("continue".equals(finishReason) && (decision == null || !"tools".equalsIgnoreCase(decision.mode()))) {
-                sender.sendTaskDone(session.getSessionId(), stepId, "CONTINUE");
-                sender.sendStepFinished(session.getSessionId(), step, "continue", false);
-                saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                        "{\"step\":" + step + ",\"mode\":\"continue\"}");
-                step++;
-                continue;
-            }
-
-            if (decision == null || !"tools".equalsIgnoreCase(decision.mode()) || "stop".equals(finishReason)) {
-                String response = decision != null ? decision.finalResponse() : "";
-                if (response == null || response.isBlank()) {
-                    response = "I could not produce a final response in this step.";
-                }
-                if (shouldForceToolContinuation(userText, step, stepContext, decision, response)) {
-                    observationContext.append("\nFinal response was not grounded in tool evidence for this request.")
-                            .append(" Continue with tool calls before finalizing.\n");
-                    step++;
-                    continue;
-                }
-                streamAssistantText(sender, streamedAssistantText, response);
-                String persistedResponse = streamedAssistantText.toString().trim();
-                if (persistedResponse.isBlank()) {
-                    persistedResponse = response;
-                }
-                session.getMessages().add(new AssistantMessage(persistedResponse));
-                sender.sendTaskDone(session.getSessionId(), stepId, "FINAL");
-                String finishMode = decision != null && decision.finishReason() != null && !decision.finishReason().isBlank()
-                        ? decision.finishReason()
-                        : "final";
-                sender.sendStepFinished(session.getSessionId(), step, finishMode, false);
-                saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                        "{\"step\":" + step + ",\"mode\":" + jsonString(finishMode) + ",\"reason\":" + jsonString(decision != null ? decision.reason() : "final") + "}");
-                transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "core-loop-complete");
-                hookRegistryService.emit("post-response", java.util.Map.of("sessionId", session.getSessionId(), "turnId", turnId));
-                runtimeEventRepository.save(RuntimeEvent.builder()
-                        .sessionId(session.getSessionId()).turnId(turnId).eventType("task.done")
-                        .payload("{\"task\":\"core_loop_complete\"}").build());
-                return persistedResponse;
-            }
-
-            transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "model-driven-" + stepId + "-tools");
-            boolean executedAny = false;
-            boolean observedMeaningfulEvidence = false;
-            for (AgentOrchestrator.ToolIntent intent : decision.toolCalls()) {
-                if (intent == null || intent.name() == null || intent.name().isBlank()) continue;
-                AgentTool tool = toolRegistryService.getEnabledToolByName(intent.name());
-                if (tool == null) {
-                    observationContext.append("\nTool '").append(intent.name()).append("' was requested by model but not available.\n");
-                    continue;
-                }
-                String payload;
-                try {
-                    Map<String, Object> rawArgs = intent.arguments() == null ? Map.of() : intent.arguments();
-                    payload = rawArgs.isEmpty()
-                            ? buildAutoInvocationPayload(tool, userText)
-                            : objectMapper.writeValueAsString(rawArgs);
-                } catch (Exception e) {
-                    payload = buildAutoInvocationPayload(tool, userText);
-                }
-                String signature = tool.getName().toLowerCase(Locale.ROOT) + "::" + payload;
-                if (!seenToolSignatures.add(signature)) {
-                    observationContext.append("\nTool '").append(tool.getName()).append("' repeated with same input; stopping repeat cycle.\n");
-                    continue;
-                }
-                String callId = UUID.randomUUID().toString();
-                ToolRunOutcome outcome = executeModelRequestedTool(session, state, sender, turnId, tool, payload, callId);
-                if (outcome.contextLine() != null && !outcome.contextLine().isBlank()) {
-                    observationContext.append("\n").append(outcome.contextLine()).append("\n");
-                }
-                observedMeaningfulEvidence = observedMeaningfulEvidence || outcome.meaningfulEvidence();
-                executedAny = true;
-                if (outcome.terminateTurn()) {
-                    String terminalResponse = outcome.terminalResponse();
-                    if (terminalResponse != null && !terminalResponse.isBlank()) {
-                        streamAssistantText(sender, streamedAssistantText, terminalResponse);
-                    }
-                    String persistedTerminal = streamedAssistantText.toString().trim();
-                    if (persistedTerminal.isBlank()) {
-                        persistedTerminal = terminalResponse;
-                    }
-                    if (persistedTerminal != null && !persistedTerminal.isBlank()) {
-                        session.getMessages().add(new AssistantMessage(persistedTerminal));
-                    }
-                    sender.sendTaskDone(session.getSessionId(), stepId, "TERMINAL");
-                    sender.sendStepFinished(session.getSessionId(), step, "terminal", true);
-                    saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                            "{\"step\":" + step + ",\"mode\":\"terminal\"}");
-                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "terminal-tool-response");
-                    hookRegistryService.emit("post-response", java.util.Map.of("sessionId", session.getSessionId(), "turnId", turnId));
-                    runtimeEventRepository.save(RuntimeEvent.builder()
-                            .sessionId(session.getSessionId()).turnId(turnId).eventType("task.done")
-                            .payload("{\"task\":\"terminal_tool_response\"}").build());
-                    return persistedTerminal == null ? "" : persistedTerminal;
-                }
-            }
-            sender.sendTaskDone(session.getSessionId(), stepId, executedAny ? "TOOLS_EXECUTED" : "NO_TOOLS");
-            sender.sendStepFinished(session.getSessionId(), step, "tools", executedAny);
-            saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                    "{\"step\":" + step + ",\"mode\":\"tools\",\"executedAny\":" + executedAny + "}");
-            if (executedAny && !observedMeaningfulEvidence) {
-                observationContext.append("\nTool results were empty/low-signal. Choose a different relevant tool next step.\n");
-                step++;
-                continue;
-            }
-            if (!executedAny) {
-                observationContext.append("\nNo tool was executed in this step. Select a different tool or return a grounded final response.\n");
-                step++;
-                continue;
-            }
-            step++;
+        if (shouldCompactLoopContext(session, state)) {
+            compactSessionInLoop(session, state, sender, turnId, 1);
         }
-    }
 
-    private void streamAssistantText(SseEventSender sender, StringBuilder streamedAssistantText, String text) {
-        if (text == null || text.isBlank()) return;
-        String normalized = text.trim();
-        String delta = normalized;
-        if (!streamedAssistantText.isEmpty()) {
-            delta = "\n\n" + normalized;
+        String response = "";
+        int maxRetries = Math.max(0, runtimeTuningProperties.getQualityExpansionMaxRetries());
+        boolean expanded = false;
+        boolean catalogInjected = false;
+        int expansionRetriesUsed = 0;
+        List<AgentTool> baseTools = buildBaseToolSet();
+        List<AgentTool> selectedNonDefault = List.of();
+        int safetyPasses = Math.max(2, maxRetries + 3);
+
+        for (int pass = 0; pass < safetyPasses; pass++) {
+            if (catalogInjected) {
+                selectedNonDefault = buildCatalogToolShortlist(userText, session.getSessionId(), expanded, baseTools.size());
+            } else {
+                selectedNonDefault = List.of();
+            }
+            List<AgentTool> toolShortlist = mergeWithProviderCap(baseTools, selectedNonDefault, userText, session.getSessionId());
+            List<ToolCallback> toolCallbacks = agentToolCallbackFactory.buildForTurn(
+                    session.getSessionId(), turnId, sender, toolShortlist);
+            String selectedSkillContext = buildSelectedSkillContext(session, userText, state, expanded);
+            String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "");
+            log.debug("[AgentRuntime] streamTurn start: sessionId={}, turnId={}, tools={}, expandedAttempt={}",
+                    session.getSessionId(), turnId, toolCallbacks.size(), expanded);
+            try {
+                response = orchestrator.streamTurn(session, stepContext, state, sender, toolCallbacks);
+            } catch (Exception e) {
+                log.error("[AgentRuntime] streamTurn failed: {}", e.getMessage(), e);
+                response = "I hit an error generating the response: " + e.getMessage();
+                sender.sendTextDelta(response);
+                session.getMessages().add(new AssistantMessage(response));
+            }
+            recordSelectionSignals(session.getSessionId(), userText, catalogInjected ? selectedNonDefault : baseTools, response, expanded);
+
+            if (!catalogInjected && shouldInvokeCatalogSearch(userText, response)) {
+                catalogInjected = true;
+                expanded = false;
+                log.info("[AgentRuntime] tool_catalog_search invoked (needed-only): sessionId={}, turnId={}",
+                        session.getSessionId(), turnId);
+                saveSessionEvent(session.getSessionId(), turnId, "catalog.search.invoked",
+                        "{\"reason\":\"needed_only_gate\"}");
+                continue;
+            }
+
+            if (catalogInjected && shouldExpandAndRetry(response, expanded, expansionRetriesUsed, maxRetries)) {
+                expanded = true;
+                expansionRetriesUsed++;
+                log.info("[AgentRuntime] Quality gate retry triggered: sessionId={}, turnId={}, retry={}",
+                        session.getSessionId(), turnId, expansionRetriesUsed);
+                saveSessionEvent(session.getSessionId(), turnId, "quality.retry",
+                        "{\"retry\":" + expansionRetriesUsed + "}");
+                continue;
+            }
+            break;
         }
-        sender.sendTextDelta(delta);
-        streamedAssistantText.append(delta);
+
+        sender.sendTaskDone(session.getSessionId(), stepId, "FINAL");
+        sender.sendStepFinished(session.getSessionId(), 1, "final", false);
+        saveSessionEvent(session.getSessionId(), turnId, "step.finished",
+                "{\"step\":1,\"mode\":\"final\"}");
+        transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "core-loop-complete");
+        hookRegistryService.emit("post-response",
+                java.util.Map.of("sessionId", session.getSessionId(), "turnId", turnId));
+        runtimeEventRepository.save(RuntimeEvent.builder()
+                .sessionId(session.getSessionId()).turnId(turnId).eventType("task.done")
+                .payload("{\"task\":\"core_loop_complete\"}").build());
+        return response == null ? "" : response;
     }
 
     private String buildRecentConversationContext(AgentSession session, int maxMessages) {
@@ -386,11 +301,300 @@ public class AgentRuntimeService {
         if (!historyContext.isBlank()) {
             context.append(historyContext).append("\n\n");
         }
+        String entityContext = buildEntityCarryForwardContext(session, userText);
+        if (!entityContext.isBlank()) {
+            context.append(entityContext).append("\n\n");
+        }
         if (observationContext != null && !observationContext.isBlank()) {
             context.append("Tool observations:\n").append(observationContext).append("\n\n");
         }
         context.append("Runtime mode: ").append(runtimeMode).append("\n");
         return context.toString();
+    }
+
+    private String buildEntityCarryForwardContext(AgentSession session, String userText) {
+        if (session == null || session.getSessionId() == null) return "";
+        Set<String> ids = new LinkedHashSet<>();
+        List<Message> messages = session.getMessages() == null ? List.of() : session.getMessages();
+        int start = Math.max(0, messages.size() - 16);
+        for (int i = start; i < messages.size(); i++) {
+            Message m = messages.get(i);
+            String text = "";
+            if (m instanceof UserMessage user) {
+                text = user.getText();
+            } else if (m instanceof AssistantMessage assistant) {
+                text = assistant.getText();
+            }
+            collectUuids(text, ids);
+        }
+        try {
+            List<com.pods.agent.domain.RuntimeTrace> traces = runtimeTraceRepository.findBySession(session.getSessionId());
+            int traceStart = Math.max(0, traces.size() - 8);
+            for (int i = traceStart; i < traces.size(); i++) {
+                var trace = traces.get(i);
+                if (trace == null) continue;
+                if (!"tool".equalsIgnoreCase(trace.getTraceType())) continue;
+                collectUuids(trace.getPayload(), ids);
+            }
+        } catch (Exception ignored) {
+        }
+        if (ids.isEmpty()) return "";
+        String latestId = ids.stream().reduce((a, b) -> b).orElse("");
+        StringBuilder out = new StringBuilder("<entity_carry_forward>\n");
+        if (!ids.isEmpty()) {
+            out.append("known_ids: ").append(ids.stream().limit(12).collect(Collectors.joining(", "))).append("\n");
+            out.append("latest_id: ").append(latestId).append("\n");
+        }
+        out.append("tool_routing_hints:\n")
+                .append("- If user says 'this product' or 'this organization', reuse latest_id when appropriate.\n")
+                .append("- Multiple tool calls in sequence are allowed in the same turn when needed.\n");
+        if (userText != null && !userText.isBlank()) {
+            out.append("current_user_intent: ").append(truncate(userText, 240)).append("\n");
+        }
+        out.append("</entity_carry_forward>");
+        return out.toString();
+    }
+
+    private void collectUuids(String text, Set<String> into) {
+        if (text == null || text.isBlank() || into == null) return;
+        Matcher matcher = UUID_PATTERN.matcher(text);
+        while (matcher.find()) {
+            into.add(matcher.group());
+        }
+    }
+
+    private List<AgentTool> buildBaseToolSet() {
+        List<AgentTool> base = runtimeTuningProperties.isBaseOnlyDefaultToolInjectionEnabled()
+                ? toolRegistryService.getBaseInjectedTools()
+                : toolRegistryService.getEnabledTools();
+        if (base == null) return List.of();
+        return base;
+    }
+
+    private List<AgentTool> buildCatalogToolShortlist(String userText,
+                                                      String sessionId,
+                                                      boolean expanded,
+                                                      int baseCount) {
+        List<AgentTool> nonDefaultTools = toolRegistryService.getNonDefaultEnabledTools();
+        if (nonDefaultTools.isEmpty()) return List.of();
+        int hardCap = Math.max(1, runtimeTuningProperties.getMaxToolCallbacksPerTurn());
+        int availableSlots = Math.max(0, hardCap - Math.max(0, baseCount));
+        if (availableSlots <= 0) return List.of();
+
+        int shortlistSize = runtimeTuningProperties.isDynamicToolExposureEnabled()
+                ? (expanded
+                ? Math.max(1, runtimeTuningProperties.getToolShortlistExpandedSize())
+                : Math.max(1, runtimeTuningProperties.getToolShortlistDefaultSize()))
+                : availableSlots;
+        shortlistSize = Math.min(shortlistSize, availableSlots);
+
+        List<CatalogCandidate> ranked = toolCatalogSearch(userText, sessionId, nonDefaultTools, shortlistSize);
+        if (ranked.isEmpty()) return List.of();
+        List<AgentTool> selected = toolCatalogGet(ranked, shortlistSize);
+        if (selected.isEmpty() && runtimeTuningProperties.isToolShortlistFallbackToAllOnMiss()) {
+            return nonDefaultTools.stream().limit(availableSlots).toList();
+        }
+        return selected;
+    }
+
+    private List<CatalogCandidate> toolCatalogSearch(String userText,
+                                                     String sessionId,
+                                                     List<AgentTool> nonDefaultTools,
+                                                     int limit) {
+        int candidateLimit = Math.max(1, runtimeTuningProperties.getCatalogSearchCandidateLimit());
+        return rankCatalogCandidates(userText, sessionId, nonDefaultTools).stream()
+                .limit(Math.max(1, Math.min(limit, candidateLimit)))
+                .toList();
+    }
+
+    private List<AgentTool> toolCatalogGet(List<CatalogCandidate> rankedCandidates, int limit) {
+        if (rankedCandidates == null || rankedCandidates.isEmpty()) return List.of();
+        return rankedCandidates.stream()
+                .limit(Math.max(1, limit))
+                .map(CatalogCandidate::tool)
+                .toList();
+    }
+
+    private List<AgentTool> mergeWithProviderCap(List<AgentTool> baseTools,
+                                                 List<AgentTool> selectedNonDefault,
+                                                 String userText,
+                                                 String sessionId) {
+        int hardCap = Math.max(1, runtimeTuningProperties.getMaxToolCallbacksPerTurn());
+        List<AgentTool> merged = new ArrayList<>();
+        if (baseTools != null) {
+            merged.addAll(baseTools.stream().filter(t -> t != null && t.getName() != null).toList());
+        }
+        if (selectedNonDefault != null && !selectedNonDefault.isEmpty()) {
+            Set<String> seen = merged.stream().map(t -> t.getName().toLowerCase(Locale.ROOT)).collect(Collectors.toSet());
+            for (AgentTool tool : selectedNonDefault) {
+                if (tool == null || tool.getName() == null) continue;
+                String key = tool.getName().toLowerCase(Locale.ROOT);
+                if (seen.add(key)) merged.add(tool);
+            }
+        }
+        if (merged.size() <= hardCap) return merged;
+        // preserve base tools first; trim non-default remainder deterministically.
+        List<AgentTool> baseOnly = baseTools == null ? List.of() : baseTools.stream().filter(t -> t != null && t.getName() != null).toList();
+        int remaining = Math.max(0, hardCap - baseOnly.size());
+        List<AgentTool> trimmed = new ArrayList<>(baseOnly.stream().limit(hardCap).toList());
+        if (remaining > 0 && selectedNonDefault != null && !selectedNonDefault.isEmpty()) {
+            List<AgentTool> ranked = rankToolsByIntent(userText, sessionId, selectedNonDefault).stream()
+                    .map(Map.Entry::getKey)
+                    .limit(remaining)
+                    .toList();
+            Set<String> seen = trimmed.stream().map(t -> t.getName().toLowerCase(Locale.ROOT)).collect(Collectors.toSet());
+            for (AgentTool tool : ranked) {
+                if (tool == null || tool.getName() == null) continue;
+                if (seen.add(tool.getName().toLowerCase(Locale.ROOT))) trimmed.add(tool);
+            }
+        }
+        log.info("[AgentRuntime] Tool callbacks capped for provider safety: baseTools={}, selectedNonDefault={}, final={}",
+                baseOnly.size(),
+                selectedNonDefault == null ? 0 : selectedNonDefault.size(),
+                trimmed.size());
+        return trimmed;
+    }
+
+    private List<CatalogCandidate> rankCatalogCandidates(String userText, String sessionId, List<AgentTool> tools) {
+        Set<String> userTokens = tokenize(userText);
+        Map<String, Double> memoryScores = loadToolMemorySignals(sessionId);
+        Map<String, Double> domainScores = loadToolDomainMemorySignals(sessionId);
+        double memoryWeight = Math.max(0.0, runtimeTuningProperties.getToolMemoryBiasWeight());
+        String low = userText == null ? "" : userText.toLowerCase(Locale.ROOT);
+        return tools.stream()
+                .map(tool -> {
+                    int lexical = matchScore(low, userTokens, tool);
+                    List<String> requiredArgs = extractRequiredArgs(tool);
+                    List<String> missingArgs = requiredArgs.stream()
+                            .filter(arg -> !containsToken(low, arg))
+                            .toList();
+                    double schemaFitPenalty = missingArgs.isEmpty() ? 0.0 : Math.min(20.0, missingArgs.size() * 4.0);
+                    double domainBias = domainScores.getOrDefault(tool.getDomainId(), 0.0) * memoryWeight * 5.0;
+                    double score = lexical
+                            + (memoryScores.getOrDefault(tool.getName(), 0.0) * memoryWeight * 10.0)
+                            + domainBias
+                            - schemaFitPenalty;
+                    return new CatalogCandidate(tool, score, requiredArgs, missingArgs);
+                })
+                .sorted((a, b) -> Double.compare(b.score(), a.score()))
+                .toList();
+    }
+
+    private List<Map.Entry<AgentTool, Double>> rankToolsByIntent(String userText,
+                                                                 String sessionId,
+                                                                 List<AgentTool> tools) {
+        Set<String> userTokens = tokenize(userText);
+        Map<String, Double> memoryScores = loadToolMemorySignals(sessionId);
+        double memoryWeight = Math.max(0.0, runtimeTuningProperties.getToolMemoryBiasWeight());
+        return tools.stream()
+                .map(tool -> {
+                    int lexical = matchScore(userText.toLowerCase(Locale.ROOT), userTokens, tool);
+                    double score = lexical + (memoryScores.getOrDefault(tool.getName(), 0.0) * memoryWeight * 10.0);
+                    return Map.entry(tool, score);
+                })
+                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
+                .toList();
+    }
+
+    private boolean shouldExpandAndRetry(String response, boolean expanded, int attempt, int maxRetries) {
+        if (expanded) return false;
+        if (attempt >= maxRetries) return false;
+        if (response == null || response.isBlank()) return true;
+        String normalized = response.toLowerCase(Locale.ROOT);
+        return normalized.contains("need more")
+                || normalized.contains("not enough")
+                || normalized.contains("insufficient")
+                || normalized.contains("couldn't find")
+                || normalized.contains("cannot find");
+    }
+
+    private boolean shouldInvokeCatalogSearch(String userText, String response) {
+        List<AgentTool> nonDefault = toolRegistryService.getNonDefaultEnabledTools();
+        if (nonDefault.isEmpty()) return false;
+        if (response == null || response.isBlank()) return true;
+        String normalized = response.toLowerCase(Locale.ROOT);
+        if (normalized.contains("cannot access")
+                || normalized.contains("can't access")
+                || normalized.contains("do not have access")
+                || normalized.contains("don't have access")
+                || normalized.contains("not available")
+                || normalized.contains("unable to")
+                || normalized.contains("i cannot")) {
+            return true;
+        }
+        String query = userText == null ? "" : userText.toLowerCase(Locale.ROOT);
+        return query.contains("organization")
+                || query.contains("product")
+                || query.contains("repo")
+                || query.contains("mcp")
+                || query.contains("api");
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> extractRequiredArgs(AgentTool tool) {
+        if (tool == null || tool.getRequestSchema() == null || tool.getRequestSchema().isBlank()) {
+            return List.of();
+        }
+        try {
+            Object parsed = objectMapper.readValue(tool.getRequestSchema(), Object.class);
+            if (parsed instanceof Map<?, ?> root) {
+                Object schema = root.containsKey("inputSchema") ? root.get("inputSchema") : root;
+                if (schema instanceof Map<?, ?> schemaMap) {
+                    Object required = schemaMap.get("required");
+                    if (required instanceof List<?> list) {
+                        return list.stream().filter(v -> v != null).map(String::valueOf).toList();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return List.of();
+    }
+
+    private boolean containsToken(String low, String arg) {
+        if (low == null || low.isBlank() || arg == null || arg.isBlank()) return false;
+        String normalized = arg.toLowerCase(Locale.ROOT).replace("_", " ").replace("-", " ");
+        if (low.contains(normalized)) return true;
+        for (String token : normalized.split("\\s+")) {
+            if (!token.isBlank() && low.contains(token)) return true;
+        }
+        return false;
+    }
+
+    private void recordSelectionSignals(String sessionId,
+                                        String userText,
+                                        List<AgentTool> toolShortlist,
+                                        String response,
+                                        boolean expandedAttempt) {
+        if (toolShortlist == null || toolShortlist.isEmpty()) return;
+        double delta = (response == null || response.isBlank()) ? -0.25 : 0.35;
+        if (expandedAttempt) delta = delta / 2.0;
+        Map<String, Double> map = toolMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        Map<String, Double> domainMap = toolDomainMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        String userId = UserContextHolder.currentUserId();
+        for (AgentTool tool : toolShortlist) {
+            if (tool == null || tool.getName() == null) continue;
+            map.merge(tool.getName(), delta, Double::sum);
+            if (tool.getDomainId() != null && !tool.getDomainId().isBlank()) {
+                domainMap.merge(tool.getDomainId(), delta, Double::sum);
+            }
+            if (memoryService != null && userId != null && !userId.isBlank()) {
+                memoryService.recordToolSignal(userId, tool.getName(), delta);
+                if (tool.getDomainId() != null && !tool.getDomainId().isBlank()) {
+                    memoryService.recordToolDomainSignal(userId, tool.getDomainId(), delta);
+                }
+            }
+        }
+        List<SkillRegistryService.SkillSnapshot> skillShortlist = buildSkillShortlist(userText, sessionId, expandedAttempt);
+        if (skillShortlist.isEmpty()) return;
+        Map<String, Double> skillMap = skillMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        for (SkillRegistryService.SkillSnapshot snapshot : skillShortlist) {
+            if (snapshot == null || snapshot.skill() == null || snapshot.skill().getName() == null) continue;
+            skillMap.merge(snapshot.skill().getName(), delta, Double::sum);
+            if (memoryService != null && userId != null && !userId.isBlank()) {
+                memoryService.recordSkillSignal(userId, snapshot.skill().getName(), delta);
+            }
+        }
     }
 
     private boolean shouldCompactLoopContext(AgentSession session, ChatState state) {
@@ -429,34 +633,6 @@ public class AgentRuntimeService {
                 compaction.removedMessages(),
                 compaction.retainedMessages(),
                 compaction.estimatedTokens());
-    }
-
-    private boolean shouldForceToolContinuation(String userText,
-                                                int step,
-                                                String workingContext,
-                                                AgentOrchestrator.StepDecision decision,
-                                                String finalResponse) {
-        if (step != 1) return false;
-        if (!isRepositoryAccountQuery(userText)) return false;
-        String context = workingContext == null ? "" : workingContext;
-        boolean hasToolEvidence = context.contains("Tool '") && context.contains(" returned:");
-        if (hasToolEvidence) return false;
-        String reply = finalResponse == null ? "" : finalResponse.toLowerCase(Locale.ROOT);
-        if (reply.contains("don't have access")
-                || reply.contains("do not have access")
-                || reply.contains("i don’t have access")
-                || reply.contains("can't access")
-                || reply.contains("cannot access")) {
-            return true;
-        }
-        return decision == null || !"tools".equalsIgnoreCase(decision.mode());
-    }
-
-    private boolean isRepositoryAccountQuery(String userText) {
-        if (userText == null || userText.isBlank()) return false;
-        String low = userText.toLowerCase(Locale.ROOT);
-        return (low.contains("repo") || low.contains("repository") || low.contains("project"))
-                && (low.contains("my") || low.contains("account") || low.contains("mine"));
     }
 
     private ToolRunOutcome executeModelRequestedTool(AgentSession session,
@@ -1075,7 +1251,7 @@ public class AgentRuntimeService {
         try {
             List<Map<String, Object>> toolCatalog = tools.stream()
                     .limit(80)
-                    .map(runtimeToolDescriptorService::toDescriptor)
+                    .map(runtimeToolDescriptorService::toCompactDescriptor)
                     .toList();
 
             String prompt = "User request:\n" + userText + "\n\n"
@@ -1128,14 +1304,25 @@ public class AgentRuntimeService {
     }
 
     private String buildSelectedSkillContext(AgentSession session, String userText, ChatState state) {
+        return buildSelectedSkillContext(session, userText, state, false);
+    }
+
+    private String buildSelectedSkillContext(AgentSession session, String userText, ChatState state, boolean expanded) {
         List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
         if (skills.isEmpty()) return "";
         SkillContextMode mode = resolveSkillContextMode(userText);
         if (mode == SkillContextMode.NONE) return "";
         if (mode == SkillContextMode.CATALOG_ONLY) return buildSkillCatalogContext(skills);
+        List<SkillRegistryService.SkillSnapshot> shortlisted = buildSkillShortlist(userText, session.getSessionId(), expanded);
+        if (shortlisted.isEmpty()) {
+            if (runtimeTuningProperties.isSkillShortlistFallbackToCatalogOnMiss()) {
+                return buildSkillCatalogContext(skills);
+            }
+            shortlisted = skills;
+        }
 
         try {
-            List<Map<String, String>> skillCatalog = skills.stream()
+            List<Map<String, String>> skillCatalog = shortlisted.stream()
                     .limit(40)
                     .map(s -> Map.of(
                             "name", s.skill().getName(),
@@ -1170,15 +1357,16 @@ public class AgentRuntimeService {
             }
             if (selected.isEmpty()) return "";
 
-            List<String> selectedNormalized = selected.stream().map(String::trim).filter(s -> !s.isBlank()).limit(3).toList();
-            List<SkillRegistryService.SkillSnapshot> selectedSkills = skills.stream()
+            int skillLimit = resolveSkillShortlistSize(expanded);
+            List<String> selectedNormalized = selected.stream().map(String::trim).filter(s -> !s.isBlank()).limit(skillLimit).toList();
+            List<SkillRegistryService.SkillSnapshot> selectedSkills = shortlisted.stream()
                     .filter(s -> selectedNormalized.stream().anyMatch(name -> name.equalsIgnoreCase(s.skill().getName())))
-                    .limit(3)
+                    .limit(skillLimit)
                     .toList();
             if (selectedSkills.isEmpty()) {
-                selectedSkills = fallbackSelectSkills(userText, skills);
+                selectedSkills = fallbackSelectSkills(userText, shortlisted, skillLimit);
             }
-            if (selectedSkills.isEmpty()) return buildSkillCatalogContext(skills);
+            if (selectedSkills.isEmpty()) return buildSkillCatalogContext(shortlisted);
 
             StringBuilder context = new StringBuilder();
             context.append("<skill_workspace_manifest>\n");
@@ -1231,12 +1419,93 @@ public class AgentRuntimeService {
             return context.toString().trim();
         } catch (Exception e) {
             log.warn("[AgentRuntime] AI skill selector failed, continuing without skill context: {}", e.getMessage());
-            List<SkillRegistryService.SkillSnapshot> fallback = fallbackSelectSkills(userText, skills);
+            List<SkillRegistryService.SkillSnapshot> fallback = fallbackSelectSkills(userText, shortlisted, resolveSkillShortlistSize(expanded));
             if (!fallback.isEmpty()) {
                 return buildSkillContentContext(session, fallback);
             }
-            return buildSkillCatalogContext(skills);
+            return buildSkillCatalogContext(shortlisted);
         }
+    }
+
+    private List<SkillRegistryService.SkillSnapshot> buildSkillShortlist(String userText,
+                                                                         String sessionId,
+                                                                         boolean expanded) {
+        List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
+        if (!runtimeTuningProperties.isDynamicSkillExposureEnabled() || skills.size() <= 1) {
+            return skills;
+        }
+        int shortlistSize = resolveSkillShortlistSize(expanded);
+        if (skills.size() <= shortlistSize) return skills;
+
+        Set<String> userTokens = tokenize(userText);
+        Map<String, Double> memoryScores = loadSkillMemorySignals(sessionId);
+        double memoryWeight = Math.max(0.0, runtimeTuningProperties.getSkillMemoryBiasWeight());
+        List<Map.Entry<SkillRegistryService.SkillSnapshot, Double>> ranked = skills.stream()
+                .map(snapshot -> {
+                    int lexical = scoreSkill(userTokens, snapshot);
+                    String name = snapshot.skill() == null ? "" : snapshot.skill().getName();
+                    double score = lexical + (memoryScores.getOrDefault(name, 0.0) * memoryWeight * 10.0);
+                    return Map.entry(snapshot, score);
+                })
+                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
+                .toList();
+        List<SkillRegistryService.SkillSnapshot> selected = ranked.stream()
+                .limit(shortlistSize)
+                .map(Map.Entry::getKey)
+                .toList();
+        if (selected.isEmpty() && runtimeTuningProperties.isSkillShortlistFallbackToCatalogOnMiss()) {
+            return skills;
+        }
+        return selected;
+    }
+
+    private Map<String, Double> loadToolMemorySignals(String sessionId) {
+        Map<String, Double> sessionSignals = toolMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        String userId = UserContextHolder.currentUserId();
+        if (memoryService == null || userId == null || userId.isBlank()) {
+            return sessionSignals;
+        }
+        Map<String, Double> persisted = memoryService.loadToolSignals(userId);
+        if (persisted == null || persisted.isEmpty()) {
+            return sessionSignals;
+        }
+        persisted.forEach((k, v) -> sessionSignals.merge(k, v, Double::sum));
+        return sessionSignals;
+    }
+
+    private Map<String, Double> loadSkillMemorySignals(String sessionId) {
+        Map<String, Double> sessionSignals = skillMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        String userId = UserContextHolder.currentUserId();
+        if (memoryService == null || userId == null || userId.isBlank()) {
+            return sessionSignals;
+        }
+        Map<String, Double> persisted = memoryService.loadSkillSignals(userId);
+        if (persisted == null || persisted.isEmpty()) {
+            return sessionSignals;
+        }
+        persisted.forEach((k, v) -> sessionSignals.merge(k, v, Double::sum));
+        return sessionSignals;
+    }
+
+    private Map<String, Double> loadToolDomainMemorySignals(String sessionId) {
+        Map<String, Double> sessionSignals = toolDomainMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
+        String userId = UserContextHolder.currentUserId();
+        if (memoryService == null || userId == null || userId.isBlank()) {
+            return sessionSignals;
+        }
+        Map<String, Double> persisted = memoryService.loadToolDomainSignals(userId);
+        if (persisted == null || persisted.isEmpty()) {
+            return sessionSignals;
+        }
+        persisted.forEach((k, v) -> sessionSignals.merge(k, v, Double::sum));
+        return sessionSignals;
+    }
+
+    private int resolveSkillShortlistSize(boolean expanded) {
+        int size = expanded
+                ? runtimeTuningProperties.getSkillShortlistExpandedSize()
+                : runtimeTuningProperties.getSkillShortlistDefaultSize();
+        return Math.max(1, size);
     }
 
     private SkillContextMode resolveSkillContextMode(String userText) {
@@ -1310,7 +1579,9 @@ public class AgentRuntimeService {
         return context.toString();
     }
 
-    private List<SkillRegistryService.SkillSnapshot> fallbackSelectSkills(String userText, List<SkillRegistryService.SkillSnapshot> skills) {
+    private List<SkillRegistryService.SkillSnapshot> fallbackSelectSkills(String userText,
+                                                                          List<SkillRegistryService.SkillSnapshot> skills,
+                                                                          int limit) {
         if (userText == null || skills == null || skills.isEmpty()) return List.of();
         Set<String> tokens = tokenize(userText);
         return skills.stream()
@@ -1318,7 +1589,7 @@ public class AgentRuntimeService {
                 .filter(entry -> entry.getValue() > 0)
                 .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
                 .map(Map.Entry::getKey)
-                .limit(2)
+                .limit(Math.max(1, limit))
                 .toList();
     }
 

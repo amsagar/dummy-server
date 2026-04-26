@@ -51,9 +51,19 @@ public class ToolImportService {
             Map<String, Object> paths = (Map<String, Object>) root.get("paths");
             if (paths == null || paths.isEmpty()) return imported;
             OpenApiBaseParts baseParts = resolveOpenApiBase(root);
+            Map<String, AgentTool> existingByName = new HashMap<>();
+            for (AgentTool existing : toolRepository.findByDomainId(domainId)) {
+                if (existing.getName() != null && !existing.getName().isBlank()) {
+                    existingByName.put(existing.getName().toLowerCase(Locale.ROOT), existing);
+                }
+            }
 
             paths.forEach((path, methodsObj) -> {
                 if (!(methodsObj instanceof Map<?, ?> methods)) return;
+                @SuppressWarnings("unchecked")
+                List<Object> pathParameters = methods.get("parameters") instanceof List<?> list
+                        ? (List<Object>) list
+                        : List.of();
                 methods.forEach((methodRaw, operationObj) -> {
                     String method = String.valueOf(methodRaw).toUpperCase(Locale.ROOT);
                     if (!SUPPORTED_OPENAPI_METHODS.contains(method)) return;
@@ -73,13 +83,34 @@ public class ToolImportService {
                             .method(method)
                             .host(baseParts.host())
                             .endpoint(joinOpenApiPaths(baseParts.basePath(), path))
-                            .requestSchema(String.valueOf(operation.getOrDefault("requestBody", "{}")))
-                            .responseSchema(String.valueOf(operation.getOrDefault("responses", "{}")))
+                            .requestSchema(toJson(Map.of(
+                                    "inputSchema", buildOperationInputSchema(operation, pathParameters),
+                                    "requestBody", operation.getOrDefault("requestBody", Map.of())
+                            )))
+                            .responseSchema(toJson(operation.getOrDefault("responses", Map.of())))
                             .sampleRequest("{}")
                             .sampleResponse("{}")
                             .enabled(enabled)
                             .build();
-                    imported.add(toolRepository.save(tool));
+                    AgentTool existing = existingByName.get(toolName.toLowerCase(Locale.ROOT));
+                    if (existing != null) {
+                        existing.setDescription(tool.getDescription());
+                        existing.setSourceType(tool.getSourceType());
+                        existing.setMethod(tool.getMethod());
+                        existing.setHost(tool.getHost());
+                        existing.setEndpoint(tool.getEndpoint());
+                        existing.setRequestSchema(tool.getRequestSchema());
+                        existing.setResponseSchema(tool.getResponseSchema());
+                        existing.setSampleRequest(tool.getSampleRequest());
+                        existing.setSampleResponse(tool.getSampleResponse());
+                        existing.setEnabled(tool.isEnabled());
+                        toolRepository.update(existing);
+                        imported.add(existing);
+                    } else {
+                        AgentTool saved = toolRepository.save(tool);
+                        existingByName.put(saved.getName().toLowerCase(Locale.ROOT), saved);
+                        imported.add(saved);
+                    }
                 });
             });
             log.info("[ToolImportService] Imported {} tools from OpenAPI into domain={}", imported.size(), domainId);
@@ -314,6 +345,121 @@ public class ToolImportService {
         if (url == null || url.isBlank()) return "/";
         if (url.startsWith("http://") || url.startsWith("https://")) return url;
         return "/" + url.replaceAll("^/+", "");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> buildOperationInputSchema(Map<String, Object> operation, List<Object> pathParameters) {
+        Map<String, Object> schema = new HashMap<>();
+        schema.put("type", "object");
+        Map<String, Object> properties = new HashMap<>();
+        List<String> required = new ArrayList<>();
+
+        List<Object> operationParameters = operation.get("parameters") instanceof List<?> params
+                ? new ArrayList<>(params)
+                : List.of();
+        List<Object> mergedParameters = new ArrayList<>(pathParameters == null ? List.of() : pathParameters);
+        mergedParameters.addAll(operationParameters);
+        Map<String, Object> mergedByKey = new HashMap<>();
+        List<Object> ordered = new ArrayList<>();
+        for (Object paramObj : mergedParameters) {
+            if (!(paramObj instanceof Map<?, ?> rawParam)) continue;
+            Map<String, Object> param = (Map<String, Object>) rawParam;
+            String name = asText(param.get("name"));
+            if (name == null || name.isBlank()) continue;
+            String in = asText(param.get("in"));
+            String paramKey = (in == null ? "" : in.toLowerCase(Locale.ROOT)) + ":" + name.toLowerCase(Locale.ROOT);
+            if (!mergedByKey.containsKey(paramKey)) {
+                ordered.add(paramKey);
+            }
+            mergedByKey.put(paramKey, paramObj);
+        }
+        for (Object keyObj : ordered) {
+            String paramKey = String.valueOf(keyObj);
+            Object paramObj = mergedByKey.get(paramKey);
+            if (!(paramObj instanceof Map<?, ?> rawParam)) continue;
+            Map<String, Object> param = (Map<String, Object>) rawParam;
+            String name = asText(param.get("name"));
+            if (name == null || name.isBlank()) continue;
+
+            Object paramSchema = param.get("schema");
+            Map<String, Object> normalizedParamSchema;
+            if (paramSchema instanceof Map<?, ?> rawParamSchema) {
+                normalizedParamSchema = new HashMap<>((Map<String, Object>) rawParamSchema);
+            } else {
+                normalizedParamSchema = Map.of("type", "string");
+            }
+            String description = asText(param.get("description"));
+            if (description != null && !description.isBlank() && !normalizedParamSchema.containsKey("description")) {
+                normalizedParamSchema = new HashMap<>(normalizedParamSchema);
+                normalizedParamSchema.put("description", description);
+            }
+            properties.put(name, normalizedParamSchema);
+            if (Boolean.TRUE.equals(param.get("required"))) {
+                required.add(name);
+            }
+        }
+
+        Map<String, Object> requestBodySchema = extractRequestBodySchema(operation.get("requestBody"));
+        if (requestBodySchema != null && !requestBodySchema.isEmpty()) {
+            Object bodyType = requestBodySchema.get("type");
+            Object bodyProps = requestBodySchema.get("properties");
+            if ("object".equals(bodyType) && bodyProps instanceof Map<?, ?> bodyMap) {
+                for (Map.Entry<?, ?> entry : bodyMap.entrySet()) {
+                    if (entry.getKey() != null) {
+                        properties.put(String.valueOf(entry.getKey()), entry.getValue());
+                    }
+                }
+                Object bodyRequired = requestBodySchema.get("required");
+                if (bodyRequired instanceof List<?> reqList) {
+                    for (Object req : reqList) {
+                        if (req != null) required.add(String.valueOf(req));
+                    }
+                }
+            } else {
+                properties.put("body", requestBodySchema);
+            }
+        }
+
+        schema.put("properties", properties);
+        if (!required.isEmpty()) {
+            schema.put("required", required.stream().distinct().toList());
+        }
+        return schema;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractRequestBodySchema(Object requestBodyObj) {
+        if (!(requestBodyObj instanceof Map<?, ?> rawBody)) return Map.of();
+        Map<String, Object> requestBody = (Map<String, Object>) rawBody;
+        Object contentObj = requestBody.get("content");
+        if (contentObj instanceof Map<?, ?> rawContent && !rawContent.isEmpty()) {
+            Map<String, Object> content = (Map<String, Object>) rawContent;
+            for (String key : List.of("application/json", "multipart/form-data", "application/x-www-form-urlencoded")) {
+                Object mediaObj = content.get(key);
+                Map<String, Object> schema = extractMediaSchema(mediaObj);
+                if (schema != null && !schema.isEmpty()) return schema;
+            }
+            for (Object mediaObj : content.values()) {
+                Map<String, Object> schema = extractMediaSchema(mediaObj);
+                if (schema != null && !schema.isEmpty()) return schema;
+            }
+        }
+        Object schemaObj = requestBody.get("schema");
+        if (schemaObj instanceof Map<?, ?> rawSchema) {
+            return new HashMap<>((Map<String, Object>) rawSchema);
+        }
+        return Map.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractMediaSchema(Object mediaObj) {
+        if (!(mediaObj instanceof Map<?, ?> rawMedia)) return null;
+        Map<String, Object> media = (Map<String, Object>) rawMedia;
+        Object schemaObj = media.get("schema");
+        if (schemaObj instanceof Map<?, ?> rawSchema) {
+            return new HashMap<>((Map<String, Object>) rawSchema);
+        }
+        return null;
     }
 
     private record OpenApiBaseParts(String host, String basePath) {}

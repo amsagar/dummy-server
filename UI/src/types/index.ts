@@ -95,6 +95,34 @@ export interface AgentTool {
   responseSchema?: string;
   sampleRequest?: string;
   sampleResponse?: string;
+  authProfileId?: string;
+  authOverrideEnabled?: boolean;
+  authType?: string;
+  authConfig?: string | Record<string, unknown>;
+  clientId?: string;
+  tokenUrl?: string;
+  authorizationUrl?: string;
+  redirectUri?: string;
+  scopes?: string;
+  tokenExpiresAt?: number;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ToolAuthProfile {
+  id: string;
+  domainId: string;
+  name: string;
+  description?: string;
+  authType: string;
+  authConfig?: Record<string, unknown> | string;
+  clientId?: string;
+  tokenUrl?: string;
+  authorizationUrl?: string;
+  redirectUri?: string;
+  scopes?: string;
+  tokenExpiresAt?: number | null;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;

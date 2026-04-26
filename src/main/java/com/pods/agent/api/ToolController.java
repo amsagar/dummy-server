@@ -17,6 +17,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.Map;
 
@@ -29,17 +30,20 @@ public class ToolController {
     private final ToolImportService toolImportService;
     private final ToolRegistryService toolRegistryService;
     private final FrameworkToolPackService frameworkToolPackService;
+    private final ObjectMapper objectMapper;
 
     public ToolController(AgentDomainRepository domainRepository,
                           AgentToolRepository toolRepository,
                           ToolImportService toolImportService,
                           ToolRegistryService toolRegistryService,
-                          FrameworkToolPackService frameworkToolPackService) {
+                          FrameworkToolPackService frameworkToolPackService,
+                          ObjectMapper objectMapper) {
         this.domainRepository = domainRepository;
         this.toolRepository = toolRepository;
         this.toolImportService = toolImportService;
         this.toolRegistryService = toolRegistryService;
         this.frameworkToolPackService = frameworkToolPackService;
+        this.objectMapper = objectMapper;
     }
 
     @GetMapping
@@ -93,7 +97,7 @@ public class ToolController {
         if (domainRepository.findById(domainId).isEmpty()) {
             return ResponseEntityFactory.notFound("Tool domain not found: " + domainId);
         }
-        return ResponseEntity.ok(toolRepository.findByDomainId(domainId));
+        return ResponseEntity.ok(toolRepository.findByDomainId(domainId).stream().map(this::publicToolView).toList());
     }
 
     @PostMapping("/{domainId}/tools")
@@ -123,11 +127,38 @@ public class ToolController {
                 .responseSchema(request.getResponseSchema())
                 .sampleRequest(request.getSampleRequest())
                 .sampleResponse(request.getSampleResponse())
+                .authProfileId(request.getAuthProfileId())
+                .authOverrideEnabled(Boolean.TRUE.equals(request.getAuthOverrideEnabled()))
+                .authType(request.getAuthType())
+                .authConfig(request.getAuthConfig())
+                .clientId(request.getClientId())
+                .tokenUrl(request.getTokenUrl())
+                .authorizationUrl(request.getAuthorizationUrl())
+                .redirectUri(request.getRedirectUri())
+                .scopes(request.getScopes())
+                .tokenExpiresAt(request.getTokenExpiresAt())
                 .enabled(Boolean.TRUE.equals(request.getEnabled()))
                 .build();
         AgentTool saved = toolRepository.save(tool);
+        toolRepository.updateAuthBinding(
+                saved.getId(),
+                saved.getAuthProfileId(),
+                saved.getAuthOverrideEnabled(),
+                saved.getAuthType(),
+                saved.getAuthConfig(),
+                saved.getClientId(),
+                saved.getEncryptedClientSecret(),
+                saved.getTokenUrl(),
+                saved.getAuthorizationUrl(),
+                saved.getRedirectUri(),
+                saved.getScopes(),
+                saved.getEncryptedAccessToken(),
+                saved.getEncryptedRefreshToken(),
+                saved.getTokenExpiresAt()
+        );
+        saved = toolRepository.findById(saved.getId()).orElse(saved);
         toolRegistryService.refresh();
-        return ResponseEntity.ok(saved);
+        return ResponseEntity.ok(publicToolView(saved));
     }
 
     @PatchMapping("/{domainId}/tools/{toolId}")
@@ -158,10 +189,37 @@ public class ToolController {
         tool.setResponseSchema(request.getResponseSchema());
         tool.setSampleRequest(request.getSampleRequest());
         tool.setSampleResponse(request.getSampleResponse());
+        tool.setAuthProfileId(request.getAuthProfileId());
+        tool.setAuthOverrideEnabled(Boolean.TRUE.equals(request.getAuthOverrideEnabled()));
+        tool.setAuthType(request.getAuthType());
+        tool.setAuthConfig(request.getAuthConfig());
+        tool.setClientId(request.getClientId());
+        tool.setTokenUrl(request.getTokenUrl());
+        tool.setAuthorizationUrl(request.getAuthorizationUrl());
+        tool.setRedirectUri(request.getRedirectUri());
+        tool.setScopes(request.getScopes());
+        tool.setTokenExpiresAt(request.getTokenExpiresAt());
         tool.setEnabled(Boolean.TRUE.equals(request.getEnabled()));
         toolRepository.update(tool);
+        toolRepository.updateAuthBinding(
+                tool.getId(),
+                tool.getAuthProfileId(),
+                tool.getAuthOverrideEnabled(),
+                tool.getAuthType(),
+                tool.getAuthConfig(),
+                tool.getClientId(),
+                tool.getEncryptedClientSecret(),
+                tool.getTokenUrl(),
+                tool.getAuthorizationUrl(),
+                tool.getRedirectUri(),
+                tool.getScopes(),
+                tool.getEncryptedAccessToken(),
+                tool.getEncryptedRefreshToken(),
+                tool.getTokenExpiresAt()
+        );
+        tool = toolRepository.findById(tool.getId()).orElse(tool);
         toolRegistryService.refresh();
-        return ResponseEntity.ok(tool);
+        return ResponseEntity.ok(publicToolView(tool));
     }
 
     @PostMapping("/{domainId}/tools/{toolId}/enable")
@@ -272,5 +330,57 @@ public class ToolController {
         if (domain == null || domain.getName() == null) return false;
         String normalized = domain.getName().trim().toLowerCase();
         return normalized.startsWith("mcp ") || normalized.startsWith("framework ");
+    }
+
+    private Map<String, Object> publicToolView(AgentTool tool) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("id", tool.getId());
+        out.put("domainId", tool.getDomainId());
+        out.put("name", tool.getName());
+        out.put("description", tool.getDescription());
+        out.put("sourceType", tool.getSourceType());
+        out.put("executionKind", tool.getExecutionKind());
+        out.put("permissionScope", tool.getPermissionScope());
+        out.put("requiresApproval", tool.isRequiresApproval());
+        out.put("modelGate", tool.getModelGate());
+        out.put("providerGate", tool.getProviderGate());
+        out.put("experimental", tool.isExperimental());
+        out.put("inputSchemaVersion", tool.getInputSchemaVersion());
+        out.put("method", tool.getMethod());
+        out.put("host", tool.getHost());
+        out.put("endpoint", tool.getEndpoint());
+        out.put("requestSchema", tool.getRequestSchema());
+        out.put("responseSchema", tool.getResponseSchema());
+        out.put("sampleRequest", tool.getSampleRequest());
+        out.put("sampleResponse", tool.getSampleResponse());
+        out.put("authProfileId", tool.getAuthProfileId());
+        out.put("authOverrideEnabled", Boolean.TRUE.equals(tool.getAuthOverrideEnabled()));
+        out.put("authType", tool.getAuthType());
+        out.put("authConfig", redactAuthConfig(tool.getAuthConfig()));
+        out.put("clientId", tool.getClientId());
+        out.put("tokenUrl", tool.getTokenUrl());
+        out.put("authorizationUrl", tool.getAuthorizationUrl());
+        out.put("redirectUri", tool.getRedirectUri());
+        out.put("scopes", tool.getScopes());
+        out.put("hasAccessToken", tool.getEncryptedAccessToken() != null && !tool.getEncryptedAccessToken().isBlank());
+        out.put("tokenExpiresAt", tool.getTokenExpiresAt());
+        out.put("enabled", tool.isEnabled());
+        out.put("createdAt", tool.getCreatedAt());
+        out.put("updatedAt", tool.getUpdatedAt());
+        return out;
+    }
+
+    private Object redactAuthConfig(String raw) {
+        if (raw == null || raw.isBlank()) return Map.of();
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(raw, Map.class);
+            if (parsed.containsKey("apiKey")) parsed.put("apiKey", "***");
+            if (parsed.containsKey("token")) parsed.put("token", "***");
+            if (parsed.containsKey("password")) parsed.put("password", "***");
+            if (parsed.containsKey("clientSecret")) parsed.put("clientSecret", "***");
+            return parsed;
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 }

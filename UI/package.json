@@ -24,6 +24,7 @@
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "js-yaml": "^4.1.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.38.0",
     "next-themes": "^0.4.6",
@@ -43,6 +44,7 @@
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.19",
     "@types/express": "^4.17.21",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",

@@ -82,7 +82,7 @@ class ToolExecutionServiceTest {
         McpClientService mcpClientService = mock(McpClientService.class);
         when(mcpClientService.callTool("srv-1", "code_widget_create", "{\"query\":\"test\"}"))
                 .thenReturn("{\"content\":[{\"type\":\"text\",\"text\":\"Not found: Unknown tool: 'code_widget_create'\"}],\"isError\":true}");
-        ToolExecutionService service = new ToolExecutionService(new ObjectMapper(), mcpClientService, null, null);
+        ToolExecutionService service = new ToolExecutionService(new ObjectMapper(), mcpClientService, null, null, null);
         AgentTool tool = AgentTool.builder()
                 .id("5")
                 .name("mcp_code_widget_create")

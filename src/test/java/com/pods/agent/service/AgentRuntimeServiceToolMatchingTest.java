@@ -3,6 +3,7 @@ package com.pods.agent.service;
 import com.pods.agent.agent.AgentOrchestrator;
 import com.pods.agent.agent.AgentSession;
 import com.pods.agent.agent.SseEventSender;
+import com.pods.agent.agent.tool.AgentToolCallbackFactory;
 import com.pods.agent.api.dto.ChatState;
 import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuntimeTuningProperties;
@@ -179,7 +180,7 @@ class AgentRuntimeServiceToolMatchingTest {
         assertTrue(response.contains("Available skills"));
         assertTrue(response.contains("pdf"));
         assertTrue(response.contains("skill-creator"));
-        verify(fixture.orchestrator(), never()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator(), never()).streamTurn(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -204,7 +205,7 @@ class AgentRuntimeServiceToolMatchingTest {
         fixture.service().runTurn(session, "Please merge pdf files for me", state, sender);
 
         ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
-        verify(fixture.orchestrator()).chat(any(), userPrompt.capture(), any(), any());
+        verify(fixture.orchestrator()).streamTurn(any(), userPrompt.capture(), any(), any(), any());
         String composedPrompt = userPrompt.getValue();
         assertTrue(composedPrompt.contains("<skill_content name=\"pdf\">"));
         assertTrue(composedPrompt.contains("workspace://skills"));
@@ -224,7 +225,7 @@ class AgentRuntimeServiceToolMatchingTest {
         String response = fixture.service().runTurn(session, "Who is the president of mars?", state, sender);
 
         assertEquals("I can’t answer this because it is outside my allowed skills/tools scope.", response);
-        verify(fixture.orchestrator(), never()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator(), never()).streamTurn(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -240,7 +241,7 @@ class AgentRuntimeServiceToolMatchingTest {
         String response = fixture.service().runTurn(session, "Write a Java method to reverse a string.", state, sender);
 
         assertEquals("I can’t answer this because it is outside my allowed skills/tools scope.", response);
-        verify(fixture.orchestrator(), never()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator(), never()).streamTurn(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -264,7 +265,7 @@ class AgentRuntimeServiceToolMatchingTest {
 
         assertEquals("orchestrator-response", response);
         verify(sender).sendToolMatch(eq("s-strict-in-scope"), eq("getInventory"), any(Integer.class), eq(false), any(), any(List.class));
-        verify(fixture.orchestrator()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator()).streamTurn(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -288,7 +289,7 @@ class AgentRuntimeServiceToolMatchingTest {
 
         assertEquals("I can’t answer this because it is outside my allowed skills/tools scope.", response);
         verify(sender, never()).sendToolCall(any(), any(), any());
-        verify(fixture.orchestrator(), never()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator(), never()).streamTurn(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -312,7 +313,7 @@ class AgentRuntimeServiceToolMatchingTest {
 
         assertEquals("I can’t answer this because it is outside my allowed skills/tools scope.", response);
         verify(sender, never()).sendToolCall(any(), any(), any());
-        verify(fixture.orchestrator(), never()).chat(any(), any(), any(), any());
+        verify(fixture.orchestrator(), never()).streamTurn(any(), any(), any(), any(), any());
     }
 
     private AgentRuntimeService buildService(List<AgentTool> enabledTools,
@@ -331,6 +332,7 @@ class AgentRuntimeServiceToolMatchingTest {
                                         PendingInteractionService pendingInteractionService) {
         AgentOrchestrator orchestrator = mock(AgentOrchestrator.class);
         when(orchestrator.chat(any(), any(), any(), any())).thenReturn("orchestrator-response");
+        when(orchestrator.streamTurn(any(), any(), any(), any(), any())).thenReturn("orchestrator-response");
 
         ToolRegistryService toolRegistryService = mock(ToolRegistryService.class);
         when(toolRegistryService.getEnabledTools()).thenReturn(enabledTools);
@@ -351,6 +353,9 @@ class AgentRuntimeServiceToolMatchingTest {
         McpRuntimeAdapter mcpRuntimeAdapter = mock(McpRuntimeAdapter.class);
         when(mcpRuntimeAdapter.listRuntimeTools()).thenReturn(List.of());
         ContextSummarizationService summarizationService = mock(ContextSummarizationService.class);
+        MemoryService memoryService = mock(MemoryService.class);
+        AgentToolCallbackFactory agentToolCallbackFactory = mock(AgentToolCallbackFactory.class);
+        when(agentToolCallbackFactory.buildForTurn(any(), any(), any(), any())).thenReturn(List.of());
 
         AgentRuntimeService service = new AgentRuntimeService(
                 orchestrator,
@@ -368,7 +373,9 @@ class AgentRuntimeServiceToolMatchingTest {
                 mcpRuntimeAdapter,
                 summarizationService,
                 properties,
-                new ObjectMapper()
+                new ObjectMapper(),
+                memoryService,
+                agentToolCallbackFactory
         );
         return new ServiceFixture(service, orchestrator, skillRegistryService);
     }

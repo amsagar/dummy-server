@@ -23,5 +23,18 @@ public class ToolRequest {
     private String responseSchema;
     private String sampleRequest;
     private String sampleResponse;
+    private String authProfileId;
+    private Boolean authOverrideEnabled = false;
+    private String authType;
+    private String authConfig;
+    private String clientId;
+    private String clientSecret;
+    private String tokenUrl;
+    private String authorizationUrl;
+    private String redirectUri;
+    private String scopes;
+    private String accessToken;
+    private String refreshToken;
+    private Long tokenExpiresAt;
     private Boolean enabled = true;
 }

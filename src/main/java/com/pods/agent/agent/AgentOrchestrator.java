@@ -13,6 +13,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
@@ -52,14 +53,6 @@ public class AgentOrchestrator {
     private final ObjectMapper objectMapper;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
-
-    public record ToolIntent(String name, Map<String, Object> arguments) {}
-    public record StepDecision(String mode,
-                               String reason,
-                               List<ToolIntent> toolCalls,
-                               String finalResponse,
-                               String finishReason,
-                               String assistantMessage) {}
 
     public AgentOrchestrator(ModelProviderRouter modelProviderRouter,
                              SkillRegistryService skillRegistryService,
@@ -126,93 +119,65 @@ public class AgentOrchestrator {
         }
     }
 
-    public StepDecision decideNextStep(AgentSession session,
-                                       String userText,
-                                       ChatState state,
-                                       List<Map<String, Object>> toolCatalog,
-                                       int stepNumber) {
-        try {
-            ModelRef modelRef = state != null ? state.getModel() : null;
-            ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
-            ChatClient client = modelSpec.client();
-            StringBuilder prompt = new StringBuilder();
-            prompt.append("Step: ").append(stepNumber).append("\n\n");
-            prompt.append("User/request context:\n").append(userText == null ? "" : userText).append("\n\n");
-            prompt.append("Available tools JSON:\n").append(objectMapper.writeValueAsString(toolCatalog == null ? List.of() : toolCatalog)).append("\n\n");
-            prompt.append("Return ONLY JSON with exact shape:\n");
-            prompt.append("{\"mode\":\"tools|final\",\"reason\":\"short_reason\",\"finishReason\":\"stop|continue|compact|error\",\"toolCalls\":[{\"name\":\"tool_name\",\"arguments\":{}}],\"finalResponse\":\"assistant response when mode=final\",\"assistantMessage\":\"optional short user-facing message for this step\"}\n");
-            prompt.append("Rules:\n");
-            prompt.append("1) Choose mode='tools' only when tool execution is required for accurate answer.\n");
-            prompt.append("2) Choose mode='final' when enough context exists to answer user.\n");
-            prompt.append("3) If mode='tools', include 1-3 concrete toolCalls with valid arguments.\n");
-            prompt.append("4) Never invent unavailable tool names.\n");
-            prompt.append("5) If prior tool observations are null/empty/unhelpful, continue with alternative relevant tools instead of mode='final'.\n");
-            prompt.append("6) Prefer tools whose name/description semantically matches user's latest request.\n");
-            prompt.append("7) If mode='final', finalResponse must be non-empty and directly answer the request.\n");
-            prompt.append("8) If context is too large/noisy and needs history compression before next action, set finishReason='compact'.\n");
-            prompt.append("9) assistantMessage is optional; when present keep it short and useful for user progress updates.\n");
+    /**
+     * Streams a single agent turn end-to-end via Spring AI native tool calling.
+     * The LLM produces token deltas (forwarded to {@code sender.sendTextDelta})
+     * and structured tool-use blocks; Spring AI invokes the matching
+     * {@link ToolCallback} (which itself emits tool.call/tool.result SSE events),
+     * then resumes streaming until the model completes.
+     */
+    public String streamTurn(AgentSession session,
+                             String userText,
+                             ChatState state,
+                             SseEventSender sender,
+                             List<ToolCallback> tools) {
+        ModelRef modelRef = state != null ? state.getModel() : null;
+        ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
+        ChatClient client = modelSpec.client();
 
-            String raw = client.prompt()
-                    .system("You are a strict agent step planner. Output JSON only.")
-                    .user(prompt.toString())
-                    .call()
-                    .content();
-            if (raw == null || raw.isBlank()) {
-                return new StepDecision("final", "empty_model_output", List.of(),
-                        "I could not produce a response for this step.",
-                        "error",
-                        "");
+        session.getMessages().add(new UserMessage(normalizeUserMessageForHistory(userText)));
+        applyPromptWindowGuard(session, state, userText);
+
+        log.info("[AgentOrchestrator] streamTurn: session={}, model={}, tools={}",
+                session.getSessionId(),
+                modelRef != null ? modelRef : "default",
+                tools == null ? 0 : tools.size());
+
+        try {
+            String systemPrompt = buildSystemPrompt(state, session);
+            List<Message> history = sanitizeMessageList(buildMessageList(session));
+            var promptSpec = client.prompt()
+                    .system(systemPrompt)
+                    .messages(history)
+                    .user(userText)
+                    .advisors(new org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor());
+
+            if (tools != null && !tools.isEmpty()) {
+                promptSpec = promptSpec.toolCallbacks(tools);
             }
-            String json = extractJsonObject(raw);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
-            String mode = parsed.get("mode") == null ? "final" : String.valueOf(parsed.get("mode")).toLowerCase(Locale.ROOT);
-            if (!"tools".equals(mode)) {
-                mode = "final";
+            if (modelSpec.options() != null) {
+                promptSpec = promptSpec.options(modelSpec.options());
             }
-            String reason = parsed.get("reason") == null ? "" : String.valueOf(parsed.get("reason"));
-            String finishReason = parsed.get("finishReason") == null
-                    ? ("tools".equals(mode) ? "tool-calls" : "stop")
-                    : String.valueOf(parsed.get("finishReason"));
-            String finalResponse = parsed.get("finalResponse") == null ? "" : String.valueOf(parsed.get("finalResponse"));
-            String assistantMessage = parsed.get("assistantMessage") == null ? "" : String.valueOf(parsed.get("assistantMessage"));
-            List<ToolIntent> intents = new ArrayList<>();
-            Object tc = parsed.get("toolCalls");
-            if (tc instanceof List<?> list) {
-                for (Object item : list) {
-                    if (!(item instanceof Map<?, ?> map)) continue;
-                    String name = map.get("name") == null ? "" : String.valueOf(map.get("name")).trim();
-                    if (name.isBlank()) continue;
-                    Map<String, Object> args = new LinkedHashMap<>();
-                    Object argsRaw = map.get("arguments");
-                    if (argsRaw instanceof Map<?, ?> aMap) {
-                        for (Map.Entry<?, ?> entry : aMap.entrySet()) {
-                            if (entry.getKey() == null) continue;
-                            args.put(String.valueOf(entry.getKey()), entry.getValue());
-                        }
-                    }
-                    intents.add(new ToolIntent(name, args));
-                }
+
+            StringBuilder fullResponse = new StringBuilder();
+            promptSpec.stream()
+                    .content()
+                    .doOnNext(delta -> {
+                        if (delta == null || delta.isEmpty()) return;
+                        log.debug("[AgentOrchestrator] Delta received: {}", delta);
+                        fullResponse.append(delta);
+                        sender.sendTextDelta(delta);
+                    })
+                    .blockLast();
+
+            String finalContent = fullResponse.toString();
+            if (!finalContent.isBlank()) {
+                session.getMessages().add(new AssistantMessage(finalContent));
             }
-            if ("tools".equals(mode) && intents.isEmpty()) {
-                return new StepDecision("final",
-                        reason.isBlank() ? "no_tool_calls_returned" : reason,
-                        List.of(),
-                        finalResponse,
-                        "stop",
-                        assistantMessage);
-            }
-            if ("final".equals(mode) && (finalResponse == null || finalResponse.isBlank())) {
-                finalResponse = "I could not complete the request in this step.";
-                finishReason = "error";
-            }
-            return new StepDecision(mode, reason, intents.stream().limit(3).toList(), finalResponse, finishReason, assistantMessage);
+            return finalContent.isEmpty() ? "Done." : finalContent;
         } catch (Exception e) {
-            log.warn("[AgentOrchestrator] Step decision failed: {}", e.getMessage());
-            return new StepDecision("final", "step_decision_error", List.of(),
-                    "I hit an internal step-planning error.",
-                    "error",
-                    "");
+            log.error("[AgentOrchestrator] streamTurn failed: {}", e.getMessage(), e);
+            throw e;
         }
     }
 
@@ -467,13 +432,4 @@ public class AgentOrchestrator {
         return text.substring(0, remainingChars - 20) + "\n...[truncated]";
     }
 
-    private String extractJsonObject(String raw) {
-        String text = raw == null ? "" : raw.trim();
-        int firstBrace = text.indexOf('{');
-        int lastBrace = text.lastIndexOf('}');
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return text.substring(firstBrace, lastBrace + 1);
-        }
-        return text;
-    }
 }

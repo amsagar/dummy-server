@@ -44,6 +44,25 @@ public class ToolRegistryService {
         return List.copyOf(enabledToolCache.values());
     }
 
+    /**
+     * Base tools injected by default each turn.
+     * Policy: framework defaults (includes memory tools) only.
+     */
+    public List<AgentTool> getBaseInjectedTools() {
+        return enabledToolCache.values().stream()
+                .filter(this::isFrameworkDefault)
+                .toList();
+    }
+
+    /**
+     * Non-default tools (manual/imported/MCP/etc.) used via catalog-gated flow.
+     */
+    public List<AgentTool> getNonDefaultEnabledTools() {
+        return enabledToolCache.values().stream()
+                .filter(t -> !isFrameworkDefault(t))
+                .toList();
+    }
+
     public List<AgentTool> getEnabledToolsByDomain(String domainId) {
         return enabledToolCache.values().stream()
                 .filter(t -> domainId.equals(t.getDomainId()))
@@ -68,5 +87,11 @@ public class ToolRegistryService {
                     .anyMatch(s -> s.equalsIgnoreCase(tool.getPermissionScope()));
         }
         return true;
+    }
+
+    private boolean isFrameworkDefault(AgentTool tool) {
+        if (tool == null) return false;
+        String sourceType = tool.getSourceType();
+        return sourceType != null && sourceType.equalsIgnoreCase("framework_default");
     }
 }

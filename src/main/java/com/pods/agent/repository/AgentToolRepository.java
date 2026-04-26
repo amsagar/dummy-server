@@ -64,6 +64,56 @@ public class AgentToolRepository {
         jdbc.update(sql.getQuery("TOOL.DELETE"), id);
     }
 
+    public void updateAuthBinding(String id,
+                                  String authProfileId,
+                                  Boolean authOverrideEnabled,
+                                  String authType,
+                                  String authConfig,
+                                  String clientId,
+                                  String encryptedClientSecret,
+                                  String tokenUrl,
+                                  String authorizationUrl,
+                                  String redirectUri,
+                                  String scopes,
+                                  String encryptedAccessToken,
+                                  String encryptedRefreshToken,
+                                  Long tokenExpiresAt) {
+        namedJdbc.update("""
+                        UPDATE agent.agent_tools
+                        SET auth_profile_id = :authProfileId,
+                            auth_override_enabled = :authOverrideEnabled,
+                            auth_type = :authType,
+                            auth_config = :authConfig,
+                            client_id = :clientId,
+                            encrypted_client_secret = :encryptedClientSecret,
+                            token_url = :tokenUrl,
+                            authorization_url = :authorizationUrl,
+                            redirect_uri = :redirectUri,
+                            scopes = :scopes,
+                            encrypted_access_token = :encryptedAccessToken,
+                            encrypted_refresh_token = :encryptedRefreshToken,
+                            token_expires_at = :tokenExpiresAt,
+                            updated_at = :updatedAt
+                        WHERE id = :id
+                        """,
+                new MapSqlParameterSource()
+                        .addValue("id", id)
+                        .addValue("authProfileId", authProfileId)
+                        .addValue("authOverrideEnabled", Boolean.TRUE.equals(authOverrideEnabled))
+                        .addValue("authType", authType)
+                        .addValue("authConfig", authConfig)
+                        .addValue("clientId", clientId)
+                        .addValue("encryptedClientSecret", encryptedClientSecret)
+                        .addValue("tokenUrl", tokenUrl)
+                        .addValue("authorizationUrl", authorizationUrl)
+                        .addValue("redirectUri", redirectUri)
+                        .addValue("scopes", scopes)
+                        .addValue("encryptedAccessToken", encryptedAccessToken)
+                        .addValue("encryptedRefreshToken", encryptedRefreshToken)
+                        .addValue("tokenExpiresAt", tokenExpiresAt)
+                        .addValue("updatedAt", System.currentTimeMillis()));
+    }
+
     private MapSqlParameterSource params(AgentTool tool) {
         return new MapSqlParameterSource()
                 .addValue("id", tool.getId())
@@ -111,9 +161,51 @@ public class AgentToolRepository {
                 .responseSchema(rs.getString("response_schema"))
                 .sampleRequest(rs.getString("sample_request"))
                 .sampleResponse(rs.getString("sample_response"))
+                .authProfileId(optString(rs, "auth_profile_id"))
+                .authOverrideEnabled(optBoolean(rs, "auth_override_enabled"))
+                .authType(optString(rs, "auth_type"))
+                .authConfig(optString(rs, "auth_config"))
+                .clientId(optString(rs, "client_id"))
+                .encryptedClientSecret(optString(rs, "encrypted_client_secret"))
+                .tokenUrl(optString(rs, "token_url"))
+                .authorizationUrl(optString(rs, "authorization_url"))
+                .redirectUri(optString(rs, "redirect_uri"))
+                .scopes(optString(rs, "scopes"))
+                .encryptedAccessToken(optString(rs, "encrypted_access_token"))
+                .encryptedRefreshToken(optString(rs, "encrypted_refresh_token"))
+                .tokenExpiresAt(optLong(rs, "token_expires_at"))
                 .enabled(rs.getBoolean("enabled"))
                 .createdAt(rs.getLong("created_at"))
                 .updatedAt(rs.getLong("updated_at"))
                 .build();
+    }
+
+    private String optString(java.sql.ResultSet rs, String column) {
+        try {
+            return rs.getString(column);
+        } catch (java.sql.SQLException ignored) {
+            return null;
+        }
+    }
+
+    private Boolean optBoolean(java.sql.ResultSet rs, String column) {
+        try {
+            Object value = rs.getObject(column);
+            if (value == null) return null;
+            return rs.getBoolean(column);
+        } catch (java.sql.SQLException ignored) {
+            return null;
+        }
+    }
+
+    private Long optLong(java.sql.ResultSet rs, String column) {
+        try {
+            Object value = rs.getObject(column);
+            if (value == null) return null;
+            if (value instanceof Number number) return number.longValue();
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 }

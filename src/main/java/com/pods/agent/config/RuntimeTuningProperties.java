@@ -41,6 +41,20 @@ public class RuntimeTuningProperties {
     private boolean enableExperimentalTools = false;
     private List<String> enabledExperimentalToolNames = new ArrayList<>();
     private List<String> allowedPermissionScopes = new ArrayList<>(List.of("filesystem", "shell", "web", "workflow", "memory", "integration", "http_proxy"));
+    private boolean dynamicToolExposureEnabled = false;
+    private boolean baseOnlyDefaultToolInjectionEnabled = true;
+    private int toolShortlistDefaultSize = 24;
+    private int toolShortlistExpandedSize = 48;
+    private double toolMemoryBiasWeight = 0.2;
+    private boolean toolShortlistFallbackToAllOnMiss = true;
+    private int catalogSearchCandidateLimit = 40;
+    private boolean dynamicSkillExposureEnabled = false;
+    private int skillShortlistDefaultSize = 2;
+    private int skillShortlistExpandedSize = 4;
+    private double skillMemoryBiasWeight = 0.2;
+    private boolean skillShortlistFallbackToCatalogOnMiss = true;
+    private int qualityExpansionMaxRetries = 2;
+    private int maxToolCallbacksPerTurn = 120;
 
     public long getSummaryTokenThreshold() {
         return summaryTokenThreshold;
@@ -312,6 +326,118 @@ public class RuntimeTuningProperties {
 
     public void setAllowedPermissionScopes(List<String> allowedPermissionScopes) {
         this.allowedPermissionScopes = allowedPermissionScopes;
+    }
+
+    public boolean isDynamicToolExposureEnabled() {
+        return dynamicToolExposureEnabled;
+    }
+
+    public void setDynamicToolExposureEnabled(boolean dynamicToolExposureEnabled) {
+        this.dynamicToolExposureEnabled = dynamicToolExposureEnabled;
+    }
+
+    public boolean isBaseOnlyDefaultToolInjectionEnabled() {
+        return baseOnlyDefaultToolInjectionEnabled;
+    }
+
+    public void setBaseOnlyDefaultToolInjectionEnabled(boolean baseOnlyDefaultToolInjectionEnabled) {
+        this.baseOnlyDefaultToolInjectionEnabled = baseOnlyDefaultToolInjectionEnabled;
+    }
+
+    public int getToolShortlistDefaultSize() {
+        return toolShortlistDefaultSize;
+    }
+
+    public void setToolShortlistDefaultSize(int toolShortlistDefaultSize) {
+        this.toolShortlistDefaultSize = toolShortlistDefaultSize;
+    }
+
+    public int getToolShortlistExpandedSize() {
+        return toolShortlistExpandedSize;
+    }
+
+    public void setToolShortlistExpandedSize(int toolShortlistExpandedSize) {
+        this.toolShortlistExpandedSize = toolShortlistExpandedSize;
+    }
+
+    public double getToolMemoryBiasWeight() {
+        return toolMemoryBiasWeight;
+    }
+
+    public void setToolMemoryBiasWeight(double toolMemoryBiasWeight) {
+        this.toolMemoryBiasWeight = toolMemoryBiasWeight;
+    }
+
+    public boolean isToolShortlistFallbackToAllOnMiss() {
+        return toolShortlistFallbackToAllOnMiss;
+    }
+
+    public void setToolShortlistFallbackToAllOnMiss(boolean toolShortlistFallbackToAllOnMiss) {
+        this.toolShortlistFallbackToAllOnMiss = toolShortlistFallbackToAllOnMiss;
+    }
+
+    public int getCatalogSearchCandidateLimit() {
+        return catalogSearchCandidateLimit;
+    }
+
+    public void setCatalogSearchCandidateLimit(int catalogSearchCandidateLimit) {
+        this.catalogSearchCandidateLimit = catalogSearchCandidateLimit;
+    }
+
+    public boolean isDynamicSkillExposureEnabled() {
+        return dynamicSkillExposureEnabled;
+    }
+
+    public void setDynamicSkillExposureEnabled(boolean dynamicSkillExposureEnabled) {
+        this.dynamicSkillExposureEnabled = dynamicSkillExposureEnabled;
+    }
+
+    public int getSkillShortlistDefaultSize() {
+        return skillShortlistDefaultSize;
+    }
+
+    public void setSkillShortlistDefaultSize(int skillShortlistDefaultSize) {
+        this.skillShortlistDefaultSize = skillShortlistDefaultSize;
+    }
+
+    public int getSkillShortlistExpandedSize() {
+        return skillShortlistExpandedSize;
+    }
+
+    public void setSkillShortlistExpandedSize(int skillShortlistExpandedSize) {
+        this.skillShortlistExpandedSize = skillShortlistExpandedSize;
+    }
+
+    public double getSkillMemoryBiasWeight() {
+        return skillMemoryBiasWeight;
+    }
+
+    public void setSkillMemoryBiasWeight(double skillMemoryBiasWeight) {
+        this.skillMemoryBiasWeight = skillMemoryBiasWeight;
+    }
+
+    public boolean isSkillShortlistFallbackToCatalogOnMiss() {
+        return skillShortlistFallbackToCatalogOnMiss;
+    }
+
+    public void setSkillShortlistFallbackToCatalogOnMiss(boolean skillShortlistFallbackToCatalogOnMiss) {
+        this.skillShortlistFallbackToCatalogOnMiss = skillShortlistFallbackToCatalogOnMiss;
+    }
+
+    public int getQualityExpansionMaxRetries() {
+        return qualityExpansionMaxRetries;
+    }
+
+    public void setQualityExpansionMaxRetries(int qualityExpansionMaxRetries) {
+        this.qualityExpansionMaxRetries = qualityExpansionMaxRetries;
+    }
+
+    public int getMaxToolCallbacksPerTurn() {
+        return maxToolCallbacksPerTurn;
+    }
+
+    public void setMaxToolCallbacksPerTurn(int maxToolCallbacksPerTurn) {
+        this.maxToolCallbacksPerTurn = maxToolCallbacksPerTurn;
     }
 
 }

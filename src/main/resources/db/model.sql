@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS agent.agent_tools (
     response_schema TEXT,
     sample_request  TEXT,
     sample_response TEXT,
+    auth_profile_id TEXT,
+    auth_override_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    auth_type       TEXT,
+    auth_config     TEXT,
+    client_id       TEXT,
+    encrypted_client_secret TEXT,
+    token_url       TEXT,
+    authorization_url TEXT,
+    redirect_uri    TEXT,
+    scopes          TEXT,
+    encrypted_access_token TEXT,
+    encrypted_refresh_token TEXT,
+    token_expires_at BIGINT,
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      BIGINT NOT NULL,
     updated_at      BIGINT NOT NULL,
@@ -84,6 +97,41 @@ ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS experimental BOOLEAN NOT 
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS input_schema_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE agent.agent_tools DROP COLUMN IF EXISTS risk_level;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS host TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_profile_id TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_override_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_type TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_config TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS client_id TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS encrypted_client_secret TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS token_url TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS authorization_url TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS redirect_uri TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS scopes TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS encrypted_access_token TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS encrypted_refresh_token TEXT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS token_expires_at BIGINT;
+
+CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
+    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    domain_id     TEXT NOT NULL REFERENCES agent.agent_domains (id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    description   TEXT,
+    auth_type     TEXT NOT NULL DEFAULT 'none',
+    auth_config   TEXT,
+    client_id     TEXT,
+    encrypted_client_secret TEXT,
+    token_url     TEXT,
+    authorization_url TEXT,
+    redirect_uri  TEXT,
+    scopes        TEXT,
+    encrypted_access_token TEXT,
+    encrypted_refresh_token TEXT,
+    token_expires_at BIGINT,
+    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    BIGINT NOT NULL,
+    updated_at    BIGINT NOT NULL,
+    UNIQUE (domain_id, name)
+);
 
 CREATE TABLE IF NOT EXISTS agent.tool_versions (
     id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -295,6 +343,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_user_file ON agent.memories (user
 CREATE INDEX IF NOT EXISTS idx_memories_user_id ON agent.memories (user_id);
 
 CREATE INDEX IF NOT EXISTS idx_agent_tools_domain_id ON agent.agent_tools (domain_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tools_auth_profile_id ON agent.agent_tools (auth_profile_id);
+CREATE INDEX IF NOT EXISTS idx_tool_auth_profiles_domain_id ON agent.tool_auth_profiles (domain_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_auth_profiles_domain_id ON agent.tool_auth_profiles (domain_id);
 CREATE INDEX IF NOT EXISTS idx_skill_files_skill_id ON agent.skill_files (skill_id);
 CREATE INDEX IF NOT EXISTS idx_runtime_events_session_id ON agent.runtime_events (session_id);
 CREATE INDEX IF NOT EXISTS idx_cost_usage_session_id ON agent.cost_usage (session_id);

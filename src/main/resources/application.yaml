@@ -30,6 +30,21 @@ pods:
   models:
     allowed-providers: openai, azure, azure_openai, anthropic, google-vertex, ollama
   runtime:
+    # Catalog-gated rollout defaults
+    base-only-default-tool-injection-enabled: true
+    dynamic-tool-exposure-enabled: true
+    tool-shortlist-default-size: 24
+    tool-shortlist-expanded-size: 48
+    tool-memory-bias-weight: 0.2
+    tool-shortlist-fallback-to-all-on-miss: true
+    catalog-search-candidate-limit: 40
+    dynamic-skill-exposure-enabled: true
+    skill-shortlist-default-size: 2
+    skill-shortlist-expanded-size: 4
+    skill-memory-bias-weight: 0.2
+    skill-shortlist-fallback-to-catalog-on-miss: true
+    quality-expansion-max-retries: 1
+    max-tool-callbacks-per-turn: 120
     summary-token-threshold: 2000
     auto-routing-low-threshold: 400
     auto-routing-medium-threshold: 1400
@@ -62,6 +77,11 @@ pods:
     enable-experimental-tools: true
     enabled-experimental-tool-names: [ ]
     allowed-permission-scopes: [ filesystem, shell, web, workflow, memory, integration, http_proxy ]
+    # Observe during staged rollout:
+    # - tool-match precision
+    # - low-signal tool result rate
+    # - clarification rate
+    # - end-to-end latency and prompt token usage
   skills:
     blob:
       connection-string: "DefaultEndpointsProtocol=https;AccountName=openfga;AccountKey=3qRPjRUAleZDRiDuHaZxCcrPFLAABAeLK/lSIuIDPTTo1CBgnzFIg+TvPvynr1sL5EtL7aIofTix+AStN2labg==;EndpointSuffix=core.windows.net"

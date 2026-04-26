@@ -9,28 +9,11 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class AgentTool {
+public class ToolAuthProfile {
     private String id;
     private String domainId;
     private String name;
     private String description;
-    private String sourceType;
-    private String executionKind;
-    private String permissionScope;
-    private boolean requiresApproval;
-    private String modelGate;
-    private String providerGate;
-    private boolean experimental;
-    private int inputSchemaVersion;
-    private String method;
-    private String host;
-    private String endpoint;
-    private String requestSchema;
-    private String responseSchema;
-    private String sampleRequest;
-    private String sampleResponse;
-    private String authProfileId;
-    private Boolean authOverrideEnabled;
     private String authType;
     private String authConfig;
     private String clientId;
