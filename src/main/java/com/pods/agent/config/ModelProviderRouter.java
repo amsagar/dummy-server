@@ -41,13 +41,20 @@ public class ModelProviderRouter {
     private final ModelRepository modelRepository;
     private final EncryptionService encryptionService;
     private final ModelWhitelistConfig whitelist;
+    private final RuntimeTuningProperties runtimeTuningProperties;
 
     public ModelProviderRouter(ModelRepository modelRepository,
                                EncryptionService encryptionService,
-                               ModelWhitelistConfig whitelist) {
+                               ModelWhitelistConfig whitelist,
+                               RuntimeTuningProperties runtimeTuningProperties) {
         this.modelRepository = modelRepository;
         this.encryptionService = encryptionService;
         this.whitelist = whitelist;
+        this.runtimeTuningProperties = runtimeTuningProperties;
+    }
+
+    private int maxTokens() {
+        return runtimeTuningProperties.getMaxOutputTokens();
     }
 
     public Spec resolve(@Nullable ModelRef model) {
@@ -98,7 +105,7 @@ public class ModelProviderRouter {
                     .anthropicClientAsync(anthropicClientAsync)
                     .options(AnthropicChatOptions.builder()
                             .model(modelID)
-                            .maxTokens(4096)
+                            .maxTokens(maxTokens())
                             .build())
                     .build();
 
@@ -124,6 +131,7 @@ public class ModelProviderRouter {
                             .credential(new AzureKeyCredential(apiKey)))
                     .defaultOptions(AzureOpenAiChatOptions.builder()
                             .deploymentName(modelID)
+                            .maxTokens(maxTokens())
                             .build())
                     .build();
 
@@ -145,7 +153,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(apiBuilder.build())
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).build())
+                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
                     .build();
 
             log.debug("[ModelProviderRouter] → openai/{}", modelID);
@@ -169,7 +177,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(api)
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).build())
+                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
                     .build();
 
             log.debug("[ModelProviderRouter] → google/{} (via OpenAI-compatible bridge)", modelID);
@@ -194,6 +202,7 @@ public class ModelProviderRouter {
                     .ollamaApi(ollamaApi)
                     .defaultOptions(org.springframework.ai.ollama.api.OllamaChatOptions.builder()
                             .model(modelID)
+                            .numPredict(maxTokens())
                             .build())
                     .build();
 
@@ -220,7 +229,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(api)
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).build())
+                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
                     .build();
 
             log.debug("[ModelProviderRouter] → {}/{} (openai-compatible, base={})", providerID, modelID, baseUrl);

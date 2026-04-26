@@ -39,29 +39,30 @@ pods:
     tool-shortlist-fallback-to-all-on-miss: true
     catalog-search-candidate-limit: 40
     dynamic-skill-exposure-enabled: true
-    skill-shortlist-default-size: 2
+    skill-shortlist-default-size: 6
     skill-shortlist-expanded-size: 4
     skill-memory-bias-weight: 0.2
     skill-shortlist-fallback-to-catalog-on-miss: true
     quality-expansion-max-retries: 1
     max-tool-callbacks-per-turn: 120
-    summary-token-threshold: 2000
+    max-output-tokens: 8192
+    summary-token-threshold: 6000
     auto-routing-low-threshold: 400
     auto-routing-medium-threshold: 1400
     tool-auto-pick-min-score: 30
     tool-auto-pick-ambiguity-delta: 10
     tool-loop-max-steps: 4
     worker-task-timeout-ms: 20000
-    summary-retain-recent-messages: 8
+    summary-retain-recent-messages: 16
     context-window-utilization-percent: 85
-    min-history-messages-to-keep: 6
+    min-history-messages-to-keep: 12
     enable-prompt-window-guard: true
     include-skill-content-in-system-prompt: true
     max-skill-content-chars: 12000
     max-skill-files-per-skill: 6
     enable-message-sanitization: true
     enable-budget-hints: true
-    budget-hint-warn-percent: 50
+    budget-hint-warn-percent: 80
     budget-hint-elevated-percent: 70
     budget-hint-critical-percent: 85
     enable-anthropic-prompt-caching-hints: false

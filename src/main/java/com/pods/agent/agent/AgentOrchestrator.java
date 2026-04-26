@@ -375,7 +375,7 @@ public class AgentOrchestrator {
                 : usagePercent >= runtimeTuningProperties.getBudgetHintElevatedPercent() ? "elevated" : "warn";
         prompt.append("\n## Context Budget\n")
                 .append("Estimated usage: ").append(usagePercent).append("% (").append(level).append(")\n")
-                .append("Prefer concise responses, avoid repeating large prior content, and prioritize latest user intent.\n");
+                .append("Token budget is getting high — avoid repeating large prior content verbatim, but still answer the user's question fully.\n");
     }
 
     private void appendProviderCachingHint(StringBuilder prompt, ChatState state) {

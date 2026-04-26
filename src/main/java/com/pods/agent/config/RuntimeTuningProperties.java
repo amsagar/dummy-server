@@ -55,6 +55,7 @@ public class RuntimeTuningProperties {
     private boolean skillShortlistFallbackToCatalogOnMiss = true;
     private int qualityExpansionMaxRetries = 2;
     private int maxToolCallbacksPerTurn = 120;
+    private int maxOutputTokens = 8192;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
 
     public static class ToolRetrieval {
@@ -461,6 +462,14 @@ public class RuntimeTuningProperties {
 
     public void setMaxToolCallbacksPerTurn(int maxToolCallbacksPerTurn) {
         this.maxToolCallbacksPerTurn = maxToolCallbacksPerTurn;
+    }
+
+    public int getMaxOutputTokens() {
+        return maxOutputTokens;
+    }
+
+    public void setMaxOutputTokens(int maxOutputTokens) {
+        this.maxOutputTokens = maxOutputTokens;
     }
 
 }
