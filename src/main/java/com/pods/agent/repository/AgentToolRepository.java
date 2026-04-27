@@ -136,6 +136,7 @@ public class AgentToolRepository {
                 .addValue("sampleRequest", tool.getSampleRequest())
                 .addValue("sampleResponse", tool.getSampleResponse())
                 .addValue("enabled", tool.isEnabled())
+                .addValue("baseInjected", tool.isBaseInjected())
                 .addValue("createdAt", tool.getCreatedAt())
                 .addValue("updatedAt", tool.getUpdatedAt());
     }
@@ -175,6 +176,7 @@ public class AgentToolRepository {
                 .encryptedRefreshToken(optString(rs, "encrypted_refresh_token"))
                 .tokenExpiresAt(optLong(rs, "token_expires_at"))
                 .enabled(rs.getBoolean("enabled"))
+                .baseInjected(Boolean.TRUE.equals(optBoolean(rs, "base_injected")))
                 .createdAt(rs.getLong("created_at"))
                 .updatedAt(rs.getLong("updated_at"))
                 .build();

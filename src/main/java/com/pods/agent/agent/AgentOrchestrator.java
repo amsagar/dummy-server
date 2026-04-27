@@ -135,7 +135,11 @@ public class AgentOrchestrator {
         ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
         ChatClient client = modelSpec.client();
 
-        session.getMessages().add(new UserMessage(normalizeUserMessageForHistory(userText)));
+        // The bare user message is added to session.getMessages() by AgentRuntimeService.runTurn
+        // before streamTurn is invoked. buildMessageList() drops the trailing user entry, so the
+        // history we pass via .messages(history) excludes the current turn's user message — and
+        // .user(userText) below sends the stepContext (per-turn metadata + bare user text) as the
+        // single representation of the current turn.
         applyPromptWindowGuard(session, state, userText);
 
         log.info("[AgentOrchestrator] streamTurn: session={}, model={}, tools={}",

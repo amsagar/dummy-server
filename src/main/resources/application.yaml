@@ -74,6 +74,10 @@ pods:
     strict-scope-only: true
     allow-capabilities-queries: true
     out-of-scope-refusal-message: "I can’t answer this because it is outside my allowed skills/tools scope."
+    strict-scope:
+      pre-flight-enabled: true
+      min-top-tool-cosine: 0.30
+      allow-conversational-max-words: 3
     persist-internal-events: false
     enable-experimental-tools: true
     enabled-experimental-tool-names: [ ]

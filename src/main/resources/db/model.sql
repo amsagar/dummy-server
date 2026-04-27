@@ -110,6 +110,8 @@ ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS scopes TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS encrypted_access_token TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS encrypted_refresh_token TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS token_expires_at BIGINT;
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS base_injected BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_agent_tools_base_injected ON agent.agent_tools (base_injected) WHERE base_injected = TRUE;
 
 CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
     id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

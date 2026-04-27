@@ -43,6 +43,7 @@ public class AgentTool {
     private String encryptedRefreshToken;
     private Long tokenExpiresAt;
     private boolean enabled;
+    private boolean baseInjected;
     private long createdAt;
     private long updatedAt;
 }

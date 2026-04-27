@@ -57,21 +57,22 @@ public class ToolRegistryService {
     }
 
     /**
-     * Base tools injected by default each turn.
-     * Policy: framework defaults (includes memory tools) only.
+     * Cross-cutting tools force-included every turn (memory, plan_exit, question, todowrite).
+     * Other framework tools (filesystem, web, shell) flow through retrieval.
      */
     public List<AgentTool> getBaseInjectedTools() {
         return enabledToolCache.values().stream()
-                .filter(this::isFrameworkDefault)
+                .filter(AgentTool::isBaseInjected)
                 .toList();
     }
 
     /**
-     * Non-default tools (manual/imported/MCP/etc.) used via catalog-gated flow.
+     * Retrieval-eligible tools — includes non-framework tools (MCP, OpenAPI, manual)
+     * AND framework tools without baseInjected (read, glob, grep, web*, bash, etc.).
      */
     public List<AgentTool> getNonDefaultEnabledTools() {
         return enabledToolCache.values().stream()
-                .filter(t -> !isFrameworkDefault(t))
+                .filter(t -> !t.isBaseInjected())
                 .toList();
     }
 

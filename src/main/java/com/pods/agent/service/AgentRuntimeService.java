@@ -22,6 +22,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -153,8 +154,65 @@ public class AgentRuntimeService {
             return response;
         }
 
+        ScopeGateOutcome scopeGate = applyPreFlightScopeGate(normalizedUserText, session, state);
+        if (scopeGate != null && scopeGate.refused()) {
+            transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "strict-scope-pre-flight");
+            sender.sendTextDelta(scopeGate.refusal());
+            session.getMessages().add(new AssistantMessage(scopeGate.refusal()));
+            saveSessionEvent(session.getSessionId(), turnId, "strict_scope.refused",
+                    "{\"reason\":\"out_of_scope_pre_flight\",\"topCosine\":" + scopeGate.topCosine() + "}");
+            hookRegistryService.emit("post-response", java.util.Map.of("sessionId", session.getSessionId(), "turnId", turnId));
+            runtimeEventRepository.save(RuntimeEvent.builder()
+                    .sessionId(session.getSessionId()).turnId(turnId).eventType("task.done")
+                    .payload("{\"task\":\"strict_scope_refused\"}").build());
+            return scopeGate.refusal();
+        }
+
         String mcpContext = buildMcpContext();
         return runModelDrivenCoreLoop(session, normalizedUserText, state, sender, turnId, runtimeMode, mcpContext);
+    }
+
+    private record ScopeGateOutcome(boolean refused, String refusal, double topCosine) {}
+
+    private ScopeGateOutcome applyPreFlightScopeGate(String userText, AgentSession session, ChatState state) {
+        if (!runtimeTuningProperties.isStrictScopeOnly()) return null;
+        RuntimeTuningProperties.StrictScope cfg = runtimeTuningProperties.getStrictScope();
+        if (cfg == null || !cfg.isPreFlightEnabled()) return null;
+        if (userText == null || userText.isBlank()) return null;
+
+        if (isCapabilitiesQuery(userText) || isCatalogOnlySkillQuery(userText)) return null;
+
+        String trimmed = userText.trim();
+        int wordCount = trimmed.split("\\s+").length;
+        if (wordCount <= Math.max(0, cfg.getAllowConversationalMaxWords())) return null;
+
+        // Continuation: only short user text (≤ allowConversationalMaxWords + 2) bypasses the scope
+        // gate when prior tool calls exist. Long, topic-shifted queries must run the cosine check
+        // even if the session has prior tool history (e.g. user pivots from GitHub to "who is PM").
+        boolean isShortContinuation = wordCount <= Math.max(0, cfg.getAllowConversationalMaxWords()) + 2;
+        if (isShortContinuation && session != null && !collectRecentToolCalls(session.getSessionId(), 1).isEmpty()) return null;
+
+        ModelRef embedRef = embeddingAutoRouterService == null ? null
+                : embeddingAutoRouterService.pickEmbeddingModel(state);
+        if (embedRef == null || toolEmbeddingIndexService == null) return null;
+
+        double topCosine;
+        try {
+            List<ToolEmbeddingIndexService.ScoredTool> top = toolEmbeddingIndexService.searchTopK(
+                    userText, 3, Set.of(), Map.of(), Set.of(), embedRef);
+            topCosine = (top == null || top.isEmpty()) ? 0.0 : top.get(0).score();
+        } catch (Exception e) {
+            log.debug("[AgentRuntime] pre-flight scope gate retrieval failed; passing through: {}", e.getMessage());
+            return null;
+        }
+
+        if (topCosine >= cfg.getMinTopToolCosine()) return null;
+
+        log.info("[AgentRuntime] strict-scope pre-flight refused: topCosine={}, threshold={}, query=\"{}\"",
+                String.format(Locale.ROOT, "%.3f", topCosine),
+                cfg.getMinTopToolCosine(),
+                truncate(userText, 120));
+        return new ScopeGateOutcome(true, outOfScopeRefusalMessage(), topCosine);
     }
 
     private String runModelDrivenCoreLoop(AgentSession session,
@@ -235,8 +293,9 @@ public class AgentRuntimeService {
         if (embeddingModelRef != null && toolEmbeddingIndexService != null) {
             retrievalAttempted = true;
             try {
+                Set<String> hostBoostedToolIds = computeHostBoostedToolIds(sessionId);
                 List<ToolEmbeddingIndexService.ScoredTool> scored = toolEmbeddingIndexService.searchTopK(
-                        userText, topK, baseIds, memorySignals, embeddingModelRef);
+                        userText, topK, baseIds, memorySignals, hostBoostedToolIds, embeddingModelRef);
                 if (scored != null && !scored.isEmpty()) {
                     Map<String, AgentTool> byId = new LinkedHashMap<>();
                     for (AgentTool t : toolRegistryService.getEnabledTools()) {
@@ -330,17 +389,21 @@ public class AgentRuntimeService {
                                     String runtimeMode,
                                     AgentSession session,
                                     String observationContext) {
+        // Per-turn metadata leads (system-style annotations), then the user's actual request.
+        // Conversation history is NOT duplicated here — it's already in the messages array passed
+        // to ChatClient via .messages(history). The orchestrator trims the trailing UserMessage
+        // from that history so this stepContext is the sole representation of the current turn's
+        // user message.
         StringBuilder context = new StringBuilder();
-        context.append("Original user request:\n").append(userText == null ? "" : userText).append("\n\n");
         if (selectedSkillContext != null && !selectedSkillContext.isBlank()) {
             context.append(selectedSkillContext).append("\n\n");
         }
         if (mcpContext != null && !mcpContext.isBlank()) {
             context.append(mcpContext).append("\n\n");
         }
-        String historyContext = buildRecentConversationContext(session, 10);
-        if (!historyContext.isBlank()) {
-            context.append(historyContext).append("\n\n");
+        String manifestContext = buildWorkspaceManifest(session);
+        if (!manifestContext.isBlank()) {
+            context.append(manifestContext).append("\n\n");
         }
         String entityContext = buildEntityCarryForwardContext(session, userText);
         if (!entityContext.isBlank()) {
@@ -349,8 +412,46 @@ public class AgentRuntimeService {
         if (observationContext != null && !observationContext.isBlank()) {
             context.append("Tool observations:\n").append(observationContext).append("\n\n");
         }
-        context.append("Runtime mode: ").append(runtimeMode).append("\n");
+        context.append("Runtime mode: ").append(runtimeMode).append("\n\n");
+        context.append(userText == null ? "" : userText);
         return context.toString();
+    }
+
+    private String buildWorkspaceManifest(AgentSession session) {
+        Path workspace = session != null ? session.getWorkspacePath() : null;
+        if (workspace == null || !Files.exists(workspace) || !Files.isDirectory(workspace)) {
+            return "<workspace_manifest>\nstatus: no_workspace\nguidance: There is no local workspace attached to this session. Do not call read / glob / grep / edit / write / apply_patch — there are no local files. Use MCP / integration tools for any data fetch.\n</workspace_manifest>";
+        }
+        Path skillRoot = workspace.resolve(".pods-agent").normalize();
+        List<String> entries = new ArrayList<>();
+        int maxEntries = 80;
+        try (var walk = Files.walk(workspace, 6)) {
+            walk.filter(Files::isRegularFile)
+                    .filter(p -> !p.startsWith(skillRoot))
+                    .filter(p -> {
+                        String fn = p.getFileName() == null ? "" : p.getFileName().toString();
+                        return !fn.startsWith(".");
+                    })
+                    .limit(maxEntries + 1)
+                    .forEach(p -> entries.add(workspace.relativize(p).toString()));
+        } catch (Exception ignored) {
+            return "";
+        }
+        if (entries.isEmpty()) {
+            return "<workspace_manifest>\nstatus: empty\nguidance: The local workspace exists but is empty. Do not call read / glob / grep / edit — there are no local files yet. write / apply_patch may be used if the user explicitly asks to create a new file.\n</workspace_manifest>";
+        }
+        StringBuilder out = new StringBuilder("<workspace_manifest>\n");
+        out.append("status: populated\n");
+        boolean truncated = entries.size() > maxEntries;
+        for (int i = 0; i < Math.min(entries.size(), maxEntries); i++) {
+            out.append("- ").append(entries.get(i)).append("\n");
+        }
+        if (truncated) {
+            out.append("(... more files exist; use glob to list further)\n");
+        }
+        out.append("guidance: read / glob / grep / edit / write apply only to the files listed above. For data outside this workspace (GitHub repos, external APIs, web pages, remote services), use the matching MCP / integration tool — never assume the local workspace contains it.\n");
+        out.append("</workspace_manifest>");
+        return out.toString();
     }
 
     private String buildEntityCarryForwardContext(AgentSession session, String userText) {
@@ -379,19 +480,186 @@ public class AgentRuntimeService {
             }
         } catch (Exception ignored) {
         }
-        if (ids.isEmpty()) return "";
+        List<String> recentToolCalls = collectRecentToolCalls(session.getSessionId(), 6);
+        List<String> registeredIntegrations = collectRegisteredIntegrations();
+        if (ids.isEmpty() && recentToolCalls.isEmpty() && registeredIntegrations.isEmpty()) return "";
         String latestId = ids.stream().reduce((a, b) -> b).orElse("");
         StringBuilder out = new StringBuilder("<entity_carry_forward>\n");
-        out.append("known_ids: ").append(ids.stream().limit(12).collect(Collectors.joining(", "))).append("\n");
-        out.append("latest_id: ").append(latestId).append("\n");
+        if (!ids.isEmpty()) {
+            out.append("known_ids: ").append(ids.stream().limit(12).collect(Collectors.joining(", "))).append("\n");
+            out.append("latest_id: ").append(latestId).append("\n");
+        }
+        if (!registeredIntegrations.isEmpty()) {
+            out.append("registered_integrations:\n");
+            for (String entry : registeredIntegrations) {
+                out.append("  - ").append(entry).append("\n");
+            }
+        }
+        if (!recentToolCalls.isEmpty()) {
+            out.append("last_turn_tools:\n");
+            for (String entry : recentToolCalls) {
+                out.append("  - ").append(entry).append("\n");
+            }
+        }
         out.append("tool_routing_hints:\n")
+                .append("- The full list of tools registered for each integration host is shown above in registered_integrations — read it before deciding. If the user wants the contents/body/text/details of a file, README, page, or document inside a registered host, use the host's `*get_file_contents*` or equivalent read tool. Do NOT fall back to webfetch / websearch / codesearch / commit-history / search-code as a substitute for fetching file contents — those return metadata, not content.\n")
+                .append("- For any URL or data that belongs to a host listed in registered_integrations, USE the matching MCP / integration tool. Calling webfetch / websearch / codesearch against those hosts bypasses the registered tool's auth and private-data access.\n")
+                .append("- If a tool returns 404 / parse-error / empty, try a different tool from the same integration before giving up. The integration almost always has a direct read tool — use it.\n")
+                .append("- If the user is asking a follow-up about the same data the prior turn fetched, prefer tools from the same MCP server / integration.\n")
+                .append("- Local filesystem tools (read / glob / grep / edit / write) are for the local workspace only — do not use them for remote-hosted entities (GitHub repos, external APIs, etc.). The <workspace_manifest> block lists what local files actually exist.\n")
                 .append("- If user says 'this product' or 'this organization', reuse latest_id when appropriate.\n")
-                .append("- Multiple tool calls in sequence are allowed in the same turn when needed.\n");
+                .append("- Multiple tool calls in sequence are allowed in the same turn when needed.\n")
+                .append("- Do NOT end your reply with 'Would you like me to...' / 'Should I...' / 'Do you want me to...' as a substitute for actually doing the work. Take the action now and present the result.\n");
         if (userText != null && !userText.isBlank()) {
             out.append("current_user_intent: ").append(truncate(userText, 240)).append("\n");
         }
         out.append("</entity_carry_forward>");
         return out.toString();
+    }
+
+    private List<String> collectRegisteredIntegrations() {
+        try {
+            List<AgentTool> tools = toolRegistryService.getEnabledTools();
+            if (tools == null || tools.isEmpty()) return List.of();
+            Map<String, List<String>> hostToTools = new LinkedHashMap<>();
+            for (AgentTool tool : tools) {
+                if (tool == null || tool.isBaseInjected()) continue;
+                String src = tool.getSourceType() == null ? "" : tool.getSourceType().toLowerCase(Locale.ROOT);
+                if ("framework_default".equals(src)) continue;
+                String host = tool.getHost();
+                if (host == null || host.isBlank()) continue;
+                String name = tool.getName();
+                if (name == null || name.isBlank()) continue;
+                hostToTools.computeIfAbsent(host, k -> new ArrayList<>()).add(name);
+            }
+            if (hostToTools.isEmpty()) return List.of();
+            List<String> out = new ArrayList<>();
+            int perHostLimit = 24;
+            for (var entry : hostToTools.entrySet()) {
+                List<String> sorted = entry.getValue().stream()
+                        .distinct()
+                        .sorted(Comparator
+                                .comparingInt((String n) -> readActionRank(n))
+                                .thenComparing(Comparator.naturalOrder()))
+                        .toList();
+                String toolNames = sorted.stream().limit(perHostLimit).collect(Collectors.joining(", "));
+                int extra = sorted.size() - perHostLimit;
+                String suffix = extra > 0 ? ", +" + extra + " more (use any of these)" : "";
+                out.add(entry.getKey() + " → " + toolNames + suffix);
+                if (out.size() >= 10) break;
+            }
+            return out;
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    /**
+     * Lower rank = surfaced first. Read-action verbs (get/list/search/read) lead so the
+     * model sees safe lookup tools before write/destructive ones (create/delete/fork/push).
+     */
+    private int readActionRank(String toolName) {
+        if (toolName == null) return 100;
+        String n = toolName.toLowerCase(Locale.ROOT);
+        if (n.contains("get_file_contents") || n.contains("getfilecontents")) return 0;
+        if (n.contains("read_") || n.endsWith("_read")) return 1;
+        if (n.startsWith("mcp_get_") || n.contains("_get_") || n.endsWith("_get")) return 2;
+        if (n.startsWith("mcp_list_") || n.contains("_list_") || n.endsWith("_list")) return 3;
+        if (n.startsWith("mcp_search_") || n.contains("_search_") || n.endsWith("_search")) return 4;
+        if (n.startsWith("mcp_describe_") || n.contains("_describe_")) return 5;
+        if (n.contains("create") || n.contains("update") || n.contains("write") || n.contains("edit")) return 30;
+        if (n.contains("delete") || n.contains("remove") || n.contains("drop")) return 40;
+        if (n.contains("fork") || n.contains("merge") || n.contains("push") || n.contains("dispatch")) return 35;
+        return 20;
+    }
+
+    private Set<String> computeHostBoostedToolIds(String sessionId) {
+        Set<String> hosts = collectLastTurnHosts(sessionId);
+        if (hosts.isEmpty()) return Set.of();
+        Set<String> ids = new LinkedHashSet<>();
+        try {
+            for (AgentTool tool : toolRegistryService.getEnabledTools()) {
+                if (tool == null || tool.getId() == null) continue;
+                String host = tool.getHost();
+                if (host != null && hosts.contains(host)) {
+                    ids.add(tool.getId());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return ids;
+    }
+
+    private Set<String> collectLastTurnHosts(String sessionId) {
+        if (sessionId == null) return Set.of();
+        Set<String> hosts = new LinkedHashSet<>();
+        try {
+            List<RuntimeEvent> events = runtimeEventRepository.findBySessionId(sessionId);
+            if (events == null || events.isEmpty()) return Set.of();
+            int scanned = 0;
+            for (int i = events.size() - 1; i >= 0 && scanned < 12; i--) {
+                RuntimeEvent ev = events.get(i);
+                if (ev == null || !"tool.call".equalsIgnoreCase(ev.getEventType())) continue;
+                scanned++;
+                String payload = ev.getPayload();
+                if (payload == null) continue;
+                Matcher matcher = TOOL_NAME_PATTERN.matcher(payload);
+                if (!matcher.find()) continue;
+                String toolName = matcher.group(1);
+                AgentTool tool = toolRegistryService.getEnabledToolByName(toolName);
+                if (tool == null) continue;
+                String host = tool.getHost();
+                if (host != null && !host.isBlank()) hosts.add(host);
+            }
+        } catch (Exception ignored) {
+        }
+        return hosts;
+    }
+
+    private static final Pattern TOOL_NAME_PATTERN = Pattern.compile("\"toolName\"\\s*:\\s*\"([^\"]+)\"");
+
+    private List<String> collectRecentToolCalls(String sessionId, int limit) {
+        if (sessionId == null) return List.of();
+        try {
+            List<RuntimeEvent> events = runtimeEventRepository.findBySessionId(sessionId);
+            if (events == null || events.isEmpty()) return List.of();
+            LinkedHashSet<String> seen = new LinkedHashSet<>();
+            for (int i = events.size() - 1; i >= 0 && seen.size() < limit; i--) {
+                RuntimeEvent ev = events.get(i);
+                if (ev == null || !"tool.call".equalsIgnoreCase(ev.getEventType())) continue;
+                String payload = ev.getPayload();
+                if (payload == null) continue;
+                Matcher matcher = TOOL_NAME_PATTERN.matcher(payload);
+                if (!matcher.find()) continue;
+                String toolName = matcher.group(1);
+                String label = decorateToolLabel(toolName);
+                seen.add(label);
+            }
+            List<String> ordered = new ArrayList<>(seen);
+            java.util.Collections.reverse(ordered);
+            return ordered;
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    private String decorateToolLabel(String toolName) {
+        if (toolName == null || toolName.isBlank()) return "";
+        try {
+            AgentTool tool = toolRegistryService.getEnabledToolByName(toolName);
+            if (tool != null) {
+                String host = tool.getHost();
+                String src = tool.getSourceType();
+                if (host != null && !host.isBlank()) {
+                    return toolName + " (" + (src != null && !src.isBlank() ? src + ":" : "") + host + ")";
+                }
+                if (src != null && !src.isBlank()) {
+                    return toolName + " (" + src + ")";
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return toolName;
     }
 
     private void collectUuids(String text, Set<String> into) {

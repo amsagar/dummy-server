@@ -230,7 +230,17 @@ public class ToolEmbeddingIndexService {
                                         Set<String> mustIncludeIds,
                                         Map<String, Double> memorySignal,
                                         ModelRef embeddingModelRef) {
+        return searchTopK(userText, k, mustIncludeIds, memorySignal, Set.of(), embeddingModelRef);
+    }
+
+    public List<ScoredTool> searchTopK(String userText,
+                                        int k,
+                                        Set<String> mustIncludeIds,
+                                        Map<String, Double> memorySignal,
+                                        Set<String> hostBoostedToolIds,
+                                        ModelRef embeddingModelRef) {
         Set<String> mustInclude = mustIncludeIds == null ? Set.of() : mustIncludeIds;
+        Set<String> hostBoosted = hostBoostedToolIds == null ? Set.of() : hostBoostedToolIds;
         if (embeddingModelRef == null) return Collections.emptyList();
         if (userText == null) userText = "";
         EmbeddingModel embeddingModel;
@@ -271,12 +281,14 @@ public class ToolEmbeddingIndexService {
             return Collections.emptyList();
         }
 
+        double hostAffinityBoost = 0.25;
         Map<String, Double> reranked = new LinkedHashMap<>();
         for (ScoredTool s : raw) {
             double base = s.score();
             double mem = memorySignal == null ? 0.0 : memorySignal.getOrDefault(s.toolId(), 0.0);
             double boost = memWeight * Math.tanh(mem);
-            double finalScore = base + boost;
+            double affinity = hostBoosted.contains(s.toolId()) ? hostAffinityBoost : 0.0;
+            double finalScore = base + boost + affinity;
             if (mustInclude.contains(s.toolId()) || finalScore >= scoreFloor) {
                 reranked.merge(s.toolId(), finalScore, Math::max);
             }

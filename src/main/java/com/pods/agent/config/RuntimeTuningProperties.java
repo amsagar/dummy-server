@@ -57,6 +57,23 @@ public class RuntimeTuningProperties {
     private int maxToolCallbacksPerTurn = 120;
     private int maxOutputTokens = 8192;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
+    private StrictScope strictScope = new StrictScope();
+
+    public static class StrictScope {
+        private boolean preFlightEnabled = true;
+        private double minTopToolCosine = 0.30;
+        private int allowConversationalMaxWords = 3;
+
+        public boolean isPreFlightEnabled() { return preFlightEnabled; }
+        public void setPreFlightEnabled(boolean preFlightEnabled) { this.preFlightEnabled = preFlightEnabled; }
+        public double getMinTopToolCosine() { return minTopToolCosine; }
+        public void setMinTopToolCosine(double minTopToolCosine) { this.minTopToolCosine = minTopToolCosine; }
+        public int getAllowConversationalMaxWords() { return allowConversationalMaxWords; }
+        public void setAllowConversationalMaxWords(int allowConversationalMaxWords) { this.allowConversationalMaxWords = allowConversationalMaxWords; }
+    }
+
+    public StrictScope getStrictScope() { return strictScope; }
+    public void setStrictScope(StrictScope strictScope) { this.strictScope = strictScope; }
 
     public static class ToolRetrieval {
         private int topK = 40;
