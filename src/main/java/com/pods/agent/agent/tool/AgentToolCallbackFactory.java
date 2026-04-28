@@ -6,6 +6,7 @@ import com.pods.agent.domain.AgentTool;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.service.GuardrailPolicyEngine;
 import com.pods.agent.service.PendingInteractionService;
+import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
 import org.springframework.ai.tool.ToolCallback;
@@ -31,11 +32,13 @@ public class AgentToolCallbackFactory {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
+    private final SkillRegistryService skillRegistryService;
 
     public AgentToolCallbackFactory(ToolRegistryService toolRegistryService,
                                     ToolExecutionService toolExecutionService,
                                     GuardrailPolicyEngine policyEngine,
                                     PendingInteractionService pendingInteractionService,
+                                    SkillRegistryService skillRegistryService,
                                     RuntimeTuningProperties runtimeTuningProperties,
                                     ObjectMapper objectMapper,
                                     RuntimeEventRepository runtimeEventRepository) {
@@ -43,24 +46,33 @@ public class AgentToolCallbackFactory {
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
         this.pendingInteractionService = pendingInteractionService;
+        this.skillRegistryService = skillRegistryService;
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
     }
 
     public List<ToolCallback> buildForTurn(String sessionId, String turnId, SseEventSender sender) {
-        return buildForTurn(sessionId, turnId, sender, toolRegistryService.getEnabledTools());
+        return buildForTurn(sessionId, turnId, sender, toolRegistryService.getEnabledTools(), null);
     }
 
     public List<ToolCallback> buildForTurn(String sessionId,
                                            String turnId,
                                            SseEventSender sender,
                                            List<AgentTool> selectedTools) {
+        return buildForTurn(sessionId, turnId, sender, selectedTools, null);
+    }
+
+    public List<ToolCallback> buildForTurn(String sessionId,
+                                           String turnId,
+                                           SseEventSender sender,
+                                           List<AgentTool> selectedTools,
+                                           SkillExecutionGate skillExecutionGate) {
         long timeoutMs = runtimeTuningProperties.getHitlReplyTimeoutMs();
         List<AgentTool> tools = (selectedTools == null || selectedTools.isEmpty())
                 ? toolRegistryService.getEnabledTools()
                 : selectedTools;
-        return tools.stream()
+        List<ToolCallback> callbacks = tools.stream()
                 .filter(Objects::nonNull)
                 .map((AgentTool t) -> (ToolCallback) new AgentToolCallback(
                         t,
@@ -72,7 +84,27 @@ public class AgentToolCallbackFactory {
                         turnId,
                         timeoutMs,
                         objectMapper,
-                        runtimeEventRepository))
+                        runtimeEventRepository,
+                        skillExecutionGate))
                 .collect(Collectors.toList());
+
+        boolean hasSkillAlready = tools.stream()
+                .filter(Objects::nonNull)
+                .map(AgentTool::getName)
+                .filter(Objects::nonNull)
+                .anyMatch(name -> "skill".equalsIgnoreCase(name.trim()));
+        if (!hasSkillAlready) {
+            callbacks.add(new SkillToolCallback(
+                    skillRegistryService,
+                    runtimeTuningProperties,
+                    sender,
+                    sessionId,
+                    turnId,
+                    objectMapper,
+                    runtimeEventRepository,
+                    skillExecutionGate
+            ));
+        }
+        return callbacks;
     }
 }

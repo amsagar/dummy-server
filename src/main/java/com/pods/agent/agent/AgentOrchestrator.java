@@ -39,12 +39,6 @@ import java.util.LinkedHashMap;
 @Slf4j
 public class AgentOrchestrator {
 
-    private static final String DEFAULT_BASE_SYSTEM_PROMPT = """
-            You are AI Agent.
-            Operate within registered tools and skills scope.
-            Be concise, accurate, and friendly.
-            """;
-
     private final ModelProviderRouter modelProviderRouter;
     private final SkillRegistryService skillRegistryService;
     private final InstructionLoaderService instructionLoaderService;
@@ -203,7 +197,6 @@ public class AgentOrchestrator {
         List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
         if (!skills.isEmpty()) {
             prompt.append("\n## Available Skills\n");
-            prompt.append("The following skills are available. Relevant skill content will be provided in <skill_content> blocks when appropriate.\n\n");
             for (SkillRegistryService.SkillSnapshot s : skills) {
                 prompt.append("- **").append(s.skill().getName()).append("**");
                 if (s.skill().getDescription() != null && !s.skill().getDescription().isBlank()) {
@@ -221,7 +214,6 @@ public class AgentOrchestrator {
                         .append("\n");
             }
             prompt.append("\n## Workspace Skill Manifest\n")
-                    .append("Skill files are materialized under: ")
                     .append("workspace://skills")
                     .append("\n");
         }
@@ -257,7 +249,11 @@ public class AgentOrchestrator {
 
     private String loadBaseSystemPrompt() {
         String loaded = loadPromptResource("prompts/base-system-prompt.md");
-        return loaded == null || loaded.isBlank() ? DEFAULT_BASE_SYSTEM_PROMPT : loaded;
+        if (loaded != null && !loaded.isBlank()) {
+            return loaded;
+        }
+        // Last-resort fallback to keep startup resilient if resource is missing.
+        return "You are AI Agent.";
     }
 
     private String loadPromptResource(String path) {

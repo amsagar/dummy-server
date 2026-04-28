@@ -56,7 +56,7 @@ class AgentOrchestratorPromptTest {
     }
 
     @Test
-    void injectsSkillContentIntoSystemPrompt() {
+    void listsSkillsAndInstructsModelToUseSkillTool() {
         SkillRegistryService skillRegistryService = mock(SkillRegistryService.class);
         when(skillRegistryService.getEnabledSkills()).thenReturn(List.of(
                 new SkillSnapshot(
@@ -77,8 +77,8 @@ class AgentOrchestratorPromptTest {
 
         String prompt = orchestrator.buildSystemPromptForTest(ChatState.builder().build(), new AgentSession("s4"));
 
-        assertTrue(prompt.contains("## Skill Content"));
-        assertTrue(prompt.contains("<skill name=\"pdf\">"));
-        assertTrue(prompt.contains("Use this skill for PDF operations."));
+        assertTrue(prompt.contains("## Available Skills"));
+        assertTrue(prompt.contains("call the `skill` tool"));
+        assertTrue(prompt.contains("pdf operations"));
     }
 }

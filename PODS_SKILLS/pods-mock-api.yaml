@@ -1,0 +1,1436 @@
+openapi: "3.0.1"
+info:
+  title: "PODS Order Validation Mock API"
+  description: "Mock API covering all 43 tools for the PODS Order Validation POC. Base URL: http://localhost:3001"
+  version: "1.0.0"
+servers:
+  - url: "http://localhost:3001"
+
+paths:
+
+  # ─────────────────────────────────────────────
+  # GROUP A — DaaS / Salesforce CPQ
+  # ─────────────────────────────────────────────
+
+  /daas/orders/{id}:
+    get:
+      tags: ["DaaS - Orders"]
+      summary: "GetOrder"
+      description: "Get order header by order ID"
+      operationId: "GetOrder"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Order ID (e.g. 10045)"
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Order details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "404":
+          description: "Order not found"
+
+  /daas/orders:
+    get:
+      tags: ["DaaS - Orders"]
+      summary: "GetOrdersByCustomer"
+      description: "Get all orders for a customer"
+      operationId: "GetOrdersByCustomer"
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          description: "Customer ID (e.g. 7821)"
+          schema:
+            type: integer
+            format: int64
+        - name: statusId
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: updatedLastDays
+          in: query
+          required: false
+          schema:
+            type: integer
+            maximum: 120
+      responses:
+        "200":
+          description: "List of orders"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+
+  /daas/orders/{id}/lines:
+    get:
+      tags: ["DaaS - Orders"]
+      summary: "GetOrderLines"
+      description: "Get all order lines for an order including SKUs, billing codes, and auto-renew flags"
+      operationId: "GetOrderLines"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Order ID"
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "List of order lines"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrderLine"
+        "404":
+          description: "Order not found"
+
+  /daas/orders/{id}/legs:
+    get:
+      tags: ["DaaS - Orders"]
+      summary: "GetOrderLegs"
+      description: "Get all service legs for an order (IDEL, FPU, WRT, etc.) with timestamps"
+      operationId: "GetOrderLegs"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Order ID"
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "List of service legs"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrderLeg"
+        "404":
+          description: "Order not found"
+
+  /daas/orders/{id}/timeline:
+    get:
+      tags: ["DaaS - Orders"]
+      summary: "GetOrderTimeline"
+      description: "Get full chronological event history for an order across all systems"
+      operationId: "GetOrderTimeline"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Order ID"
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Timeline events"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineEvent"
+        "404":
+          description: "Order not found"
+
+  /daas/containers/{id}:
+    get:
+      tags: ["DaaS - Containers"]
+      summary: "GetContainer"
+      description: "Get container details including size, custody, and on-rent status"
+      operationId: "GetContainer"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Container ID (e.g. C-88234)"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Container details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Container"
+        "404":
+          description: "Container not found"
+
+  /daas/containers/{id}/rental-lines:
+    get:
+      tags: ["DaaS - Containers"]
+      summary: "GetActiveRentalLines"
+      description: "Get all active rental lines for a container. Use to detect overlap/double billing."
+      operationId: "GetActiveRentalLines"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Container ID"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Active rental lines"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RentalLine"
+        "404":
+          description: "Container not found"
+
+  /daas/customers/{id}:
+    get:
+      tags: ["DaaS - Customers"]
+      summary: "GetCustomerAccount"
+      description: "Get customer account details including account type and billing address"
+      operationId: "GetCustomerAccount"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Customer ID"
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Customer account"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerAccount"
+        "404":
+          description: "Customer not found"
+
+  /daas/quotes/{id}:
+    get:
+      tags: ["DaaS - Quotes"]
+      summary: "GetQuoteDetails"
+      description: "Get quote details including expiry date, rate, and fuel surcharge"
+      operationId: "GetQuoteDetails"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Quote ID (e.g. Q-10045-A)"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Quote details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Quote"
+        "404":
+          description: "Quote not found"
+
+  /daas/cases/{id}:
+    get:
+      tags: ["DaaS - Cases"]
+      summary: "GetCaseById"
+      description: "Get a Salesforce case by case ID"
+      operationId: "GetCaseById"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Case ID (e.g. CASE-88821)"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Case details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Case"
+        "404":
+          description: "Case not found"
+
+  /daas/cases:
+    get:
+      tags: ["DaaS - Cases"]
+      summary: "GetCasesByOrder"
+      description: "Get all cases for an order or customer"
+      operationId: "GetCasesByOrder"
+      parameters:
+        - name: orderId
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+        - name: customerId
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "List of cases"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Case"
+
+  # ─────────────────────────────────────────────
+  # GROUP B — D365 F&O
+  # ─────────────────────────────────────────────
+
+  /d365/orders/{id}:
+    get:
+      tags: ["D365 F&O"]
+      summary: "CheckD365OrderStatus"
+      description: "Check order sync status in D365 including whether FPU event was received"
+      operationId: "CheckD365OrderStatus"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Order ID"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "D365 order status"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/D365OrderStatus"
+
+  /d365/saleslines:
+    get:
+      tags: ["D365 F&O"]
+      summary: "CheckD365InvoiceLines"
+      description: "Get DBO_SALESLINE records for an order. Checks Booked vs Invoiced status and auto-renew flags."
+      operationId: "CheckD365InvoiceLines"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Invoice lines"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/D365InvoiceLine"
+
+  /d365/rent:
+    get:
+      tags: ["D365 F&O"]
+      summary: "CheckRentGeneration"
+      description: "Check active rental lines and auto-renew flag state for a container"
+      operationId: "CheckRentGeneration"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Rent generation status"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RentGenerationStatus"
+
+  /d365/billing/anniversary:
+    get:
+      tags: ["D365 F&O"]
+      summary: "CheckBillingAnniversary"
+      description: "Get next anniversary date and billing cliff window for a container"
+      operationId: "CheckBillingAnniversary"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Anniversary and billing cliff details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingAnniversary"
+
+  /d365/customers/{id}:
+    get:
+      tags: ["D365 F&O"]
+      summary: "GetD365CustomerMaster"
+      description: "Verify customer exists in D365 CustTable and get master record"
+      operationId: "GetD365CustomerMaster"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Customer master record"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /d365/inventory/{itemCode}:
+    get:
+      tags: ["D365 F&O"]
+      summary: "GetD365InventTable"
+      description: "Verify item code exists in D365 InventTable"
+      operationId: "GetD365InventTable"
+      parameters:
+        - name: itemCode
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Inventory item"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /d365/price-tiers:
+    get:
+      tags: ["D365 F&O"]
+      summary: "GetD365PriceTiers"
+      description: "Get contracted price tiers for a SKU to verify SKU-to-price alignment"
+      operationId: "GetD365PriceTiers"
+      parameters:
+        - name: sku
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Price tier details"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /d365/legal-entities:
+    get:
+      tags: ["D365 F&O"]
+      summary: "GetLegalEntityConfig"
+      description: "Get expected legal entity for a market code to validate Direct Bill orders"
+      operationId: "GetLegalEntityConfig"
+      parameters:
+        - name: marketCode
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Legal entity config"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /d365/billing/snapshot:
+    get:
+      tags: ["D365 F&O"]
+      summary: "GetBillingSnapshot"
+      description: "Get current rate lock snapshot for a container"
+      operationId: "GetBillingSnapshot"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Billing snapshot"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /d365/billing/rate-lock:
+    get:
+      tags: ["D365 F&O"]
+      summary: "CheckRateLock"
+      description: "Verify the rate has not drifted mid-billing period for a container"
+      operationId: "CheckRateLock"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Rate lock status"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ─────────────────────────────────────────────
+  # GROUP C — RBMS
+  # ─────────────────────────────────────────────
+
+  /rbms/moves:
+    get:
+      tags: ["RBMS"]
+      summary: "CheckRBMSMove"
+      description: "Get scheduled and completed moves for an order"
+      operationId: "CheckRBMSMove"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Move records"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /rbms/calendar:
+    get:
+      tags: ["RBMS"]
+      summary: "CheckRBMSCalendar"
+      description: "Get driver calendar entries for a container. Detects duplicate jobs, ghost entries, and unremoved cancellations."
+      operationId: "CheckRBMSCalendar"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Calendar entries"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RBMSCalendar"
+
+  /rbms/sync:
+    get:
+      tags: ["RBMS"]
+      summary: "CheckSyncStatus"
+      description: "Check integration sync lag between RBMS and Salesforce/D365"
+      operationId: "CheckSyncStatus"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Sync status"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /rbms/routing-jobs:
+    get:
+      tags: ["RBMS"]
+      summary: "GetRoutingJobs"
+      description: "Get all routing jobs for an order"
+      operationId: "GetRoutingJobs"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Routing jobs"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /rbms/job-type-check:
+    get:
+      tags: ["RBMS"]
+      summary: "CheckJobType"
+      description: "Verify RBMS job types match Salesforce leg types for an order"
+      operationId: "CheckJobType"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Job type check results"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ─────────────────────────────────────────────
+  # GROUP D — POET
+  # ─────────────────────────────────────────────
+
+  /poet/legs:
+    get:
+      tags: ["POET"]
+      summary: "GetPOETTimestamps"
+      description: "Get leg completion timestamps recorded by drivers in POET. Includes propagation status to Salesforce and D365."
+      operationId: "GetPOETTimestamps"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "POET timestamps"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/POETTimestamp"
+
+  /poet/leg-status:
+    get:
+      tags: ["POET"]
+      summary: "GetLegCompletionStatus"
+      description: "Get completed vs pending status for all legs and whether they have been acknowledged by D365"
+      operationId: "GetLegCompletionStatus"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Leg completion status"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /poet/errors:
+    get:
+      tags: ["POET"]
+      summary: "GetErrorLogs"
+      description: "Get system error logs for an order (e.g. integration timeouts, sync failures)"
+      operationId: "GetErrorLogs"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Error logs"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErrorLog"
+
+  # ─────────────────────────────────────────────
+  # GROUP E — PodHunter
+  # ─────────────────────────────────────────────
+
+  /podhunter/containers/{id}/location:
+    get:
+      tags: ["PodHunter"]
+      summary: "GetContainerLocation"
+      description: "Get physical location, custody state, and storage center for a container"
+      operationId: "GetContainerLocation"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Container ID"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Container location"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /podhunter/containers/{id}/assignment:
+    get:
+      tags: ["PodHunter"]
+      summary: "CheckGhostAssignment"
+      description: "Check for ghost assignments — container still linked to a previous customer after FPU"
+      operationId: "CheckGhostAssignment"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Container ID"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Assignment check result"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GhostAssignmentCheck"
+
+  /podhunter/containers/{id}/custody:
+    get:
+      tags: ["PodHunter"]
+      summary: "GetContainerCustodyHistory"
+      description: "Get full custody transfer history for a container"
+      operationId: "GetContainerCustodyHistory"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Container ID"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Custody history"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  # ─────────────────────────────────────────────
+  # GROUP F — Cheetah
+  # ─────────────────────────────────────────────
+
+  /cheetah/appointments:
+    get:
+      tags: ["Cheetah"]
+      summary: "GetAppointments"
+      description: "Get all scheduled appointments for an order"
+      operationId: "GetAppointments"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Appointments"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /cheetah/pickup-status:
+    get:
+      tags: ["Cheetah"]
+      summary: "CheckScheduledPickup"
+      description: "Check if FPU is scheduled and confirmed. Used by Anniversary Sentinel."
+      operationId: "CheckScheduledPickup"
+      parameters:
+        - name: containerId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Pickup status"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /cheetah/driver-confirmation:
+    get:
+      tags: ["Cheetah"]
+      summary: "GetDriverConfirmation"
+      description: "Get driver confirmation status for a scheduled pickup"
+      operationId: "GetDriverConfirmation"
+      parameters:
+        - name: orderId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Driver confirmation"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ─────────────────────────────────────────────
+  # GROUP G — Snowflake (Historical Analytics)
+  # ─────────────────────────────────────────────
+
+  /snowflake/customer-order-history:
+    get:
+      tags: ["Snowflake"]
+      summary: "GetCustomerOrderHistory"
+      description: "Get historical order volume for a customer. Used for quantity outlier detection."
+      operationId: "GetCustomerOrderHistory"
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Order history"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /snowflake/order-frequency:
+    get:
+      tags: ["Snowflake"]
+      summary: "GetOrderFrequencyPattern"
+      description: "Get order frequency pattern for a customer. Used for velocity and frequency checks."
+      operationId: "GetOrderFrequencyPattern"
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Frequency pattern"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /snowflake/service-mix:
+    get:
+      tags: ["Snowflake"]
+      summary: "GetServiceMixHistory"
+      description: "Get historical service type usage for a customer. Used for product/service mix inconsistency detection."
+      operationId: "GetServiceMixHistory"
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "Service mix history"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /snowflake/seasonal-baseline:
+    get:
+      tags: ["Snowflake"]
+      summary: "GetSeasonalBaseline"
+      description: "Get seasonal volume thresholds for a market. Used for seasonal baseline deviation detection."
+      operationId: "GetSeasonalBaseline"
+      parameters:
+        - name: marketCode
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Seasonal baseline"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /snowflake/avg-time-to-pickup:
+    get:
+      tags: ["Snowflake"]
+      summary: "GetAverageTimeToPickup"
+      description: "Get historical average days from IDEL to FPU by service pattern. Used for time-to-pickup anomaly detection."
+      operationId: "GetAverageTimeToPickup"
+      parameters:
+        - name: marketCode
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: servicePattern
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Average time to pickup"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ─────────────────────────────────────────────
+  # GROUP H — Knowledge Base
+  # ─────────────────────────────────────────────
+
+  /kb/search:
+    get:
+      tags: ["Knowledge Base"]
+      summary: "SearchKnowledgeBase"
+      description: "Search knowledge base articles for a given issue type or keyword"
+      operationId: "SearchKnowledgeBase"
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: "Search query (e.g. 'auto-renew after FPU')"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Search results"
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /kb/similar-cases:
+    get:
+      tags: ["Knowledge Base"]
+      summary: "GetSimilarCases"
+      description: "Get historical cases with the same error pattern"
+      operationId: "GetSimilarCases"
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: "Issue type (e.g. 'Post-FPU Auto-Renew')"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Similar cases"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /kb/resolution/{articleId}:
+    get:
+      tags: ["Knowledge Base"]
+      summary: "GetResolution"
+      description: "Get step-by-step resolution for a knowledge base article"
+      operationId: "GetResolution"
+      parameters:
+        - name: articleId
+          in: path
+          required: true
+          description: "KB Article ID (e.g. KB-4421)"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Resolution steps"
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: "Article not found"
+
+# ─────────────────────────────────────────────
+# SCHEMAS
+# ─────────────────────────────────────────────
+
+components:
+  schemas:
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+        orderNumber:
+          type: string
+        status:
+          type: string
+        serviceType:
+          type: string
+        customerId:
+          type: integer
+        customerName:
+          type: string
+        accountType:
+          type: string
+        legalEntity:
+          type: string
+        marketCode:
+          type: string
+        billingCode:
+          type: string
+        containerSize:
+          type: string
+        containerId:
+          type: string
+        jobSiteAddress:
+          $ref: "#/components/schemas/Address"
+        quoteId:
+          type: string
+        quoteExpiryDate:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    OrderLine:
+      type: object
+      properties:
+        id:
+          type: string
+        orderId:
+          type: integer
+        lineIdentity:
+          type: string
+        productFamily:
+          type: string
+        itemCode:
+          type: string
+        sku:
+          type: string
+        description:
+          type: string
+        billingCode:
+          type: string
+        quantity:
+          type: integer
+        unitPrice:
+          type: number
+        totalPrice:
+          type: number
+        status:
+          type: string
+          enum: [Booked, Invoiced]
+        autoRenew:
+          type: boolean
+        containerId:
+          type: string
+        startDate:
+          type: string
+        endDate:
+          type: string
+          nullable: true
+
+    OrderLeg:
+      type: object
+      properties:
+        id:
+          type: string
+        orderId:
+          type: integer
+        legCode:
+          type: string
+          enum: [IDEL, FPU, WRT, RDL, MOV, WTW, SID, SFP]
+        legName:
+          type: string
+        status:
+          type: string
+        scheduledDate:
+          type: string
+        completedDate:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+          nullable: true
+        driverId:
+          type: string
+        parentLegId:
+          type: string
+          nullable: true
+        sequence:
+          type: integer
+
+    Container:
+      type: object
+      properties:
+        id:
+          type: string
+        size:
+          type: string
+        status:
+          type: string
+        onRent:
+          type: boolean
+        currentCustomerId:
+          type: integer
+        currentOrderId:
+          type: integer
+        physicalLocation:
+          type: string
+        custody:
+          type: string
+          enum: [Customer, Warehouse]
+        lastMoveDate:
+          type: string
+        condition:
+          type: string
+
+    TimelineEvent:
+      type: object
+      properties:
+        event:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        system:
+          type: string
+        actor:
+          type: string
+
+    CustomerAccount:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        accountType:
+          type: string
+          enum: [Residential, Commercial]
+        status:
+          type: string
+        creditLimit:
+          type: number
+        paymentTerms:
+          type: string
+        billingAddress:
+          $ref: "#/components/schemas/Address"
+        primaryContact:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+
+    Quote:
+      type: object
+      properties:
+        id:
+          type: string
+        orderId:
+          type: integer
+        customerId:
+          type: integer
+        status:
+          type: string
+        expiryDate:
+          type: string
+        baseRate:
+          type: number
+        fuelSurcharge:
+          type: number
+        totalMonthlyRate:
+          type: number
+        rateLockedUntil:
+          type: string
+
+    RentalLine:
+      type: object
+      properties:
+        containerId:
+          type: string
+        orderId:
+          type: integer
+        lineId:
+          type: string
+        quantity:
+          type: integer
+        autoRenew:
+          type: boolean
+        status:
+          type: string
+        startDate:
+          type: string
+
+    Case:
+      type: object
+      properties:
+        id:
+          type: string
+        orderId:
+          type: integer
+        customerId:
+          type: integer
+        type:
+          type: string
+        status:
+          type: string
+        subject:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        assignedTo:
+          type: string
+
+    D365OrderStatus:
+      type: object
+      properties:
+        orderId:
+          type: string
+        d365SyncStatus:
+          type: string
+        lastSyncedAt:
+          type: string
+          format: date-time
+        invoicingStatus:
+          type: string
+        fpuReceivedByD365:
+          type: boolean
+        notes:
+          type: string
+
+    D365InvoiceLine:
+      type: object
+      properties:
+        lineId:
+          type: string
+        orderId:
+          type: integer
+        containerId:
+          type: string
+        status:
+          type: string
+          enum: [Booked, Invoiced]
+        autoRenew:
+          type: boolean
+        quantity:
+          type: integer
+        unitPrice:
+          type: number
+        lastUpdated:
+          type: string
+          format: date-time
+        d365TableRef:
+          type: string
+
+    RentGenerationStatus:
+      type: object
+      properties:
+        containerId:
+          type: string
+        activeRentalLines:
+          type: integer
+        autoRenewActive:
+          type: boolean
+        lastRentGeneratedDate:
+          type: string
+          format: date-time
+        nextRentGenerationDate:
+          type: string
+          format: date-time
+        fpuRecorded:
+          type: boolean
+        fpuDate:
+          type: string
+        warning:
+          type: string
+
+    BillingAnniversary:
+      type: object
+      properties:
+        containerId:
+          type: string
+        rentAnniversaryDate:
+          type: string
+        billingCliffWindowStart:
+          type: string
+          format: date-time
+        currentDate:
+          type: string
+        daysUntilAnniversary:
+          type: integer
+        fpuCompleted:
+          type: boolean
+        fpuDate:
+          type: string
+        riskLevel:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        riskReason:
+          type: string
+
+    RBMSCalendar:
+      type: object
+      properties:
+        containerId:
+          type: string
+        calendarEntries:
+          type: array
+          items:
+            type: object
+        duplicatesFound:
+          type: integer
+        ghostEntriesFound:
+          type: integer
+
+    POETTimestamp:
+      type: object
+      properties:
+        legId:
+          type: string
+        orderId:
+          type: integer
+        legCode:
+          type: string
+        poetTimestamp:
+          type: string
+          format: date-time
+        recordedBy:
+          type: string
+        propagatedToSalesforce:
+          type: boolean
+        propagatedToD365:
+          type: boolean
+        salesforceTimestamp:
+          type: string
+          format: date-time
+          nullable: true
+        d365Timestamp:
+          type: string
+          format: date-time
+          nullable: true
+        warning:
+          type: string
+
+    ErrorLog:
+      type: object
+      properties:
+        logId:
+          type: string
+        orderId:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        system:
+          type: string
+        errorCode:
+          type: string
+        message:
+          type: string
+        resolved:
+          type: boolean
+
+    GhostAssignmentCheck:
+      type: object
+      properties:
+        containerId:
+          type: string
+        podhunterAssignedCustomerId:
+          type: integer
+        podhunterAssignedOrderId:
+          type: integer
+        onRentInPodHunter:
+          type: boolean
+        activeOrderInSalesforce:
+          type: boolean
+        mismatch:
+          type: boolean
+        warning:
+          type: string
+
+    Address:
+      type: object
+      properties:
+        street:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        postalCode:
+          type: string
+        country:
+          type: string
+        addressType:
+          type: string
+          enum: [Residential, Commercial]

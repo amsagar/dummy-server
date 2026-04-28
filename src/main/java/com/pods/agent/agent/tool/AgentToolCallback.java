@@ -41,6 +41,7 @@ public class AgentToolCallback implements ToolCallback {
     private final long approvalTimeoutMs;
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
+    private final SkillExecutionGate skillExecutionGate;
 
     public AgentToolCallback(AgentTool tool,
                              ToolExecutionService toolExecutionService,
@@ -51,7 +52,8 @@ public class AgentToolCallback implements ToolCallback {
                              String turnId,
                              long approvalTimeoutMs,
                              ObjectMapper objectMapper,
-                             RuntimeEventRepository runtimeEventRepository) {
+                             RuntimeEventRepository runtimeEventRepository,
+                             SkillExecutionGate skillExecutionGate) {
         this.tool = tool;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -62,6 +64,7 @@ public class AgentToolCallback implements ToolCallback {
         this.approvalTimeoutMs = approvalTimeoutMs;
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
+        this.skillExecutionGate = skillExecutionGate;
     }
 
     @Override
@@ -82,6 +85,15 @@ public class AgentToolCallback implements ToolCallback {
     public String call(String jsonInput, ToolContext ctx) {
         String payload = jsonInput == null ? "{}" : jsonInput;
         String callId = UUID.randomUUID().toString();
+
+        if (skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
+            String blocked = "Skill-first gate active: call the `skill` tool first to load relevant instructions before invoking domain tools.";
+            sender.sendToolCall(sessionId, callId, tool.getName(), payload);
+            saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+            sender.sendToolResult(sessionId, callId, tool.getName(), blocked, "blocked");
+            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"blocked\",\"output\":" + json(blocked) + "}");
+            return blocked;
+        }
 
         GuardrailPolicyEngine.Decision decision = policyEngine.evaluateTool(tool);
         if ("deny".equalsIgnoreCase(decision.decision())) {

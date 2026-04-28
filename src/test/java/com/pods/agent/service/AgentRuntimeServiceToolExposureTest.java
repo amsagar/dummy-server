@@ -69,7 +69,7 @@ class AgentRuntimeServiceToolExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         assertTrue(cap.getValue().stream().anyMatch(t -> "nd-2".equals(t.getId())));
     }
 
@@ -84,7 +84,7 @@ class AgentRuntimeServiceToolExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         assertTrue(cap.getValue().size() <= 40);
     }
 
@@ -104,7 +104,7 @@ class AgentRuntimeServiceToolExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         Set<String> ids = cap.getValue().stream().map(AgentTool::getId).collect(java.util.stream.Collectors.toSet());
         assertTrue(ids.containsAll(Set.of("fw-1", "fw-2", "fw-3")));
     }
@@ -122,7 +122,7 @@ class AgentRuntimeServiceToolExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         Set<String> ids = cap.getValue().stream().map(AgentTool::getId).collect(java.util.stream.Collectors.toSet());
         assertTrue(ids.containsAll(Set.of("fw-1", "fw-2", "fw-3")));
     }
@@ -140,7 +140,7 @@ class AgentRuntimeServiceToolExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         Set<String> ids = cap.getValue().stream().map(AgentTool::getId).collect(java.util.stream.Collectors.toSet());
         assertTrue(ids.containsAll(Set.of("fw-1", "fw-2", "fw-3")));
     }
@@ -159,7 +159,7 @@ class AgentRuntimeServiceToolExposureTest {
         verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());
         Set<String> ids = cap.getValue().stream().map(AgentTool::getId).collect(java.util.stream.Collectors.toSet());
         assertTrue(ids.containsAll(Set.of("fw-1", "fw-2", "fw-3")));
     }

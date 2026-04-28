@@ -4,6 +4,7 @@ import com.pods.agent.agent.AgentOrchestrator;
 import com.pods.agent.agent.AgentSession;
 import com.pods.agent.agent.SseEventSender;
 import com.pods.agent.agent.tool.AgentToolCallbackFactory;
+import com.pods.agent.agent.tool.SkillExecutionGate;
 import org.springframework.ai.tool.ToolCallback;
 import com.pods.agent.api.dto.ChatState;
 import com.pods.agent.config.ModelProviderRouter;
@@ -243,14 +244,20 @@ public class AgentRuntimeService {
         ModelRef embeddingModelRef = embeddingAutoRouterService.pickEmbeddingModel(state);
 
         List<AgentTool> tools = selectTurnTools(userText, baseTools, baseIds, memorySignals, embeddingModelRef, session.getSessionId());
+        boolean enforceSkillFirst = shouldEnforceSkillFirst(userText, session.getSessionId());
+        SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
 
         List<ToolCallback> toolCallbacks = agentToolCallbackFactory.buildForTurn(
-                session.getSessionId(), turnId, sender, tools);
-        String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
-        String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "");
+                session.getSessionId(), turnId, sender, tools, skillExecutionGate);
+        // Keep skill guidance in base system prompt and load full skill content only when
+        // model explicitly calls the native `skill` tool.
+        String stepContext = buildStepContext(userText, "", mcpContext, runtimeMode, session, "");
 
         log.debug("[AgentRuntime] streamTurn start: sessionId={}, turnId={}, tools={}",
                 session.getSessionId(), turnId, toolCallbacks.size());
+        if (enforceSkillFirst) {
+            log.info("[AgentRuntime] skill-first gate enabled for sessionId={}, turnId={}", session.getSessionId(), turnId);
+        }
 
         String response;
         try {
@@ -855,6 +862,15 @@ public class AgentRuntimeService {
         return selected;
     }
 
+    private boolean shouldEnforceSkillFirst(String userText, String sessionId) {
+        if (userText == null || userText.isBlank()) return false;
+        if (isCapabilitiesQuery(userText) || isCatalogOnlySkillQuery(userText)) return false;
+        if (!isTaskOrExecutionIntent(userText)) return false;
+        List<SkillRegistryService.SkillSnapshot> shortlisted = buildSkillShortlist(userText, sessionId);
+        if (shortlisted == null || shortlisted.isEmpty()) return false;
+        return !fallbackSelectSkills(userText, shortlisted, 2).isEmpty();
+    }
+
     private Map<String, Double> loadToolMemorySignals(String sessionId) {
         Map<String, Double> sessionSignals = toolMemorySignals.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>());
         String userId = UserContextHolder.currentUserId();
@@ -936,7 +952,9 @@ public class AgentRuntimeService {
         if (low.startsWith("/") || low.startsWith("tool:")) return true;
         return List.of(
                         "create", "build", "generate", "extract", "merge", "split", "fill", "convert",
-                        "analyze", "summarize", "parse", "fix", "run", "execute", "write", "read", "use"
+                        "analyze", "summarize", "parse", "fix", "run", "execute", "write", "read", "use",
+                        "validate", "validation", "check", "verify", "investigate", "debug", "triage",
+                        "report", "audit", "review", "reconcile", "remediate", "diagnose"
                 ).stream()
                 .anyMatch(low::contains);
     }

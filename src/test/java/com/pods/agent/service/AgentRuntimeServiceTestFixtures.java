@@ -74,6 +74,7 @@ final class AgentRuntimeServiceTestFixtures {
         when(f.memoryService.loadSkillSignals(any())).thenReturn(Map.of());
         f.callbackFactory = mock(AgentToolCallbackFactory.class);
         when(f.callbackFactory.buildForTurn(any(), any(), any(), any())).thenReturn(List.<ToolCallback>of());
+        when(f.callbackFactory.buildForTurn(any(), any(), any(), any(), any())).thenReturn(List.<ToolCallback>of());
         f.toolEmbeddingIndexService = mock(ToolEmbeddingIndexService.class);
         f.embeddingAutoRouterService = mock(EmbeddingAutoRouterService.class);
         return f;

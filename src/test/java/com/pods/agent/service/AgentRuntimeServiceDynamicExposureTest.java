@@ -56,7 +56,7 @@ class AgentRuntimeServiceDynamicExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> shortlistCaptor = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), shortlistCaptor.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), shortlistCaptor.capture(), any());
         List<AgentTool> exposed = shortlistCaptor.getValue();
         // Framework defaults always present
         assertTrue(exposed.stream().anyMatch(t -> "b-1".equals(t.getId())));
@@ -88,7 +88,7 @@ class AgentRuntimeServiceDynamicExposureTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> shortlistCaptor = ArgumentCaptor.forClass(List.class);
-        verify(f.callbackFactory).buildForTurn(any(), any(), any(), shortlistCaptor.capture());
+        verify(f.callbackFactory).buildForTurn(any(), any(), any(), shortlistCaptor.capture(), any());
         assertTrue(shortlistCaptor.getValue().size() <= 50);
     }
 

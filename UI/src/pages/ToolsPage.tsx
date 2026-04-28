@@ -19,7 +19,13 @@ export default function ToolsPage() {
   const [search, setSearch] = useState("");
   const [createDomainOpen, setCreateDomainOpen] = useState(false);
   const [newDomainName, setNewDomainName] = useState("");
+  const [newDomainDescription, setNewDomainDescription] = useState("");
   const [domainError, setDomainError] = useState("");
+  const [editDomainOpen, setEditDomainOpen] = useState(false);
+  const [editingDomain, setEditingDomain] = useState<ToolDomain | null>(null);
+  const [editDomainName, setEditDomainName] = useState("");
+  const [editDomainDescription, setEditDomainDescription] = useState("");
+  const [editDomainError, setEditDomainError] = useState("");
   const [authProfileOpen, setAuthProfileOpen] = useState(false);
   const [selectedDomainForAuth, setSelectedDomainForAuth] = useState<ToolDomain | null>(null);
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
@@ -109,15 +115,42 @@ export default function ToolsPage() {
   };
 
   const createDomain = useMutation({
-    mutationFn: () => api.post("/tool-domains", { name: newDomainName, enabled: true }),
+    mutationFn: () =>
+      api.post("/tool-domains", {
+        name: newDomainName,
+        description: newDomainDescription.trim() || null,
+        enabled: true,
+      }),
     onSuccess: () => {
       refresh();
       setCreateDomainOpen(false);
       setNewDomainName("");
+      setNewDomainDescription("");
       setDomainError("");
       toast.success("Domain created");
     },
     onError: (e: any) => toast.error(e.message || "Failed to create domain"),
+  });
+
+  const updateDomain = useMutation({
+    mutationFn: () => {
+      if (!editingDomain) throw new Error("No domain selected");
+      return api.patch(`/tool-domains/${editingDomain.id}`, {
+        name: editDomainName.trim(),
+        description: editDomainDescription.trim() || null,
+        enabled: editingDomain.enabled,
+      });
+    },
+    onSuccess: () => {
+      refresh();
+      setEditDomainOpen(false);
+      setEditingDomain(null);
+      setEditDomainName("");
+      setEditDomainDescription("");
+      setEditDomainError("");
+      toast.success("Domain details updated");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to update domain"),
   });
 
   const saveAuthProfile = useMutation({
@@ -216,6 +249,23 @@ export default function ToolsPage() {
       return;
     }
     createDomain.mutate();
+  };
+
+  const openEditDomainDialog = (domain: ToolDomain) => {
+    setEditingDomain(domain);
+    setEditDomainName(domain.name || "");
+    setEditDomainDescription(domain.description || "");
+    setEditDomainError("");
+    setEditDomainOpen(true);
+  };
+
+  const handleUpdateDomain = () => {
+    setEditDomainError("");
+    if (!editDomainName.trim()) {
+      setEditDomainError("Domain name is required");
+      return;
+    }
+    updateDomain.mutate();
   };
 
   const openAuthProfileDialog = (domain: ToolDomain) => {
@@ -411,6 +461,7 @@ export default function ToolsPage() {
           <TableHeader>
             <TableRow className="h-9">
               <TableHead>Name</TableHead>
+              <TableHead>Description</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Domain Auth</TableHead>
               <TableHead className="w-[240px] text-right">Actions</TableHead>
@@ -419,7 +470,7 @@ export default function ToolsPage() {
           <TableBody>
             {filteredDomains.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={4} className="py-6 text-center text-sm text-gray-500">
+                <TableCell colSpan={5} className="py-6 text-center text-sm text-gray-500">
                   No domains found.
                 </TableCell>
               </TableRow>
@@ -432,6 +483,9 @@ export default function ToolsPage() {
                 >
                   <TableCell className="max-w-[280px] truncate font-medium" title={d.name}>
                     {d.name}
+                  </TableCell>
+                  <TableCell className="max-w-[360px] truncate text-sm text-gray-600" title={d.description || "No description"}>
+                    {d.description?.trim() ? d.description : "—"}
                   </TableCell>
                   <TableCell>{d.enabled ? "Enabled" : "Disabled"}</TableCell>
                   <TableCell>
@@ -455,6 +509,7 @@ export default function ToolsPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-44">
                         <DropdownMenuItem onClick={() => navigate(`/tools/${d.id}`)}>View tools</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEditDomainDialog(d)}>Edit details</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openAuthProfileDialog(d)}>Manage auth profile</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => toggleDomain(d)}>{d.enabled ? "Disable" : "Enable"}</DropdownMenuItem>
                         <DropdownMenuItem variant="destructive" onClick={() => deleteDomain(d.id)}>Delete</DropdownMenuItem>
@@ -483,12 +538,48 @@ export default function ToolsPage() {
               }}
               placeholder="Domain name (required)"
             />
+            <Input
+              value={newDomainDescription}
+              onChange={(e) => setNewDomainDescription(e.target.value)}
+              placeholder="Description (optional)"
+            />
             {domainError ? <p className="text-xs text-red-600">{domainError}</p> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateDomainOpen(false)}>Cancel</Button>
             <Button onClick={handleCreateDomain} disabled={createDomain.isPending}>
               {createDomain.isPending ? "Creating..." : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editDomainOpen} onOpenChange={(open) => !open && setEditDomainOpen(false)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Domain Details</DialogTitle>
+            <DialogDescription>Update domain name and description.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Input
+              value={editDomainName}
+              onChange={(e) => {
+                setEditDomainName(e.target.value);
+                setEditDomainError("");
+              }}
+              placeholder="Domain name (required)"
+            />
+            <Input
+              value={editDomainDescription}
+              onChange={(e) => setEditDomainDescription(e.target.value)}
+              placeholder="Description (optional)"
+            />
+            {editDomainError ? <p className="text-xs text-red-600">{editDomainError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDomainOpen(false)}>Cancel</Button>
+            <Button onClick={handleUpdateDomain} disabled={updateDomain.isPending}>
+              {updateDomain.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

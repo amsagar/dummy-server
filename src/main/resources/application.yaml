@@ -69,6 +69,7 @@ pods:
     anthropic-chars-per-token: 3.5
     open-ai-chars-per-token: 4.0
     ollama-chars-per-token: 4.2
+    # Keep skills in system prompt catalog; load full content only via `skill` tool calls.
     include-full-skill-files: false
     include-mcp-prompt-hints: false
     strict-scope-only: true
