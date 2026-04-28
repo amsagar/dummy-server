@@ -7,6 +7,7 @@ import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.service.GuardrailPolicyEngine;
 import com.pods.agent.service.PendingInteractionService;
 import com.pods.agent.service.ToolExecutionService;
+import com.pods.agent.service.UserContextHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
@@ -38,6 +39,7 @@ public class AgentToolCallback implements ToolCallback {
     private final SseEventSender sender;
     private final String sessionId;
     private final String turnId;
+    private final String userId;
     private final long approvalTimeoutMs;
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
@@ -50,6 +52,7 @@ public class AgentToolCallback implements ToolCallback {
                              SseEventSender sender,
                              String sessionId,
                              String turnId,
+                             String userId,
                              long approvalTimeoutMs,
                              ObjectMapper objectMapper,
                              RuntimeEventRepository runtimeEventRepository,
@@ -61,6 +64,7 @@ public class AgentToolCallback implements ToolCallback {
         this.sender = sender;
         this.sessionId = sessionId;
         this.turnId = turnId;
+        this.userId = userId;
         this.approvalTimeoutMs = approvalTimeoutMs;
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
@@ -85,8 +89,9 @@ public class AgentToolCallback implements ToolCallback {
     public String call(String jsonInput, ToolContext ctx) {
         String payload = jsonInput == null ? "{}" : jsonInput;
         String callId = UUID.randomUUID().toString();
+        boolean isSkillTool = tool.getName() != null && "skill".equalsIgnoreCase(tool.getName().trim());
 
-        if (skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
+        if (!isSkillTool && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
             String blocked = "Skill-first gate active: call the `skill` tool first to load relevant instructions before invoking domain tools.";
             sender.sendToolCall(sessionId, callId, tool.getName(), payload);
             saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
@@ -136,7 +141,7 @@ public class AgentToolCallback implements ToolCallback {
 
         ToolExecutionService.ExecutionResult execution;
         try {
-            execution = toolExecutionService.execute(tool, payload);
+            execution = UserContextHolder.withUser(userId, () -> toolExecutionService.execute(tool, payload));
         } catch (Exception e) {
             String err = "Tool execution exception: " + e.getMessage();
             sender.sendToolResult(sessionId, callId, tool.getName(), err, "error");

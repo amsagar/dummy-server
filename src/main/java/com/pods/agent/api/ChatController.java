@@ -10,6 +10,8 @@ import com.pods.agent.repository.ChatSessionRepository;
 import com.pods.agent.repository.CostUsageRepository;
 import com.pods.agent.repository.HitlInteractionRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
+import com.pods.agent.agent.AgentSession;
+import com.pods.agent.agent.AgentSessionManager;
 import com.pods.agent.service.ChatService;
 import com.pods.agent.service.PendingInteractionService;
 import com.pods.agent.service.SecurityContextService;
@@ -42,6 +44,7 @@ public class ChatController {
     );
 
     private final ChatService chatService;
+    private final AgentSessionManager sessionManager;
     private final ChatSessionRepository sessionRepository;
     private final ChatMessageRepository messageRepository;
     private final PendingInteractionService pendingInteractionService;
@@ -52,6 +55,7 @@ public class ChatController {
     private final ObjectMapper objectMapper;
 
     public ChatController(ChatService chatService,
+                          AgentSessionManager sessionManager,
                           ChatSessionRepository sessionRepository,
                           ChatMessageRepository messageRepository,
                           PendingInteractionService pendingInteractionService,
@@ -61,6 +65,7 @@ public class ChatController {
                           SecurityContextService securityContextService,
                           ObjectMapper objectMapper) {
         this.chatService = chatService;
+        this.sessionManager = sessionManager;
         this.sessionRepository = sessionRepository;
         this.messageRepository = messageRepository;
         this.pendingInteractionService = pendingInteractionService;
@@ -155,6 +160,26 @@ public class ChatController {
         }
         messageRepository.deleteById(messageId);
         return ResponseEntity.ok(Map.of("deleted", true, "messageId", messageId));
+    }
+
+    @PostMapping("/sessions/{sessionId}/cancel")
+    @Operation(summary = "Cancel the active streaming turn for a session")
+    public ResponseEntity<?> cancelTurn(@PathVariable String sessionId) {
+        String userId = securityContextService.currentUserIdOrThrow();
+        if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
+            return ResponseEntityFactory.notFound("Session not found: " + sessionId);
+        }
+        AgentSession session = sessionManager.get(sessionId);
+        if (session == null) {
+            return ResponseEntity.ok(Map.of("ok", true, "sessionId", sessionId, "note", "no active session"));
+        }
+        session.cancel();
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter = session.getActiveEmitter();
+        if (emitter != null) {
+            try { emitter.complete(); } catch (Exception ignored) {}
+        }
+        log.info("[ChatController] Turn cancelled for session={}", sessionId);
+        return ResponseEntity.ok(Map.of("ok", true, "sessionId", sessionId, "cancelled", true));
     }
 
     @PostMapping("/sessions/{sessionId}/truncate")

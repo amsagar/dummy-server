@@ -98,6 +98,7 @@ public class AgentOrchestrator {
                 modelRef != null ? modelRef : "default",
                 tools == null ? 0 : tools.size());
 
+        StringBuilder fullResponse = new StringBuilder();
         try {
             String systemPrompt = buildSystemPrompt(state, session);
             List<Message> history = sanitizeMessageList(buildMessageList(session));
@@ -114,12 +115,12 @@ public class AgentOrchestrator {
                 promptSpec = promptSpec.options(modelSpec.options());
             }
 
-            StringBuilder fullResponse = new StringBuilder();
             StringBuilder nativeReasoning = new StringBuilder();
             ThinkTagParser thinkParser = new ThinkTagParser(sender, fullResponse);
             promptSpec.stream()
                     .chatResponse()
                     .doOnNext(chatResponse -> {
+                        if (session.isCancelled()) throw new java.util.concurrent.CancellationException("Turn cancelled by user");
                         if (chatResponse == null || chatResponse.getResult() == null) return;
                         var output = chatResponse.getResult().getOutput();
                         String delta = output == null ? null : output.getText();
@@ -159,6 +160,10 @@ public class AgentOrchestrator {
             }
 
             return finalContent.isEmpty() ? "Done." : finalContent;
+        } catch (java.util.concurrent.CancellationException e) {
+            log.info("[AgentOrchestrator] Turn cancelled by user: session={}", session.getSessionId());
+            String partial = fullResponse.toString();
+            return partial.isEmpty() ? "" : partial;
         } catch (Exception e) {
             log.error("[AgentOrchestrator] streamTurn failed: {}", e.getMessage(), e);
             throw e;

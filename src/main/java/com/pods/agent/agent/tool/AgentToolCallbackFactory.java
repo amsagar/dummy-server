@@ -9,6 +9,7 @@ import com.pods.agent.service.PendingInteractionService;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
+import com.pods.agent.service.UserContextHolder;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
@@ -69,11 +70,13 @@ public class AgentToolCallbackFactory {
                                            List<AgentTool> selectedTools,
                                            SkillExecutionGate skillExecutionGate) {
         long timeoutMs = runtimeTuningProperties.getHitlReplyTimeoutMs();
+        String userId = UserContextHolder.currentUserId();
         List<AgentTool> tools = (selectedTools == null || selectedTools.isEmpty())
                 ? toolRegistryService.getEnabledTools()
                 : selectedTools;
         List<ToolCallback> callbacks = tools.stream()
                 .filter(Objects::nonNull)
+                .filter(t -> !isSkillTool(t))
                 .map((AgentTool t) -> (ToolCallback) new AgentToolCallback(
                         t,
                         toolExecutionService,
@@ -82,29 +85,28 @@ public class AgentToolCallbackFactory {
                         sender,
                         sessionId,
                         turnId,
+                        userId,
                         timeoutMs,
                         objectMapper,
                         runtimeEventRepository,
                         skillExecutionGate))
                 .collect(Collectors.toList());
 
-        boolean hasSkillAlready = tools.stream()
-                .filter(Objects::nonNull)
-                .map(AgentTool::getName)
-                .filter(Objects::nonNull)
-                .anyMatch(name -> "skill".equalsIgnoreCase(name.trim()));
-        if (!hasSkillAlready) {
-            callbacks.add(new SkillToolCallback(
-                    skillRegistryService,
-                    runtimeTuningProperties,
-                    sender,
-                    sessionId,
-                    turnId,
-                    objectMapper,
-                    runtimeEventRepository,
-                    skillExecutionGate
-            ));
-        }
+        callbacks.add(new SkillToolCallback(
+                skillRegistryService,
+                runtimeTuningProperties,
+                sender,
+                sessionId,
+                turnId,
+                objectMapper,
+                runtimeEventRepository,
+                skillExecutionGate
+        ));
         return callbacks;
+    }
+
+    private boolean isSkillTool(AgentTool tool) {
+        if (tool == null || tool.getName() == null) return false;
+        return "skill".equalsIgnoreCase(tool.getName().trim());
     }
 }

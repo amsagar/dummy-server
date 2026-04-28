@@ -120,10 +120,30 @@ public class ToolEmbeddingIndexService {
             List<String> toDelete = new ArrayList<>();
             for (String id : oldIds) if (!newIds.contains(id)) toDelete.add(id);
             deleteAll(toDelete);
-            int upserted = upsertBatch(new ArrayList<>(tools));
+            // Guard against FK violations from race conditions (cleanup deleting tools
+            // while this async sync is in flight).
+            Set<String> existingIds = existingToolIds(newIds);
+            List<AgentTool> toUpsert = new ArrayList<>();
+            for (AgentTool t : tools) {
+                if (t != null && t.getId() != null && existingIds.contains(t.getId())) toUpsert.add(t);
+            }
+            int upserted = upsertBatch(toUpsert);
             log.info("[ToolEmbeddingIndex] sync: removed={}, upserted={} (of {})", toDelete.size(), upserted, newIds.size());
         } catch (Exception e) {
             log.warn("[ToolEmbeddingIndex] sync failed: {}", e.getMessage());
+        }
+    }
+
+    private Set<String> existingToolIds(Set<String> ids) {
+        if (ids == null || ids.isEmpty()) return Collections.emptySet();
+        try {
+            MapSqlParameterSource params = new MapSqlParameterSource("ids", new ArrayList<>(ids));
+            List<String> found = namedJdbc.queryForList(
+                    "SELECT id FROM agent.agent_tools WHERE id IN (:ids)", params, String.class);
+            return new LinkedHashSet<>(found);
+        } catch (Exception e) {
+            log.debug("[ToolEmbeddingIndex] existingToolIds check failed: {}", e.getMessage());
+            return ids;
         }
     }
 

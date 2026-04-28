@@ -26,6 +26,7 @@ import {
   ZoomIn,
   ZoomOut,
   Code2,
+  Square,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { api } from "@/services/api";
@@ -419,6 +420,7 @@ export default function ChatPage() {
   const isStreamingRef = useRef(false);
   const assistantAddedRef = useRef(false);
   const skipNextHydrationRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [isManualSessionSwitch, setIsManualSessionSwitch] = useState(false);
   const [modelSelectionMode, setModelSelectionMode] = useState<'manual' | 'auto'>('manual');
   const [pendingInteractions, setPendingInteractions] = useState<Array<{ requestId: string; type: string; prompt: string; metadata?: HitlQuestionMetadata }>>([]);
@@ -1041,9 +1043,12 @@ export default function ChatPage() {
     setIsManualSessionSwitch(false);
 
     try {
+      const abort = new AbortController();
+      abortControllerRef.current = abort;
       const token = getAuthToken();
       const response = await fetch('http://localhost:8080/api/v1/chat', {
         method: 'POST',
+        signal: abort.signal,
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {})
@@ -1309,6 +1314,17 @@ export default function ChatPage() {
 
   const removeAttachment = (fileName: string) => {
     setAttachments(prev => prev.filter(a => a.fileName !== fileName));
+  };
+
+  const handleStop = async () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsStreaming(false);
+    isStreamingRef.current = false;
+    setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m));
+    if (sessionId) {
+      try { await api.post(`/chat/sessions/${sessionId}/cancel`, {}); } catch {}
+    }
   };
 
   const answerPending = async (requestId: string, action: 'reply' | 'approve' | 'reject', selectedOptionIds?: string[]) => {
@@ -1663,11 +1679,11 @@ export default function ChatPage() {
                 const selected = m.requestId ? (interactionSelections[m.requestId] ?? []) : [];
                 const metadata = pending?.metadata || normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload);
                 const mode = metadata?.responseMode || "text";
-                const isToolEvent = m.eventType === "tool.call" || m.eventType === "tool.done" || m.eventType === "tool.match";
+                const isToolEvent = m.eventType === "tool.call" || m.eventType === "tool.done" || m.eventType === "tool.result" || m.eventType === "tool.match";
                 if (isToolEvent) {
                   const payloadText = m.eventType === "tool.call"
                     ? formatPayload(m.eventPayload?.input)
-                    : m.eventType === "tool.done"
+                    : (m.eventType === "tool.done" || m.eventType === "tool.result")
                     ? formatPayload(m.eventPayload?.output)
                     : formatPayload({
                         reason: m.eventPayload?.reason,
@@ -2054,16 +2070,28 @@ export default function ChatPage() {
                   }
                 }}
               />
-              <button
-                onClick={() => handleSend()}
-                disabled={isStreaming || (!input.trim() && attachments.length === 0)}
-                className="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-md border border-[#00529f] text-white shadow-sm transition hover:brightness-110 disabled:opacity-40"
-                style={{ background: "#005CB9" }}
-                title={isStreaming ? "Generating response..." : "Send message"}
-                aria-label={isStreaming ? "Generating response" : "Send message"}
-              >
-                {isStreaming ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-              </button>
+              {isStreaming ? (
+                <button
+                  onClick={handleStop}
+                  className="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-md border border-red-500 text-white shadow-sm transition hover:brightness-110"
+                  style={{ background: "#dc2626" }}
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <Square size={12} fill="white" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSend()}
+                  disabled={!input.trim() && attachments.length === 0}
+                  className="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-md border border-[#00529f] text-white shadow-sm transition hover:brightness-110 disabled:opacity-40"
+                  style={{ background: "#005CB9" }}
+                  title="Send message"
+                  aria-label="Send message"
+                >
+                  <Send size={14} />
+                </button>
+              )}
             </div>
             <input
               ref={fileInputRef}

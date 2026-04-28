@@ -3,7 +3,10 @@ package com.pods.agent.service;
 import java.util.concurrent.Callable;
 
 public final class UserContextHolder {
-    private static final ThreadLocal<String> USER_ID = new ThreadLocal<>();
+    // InheritableThreadLocal so Spring AI's reactive scheduler threads
+    // (spawned during tool-call execution) inherit the authenticated user ID
+    // from the parent thread that initiated the streaming turn.
+    private static final InheritableThreadLocal<String> USER_ID = new InheritableThreadLocal<>();
 
     private UserContextHolder() {
     }

@@ -139,6 +139,7 @@ public class ChatService {
                 Path workspace = sessionWorkspaceService.getOrCreate(sessionId);
                 session.setWorkspacePath(workspace);
                 workspaceSkillSyncService.sync(workspace);
+                session.beginTurn();
                 String turnId = UUID.randomUUID().toString();
                 if (runtimeTuningProperties.isPersistInternalEvents()) {
                     runtimeEventRepository.save(RuntimeEvent.builder()

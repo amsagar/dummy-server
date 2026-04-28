@@ -36,6 +36,7 @@ class AgentToolCallbackSkillGateTest {
                 sender,
                 "s1",
                 "t1",
+                null,
                 1000,
                 new ObjectMapper(),
                 null,
@@ -71,6 +72,7 @@ class AgentToolCallbackSkillGateTest {
                 sender,
                 "s1",
                 "t1",
+                null,
                 1000,
                 new ObjectMapper(),
                 null,
@@ -80,6 +82,38 @@ class AgentToolCallbackSkillGateTest {
         String output = callback.call("{\"orderId\":\"123\"}");
 
         assertTrue(output.contains("\"ok\":true"));
+        verify(executionService).execute(any(), any());
+    }
+
+    @Test
+    void doesNotBlockSkillToolEvenWhenGateIsActive() {
+        AgentTool tool = AgentTool.builder().id("s1").name("skill").description("load skill").enabled(true).build();
+        ToolExecutionService executionService = mock(ToolExecutionService.class);
+        GuardrailPolicyEngine policyEngine = mock(GuardrailPolicyEngine.class);
+        PendingInteractionService pendingInteractionService = mock(PendingInteractionService.class);
+        SseEventSender sender = mock(SseEventSender.class);
+
+        when(policyEngine.evaluateTool(any())).thenReturn(new GuardrailPolicyEngine.Decision("allow", ""));
+        when(executionService.execute(any(), any())).thenReturn(new ToolExecutionService.ExecutionResult(true, "{\"loaded\":true}", null));
+
+        AgentToolCallback callback = new AgentToolCallback(
+                tool,
+                executionService,
+                policyEngine,
+                pendingInteractionService,
+                sender,
+                "s1",
+                "t1",
+                null,
+                1000,
+                new ObjectMapper(),
+                null,
+                new SkillExecutionGate(true)
+        );
+
+        String output = callback.call("{\"name\":\"Billing Rules\"}");
+
+        assertTrue(output.contains("\"loaded\":true"));
         verify(executionService).execute(any(), any());
     }
 }

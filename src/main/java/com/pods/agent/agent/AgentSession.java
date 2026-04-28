@@ -22,6 +22,7 @@ public class AgentSession {
 
     /** Active SSE emitter for the current streaming request */
     private volatile SseEmitter activeEmitter;
+    private volatile boolean cancelled = false;
 
     private ChatState activeState = new ChatState();
 
@@ -37,5 +38,17 @@ public class AgentSession {
 
     public void touch() {
         this.lastActiveAt = System.currentTimeMillis();
+    }
+
+    public void beginTurn() {
+        this.cancelled = false;
+    }
+
+    public void cancel() {
+        this.cancelled = true;
+    }
+
+    public boolean isCancelled() {
+        return cancelled;
     }
 }
