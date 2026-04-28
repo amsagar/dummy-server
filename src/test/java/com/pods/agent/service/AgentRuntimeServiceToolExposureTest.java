@@ -48,11 +48,11 @@ class AgentRuntimeServiceToolExposureTest {
     void singleStreamTurn_evenOnRefusalLikeResponse() {
         AgentRuntimeServiceTestFixtures.Fixture f = withCatalog(0);
         when(f.embeddingAutoRouterService.pickEmbeddingModel(any())).thenReturn(null);
-        when(f.orchestrator.streamTurn(any(), any(), any(), any(), any())).thenReturn("I cannot access this");
+        when(f.orchestrator.streamTurn(any(), any(), any(), any(), any(), any())).thenReturn("I cannot access this");
 
         AgentRuntimeService svc = AgentRuntimeServiceTestFixtures.create(f);
         svc.runTurn(new AgentSession("s"), "what?", ChatState.builder().build(), mock(SseEventSender.class));
-        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any());
+        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -156,7 +156,7 @@ class AgentRuntimeServiceToolExposureTest {
         AgentRuntimeService svc = AgentRuntimeServiceTestFixtures.create(f);
         svc.runTurn(new AgentSession("s"), "x", ChatState.builder().build(), mock(SseEventSender.class));
 
-        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any());
+        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any(), any());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<AgentTool>> cap = ArgumentCaptor.forClass(List.class);
         verify(f.callbackFactory).buildForTurn(any(), any(), any(), cap.capture(), any());

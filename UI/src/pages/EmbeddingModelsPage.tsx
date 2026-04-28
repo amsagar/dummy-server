@@ -328,10 +328,10 @@ export default function EmbeddingModelsPage() {
                     <TableCell>
                       <ProviderBadge providerID={m.providerID} name={m.providerName} />
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-slate-500 max-w-[220px] truncate">
+                    <TableCell className="font-mono text-xs text-slate-500 max-w-[220px] truncate" title={m.modelID}>
                       {m.modelID}
                     </TableCell>
-                    <TableCell className="text-sm font-medium max-w-[220px]">
+                    <TableCell className="text-sm font-medium max-w-[220px]" title={m.displayName}>
                       <div className="flex items-center gap-1.5">
                         <span className="truncate">{m.displayName}</span>
                         {m.hasKey && (

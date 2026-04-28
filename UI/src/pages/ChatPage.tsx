@@ -19,6 +19,7 @@ import {
   RotateCcw,
   ChevronDown,
   ChevronRight,
+  Brain,
   Paperclip,
   X,
   Maximize2,
@@ -60,6 +61,7 @@ interface Message {
   id: string;
   type: MsgType;
   content: string;
+  reasoning?: string;
   isStreaming?: boolean;
   dbId?: string;
   createdAt?: number;
@@ -416,6 +418,7 @@ export default function ChatPage() {
   const [spinnerVerbIndex, setSpinnerVerbIndex] = useState(0);
   const isStreamingRef = useRef(false);
   const assistantAddedRef = useRef(false);
+  const skipNextHydrationRef = useRef(false);
   const [isManualSessionSwitch, setIsManualSessionSwitch] = useState(false);
   const [modelSelectionMode, setModelSelectionMode] = useState<'manual' | 'auto'>('manual');
   const [pendingInteractions, setPendingInteractions] = useState<Array<{ requestId: string; type: string; prompt: string; metadata?: HitlQuestionMetadata }>>([]);
@@ -669,11 +672,30 @@ export default function ChatPage() {
     // Hydrate from persisted session history whenever history/events are available.
     // Skip hydration only while an active stream is in progress.
     if (historyMessages.length > 0 && !isStreamingRef.current) {
+      // Skip one hydration cycle right after streaming completes so we wait for
+      // eventsData to be refetched before overwriting the live-streamed messages.
+      if (skipNextHydrationRef.current) {
+        skipNextHydrationRef.current = false;
+        return;
+      }
+      // Build a map of turnId → reasoning content from persisted reasoning events
+      const reasoningByTurnId = new Map<string, string>();
+      (eventsData?.events || []).forEach((e: any) => {
+        if (e.eventType === 'reasoning' && e.turnId) {
+          try {
+            const p = JSON.parse(e.payload || '{}');
+            if (p.content) reasoningByTurnId.set(e.turnId, p.content);
+          } catch { /* ignore */ }
+        }
+      });
+
       const chatMsgs: Message[] = historyMessages.map((m: any) => ({
         id: genId(),
         type: m.role === 'user' ? 'user' : 'assistant',
         content: m.content || '',
+        reasoning: m.role === 'assistant' && m.turnId ? reasoningByTurnId.get(m.turnId) : undefined,
         dbId: m.id,
+        turnId: m.turnId,
         createdAt: m.createdAt,
       }));
 
@@ -689,10 +711,8 @@ export default function ChatPage() {
           const toolName = payload.toolName || payload.tool || "";
           payload = { ...payload, callId: payload.callId, toolName, output: payload.output ?? payload.result };
           content = `Tool completed: ${toolName}`;
-        } else if (e.eventType === 'step.started') {
-          content = `Step ${payload.step || "?"} started${payload.maxSteps ? ` (max ${payload.maxSteps})` : ""}.`;
-        } else if (e.eventType === 'step.finished') {
-          content = `Step ${payload.step || "?"} finished${payload.mode ? ` (${payload.mode})` : ""}.`;
+        } else if (e.eventType === 'step.started' || e.eventType === 'step.finished') {
+          return null as any;
         } else if (e.eventType === 'tool.match') {
           const needsClarification = payload.needsClarification === true || payload.decision === "clarify";
           const candidates = Array.isArray(payload.candidates)
@@ -822,10 +842,11 @@ export default function ChatPage() {
     return () => viewport.removeEventListener("scroll", onScroll);
   }, [loadOlderHistory, historyOffset, historyTotal]);
 
-  // Build a provider→models map from enabled models
+  // Build a provider→models map from enabled chat models (exclude embeddings)
   const modelsByProvider = React.useMemo(() => {
     const map = new Map<string, { providerName?: string; models: any[] }>();
     for (const m of (modelsData || [])) {
+      if (m.modelKind === 'embedding') continue;
       const pid = m.providerID as string;
       if (!map.has(pid)) map.set(pid, { providerName: m.providerName, models: [] });
       map.get(pid)!.models.push(m);
@@ -1069,6 +1090,14 @@ export default function ChatPage() {
             ));
             break;
 
+          case 'reasoning.delta':
+            setMessages(prev => prev.map(m =>
+              m.id === assistantId
+                ? { ...m, reasoning: (m.reasoning || '') + (ev.content || '') }
+                : m
+            ));
+            break;
+
           case 'session.updated':
             if (ev.sessionId && ev.title) {
               upsertSessionInCache({
@@ -1085,20 +1114,8 @@ export default function ChatPage() {
           case 'task.done':
             break;
           case 'step.started':
-            appendSystemMessage(
-              ev.type,
-              `Step ${ev.step || "?"} started${ev.maxSteps ? ` (max ${ev.maxSteps})` : ""}.`,
-              undefined,
-              { step: ev.step, maxSteps: ev.maxSteps }
-            );
-            break;
           case 'step.finished':
-            appendSystemMessage(
-              ev.type,
-              `Step ${ev.step || "?"} finished${ev.mode ? ` (${ev.mode})` : ""}.`,
-              undefined,
-              { step: ev.step, mode: ev.mode, executedAny: ev.executedAny }
-            );
+            // suppressed — sequential tool execution no longer emits step boundaries
             break;
           case 'tool.call':
             {
@@ -1173,6 +1190,7 @@ export default function ChatPage() {
           case 'done':
             setIsStreaming(false);
             isStreamingRef.current = false;
+            skipNextHydrationRef.current = true;
             if (ev.content !== undefined) {
               setMessages(prev => {
                 const updated = prev.map(m =>
@@ -1192,6 +1210,7 @@ export default function ChatPage() {
             }
             refetchSessions();
             refetchPending();
+            queryClient.invalidateQueries({ queryKey: ['chat-events', sessionId] });
             if (ev.sessionId || sessionId) {
               const sid = ev.sessionId || sessionId;
               if (sid) {
@@ -1202,7 +1221,6 @@ export default function ChatPage() {
                 lastActive: Date.now(),
               });
             }
-            queryClient.invalidateQueries({ queryKey: ['chat-events', sessionId] });
             break;
 
           case 'error':
@@ -1359,6 +1377,7 @@ export default function ChatPage() {
             className="h-9 w-full rounded-lg border-none text-sm font-semibold text-white shadow-none"
             style={{ background: "#005CB9" }}
             onClick={handleNewChat}
+            title="Start a new chat session"
           >
             <Plus size={16} className="mr-2" /> New Chat
           </Button>
@@ -1409,7 +1428,7 @@ export default function ChatPage() {
                     />
                   ) : (
                     <>
-                      <div className="truncate text-xs font-medium text-[#123262]">
+                      <div className="truncate text-xs font-medium text-[#123262]" title={s.title || s.sessionId}>
                         {s.title || s.sessionId?.slice(0, 24) + "…"}
                       </div>
                       <div className="mt-0.5 text-[10px] text-gray-400">
@@ -1471,6 +1490,7 @@ export default function ChatPage() {
                 <button
                   className="flex w-full items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:text-gray-600"
                   onClick={() => setShowArchived(v => !v)}
+                  title={showArchived ? "Hide archived sessions" : "Show archived sessions"}
                 >
                   {showArchived ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                   Archived ({archivedSessions.length})
@@ -1481,7 +1501,7 @@ export default function ChatPage() {
                     className="flex cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-xs text-slate-400 hover:bg-slate-100"
                     onClick={() => handleSelectSession(s.sessionId)}
                   >
-                    <span className="flex-1 truncate">{s.title || s.sessionId?.slice(0, 24) + "…"}</span>
+                    <span className="flex-1 truncate" title={s.title || s.sessionId}>{s.title || s.sessionId?.slice(0, 24) + "…"}</span>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
@@ -1512,20 +1532,26 @@ export default function ChatPage() {
       <div className="flex min-w-0 flex-col overflow-hidden bg-white">
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-gray-200 px-3">
           <div className="flex items-center gap-2">
-            <span className="max-w-[280px] truncate text-sm font-semibold text-[#123262]">
+            <span className="max-w-[280px] truncate text-sm font-semibold text-[#123262]" title={currentSession?.title || sessionId || "New Session"}>
               {currentSession?.title || (sessionId ? sessionId.slice(0, 16) + '…' : 'New Session')}
             </span>
             {sessionId ? <span className="text-xs text-slate-500">#{sessionId.slice(0, 8)}</span> : null}
           </div>
           <div className="flex items-center gap-1.5">
-            <select
-              value={modelSelectionMode}
-              onChange={(e) => setModelSelectionMode(e.target.value as any)}
-              className="h-7 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700"
-            >
-              <option value="manual">Manual Model</option>
-              <option value="auto">Auto Route</option>
-            </select>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <select
+                  value={modelSelectionMode}
+                  onChange={(e) => setModelSelectionMode(e.target.value as any)}
+                  className="h-7 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700"
+                  title="Choose model routing mode"
+                >
+                  <option value="manual">Manual Model</option>
+                  <option value="auto">Auto Route</option>
+                </select>
+              </TooltipTrigger>
+              <TooltipContent side="bottom"><p>Choose model routing mode</p></TooltipContent>
+            </Tooltip>
             <SearchableSelect
               options={providerList.map(pid => ({
                 value: pid,
@@ -1537,6 +1563,9 @@ export default function ChatPage() {
               placeholder="Provider"
               searchPlaceholder="Search providers…"
               className="w-32"
+              triggerTitle={selectedProvider ? `Provider: ${modelsByProvider.get(selectedProvider)?.providerName || selectedProvider}` : "Select provider"}
+              triggerAriaLabel="Select provider"
+              tooltip={selectedProvider ? `Provider: ${modelsByProvider.get(selectedProvider)?.providerName || selectedProvider}` : "Select provider"}
             />
             <SearchableSelect
               options={(modelsByProvider.get(selectedProvider)?.models ?? []).map((m: any) => ({
@@ -1550,6 +1579,9 @@ export default function ChatPage() {
               searchPlaceholder="Search models…"
               disabled={!selectedProvider || (modelsByProvider.get(selectedProvider)?.models.length ?? 0) === 0}
               className="w-40"
+              triggerTitle={selectedModel ? `Model: ${(modelsByProvider.get(selectedProvider)?.models ?? []).find((m: any) => modelRefKey({ providerID: m.providerID, modelID: m.modelID }) === selectedModel)?.displayName || selectedModel}` : "Select model"}
+              triggerAriaLabel="Select chat model"
+              tooltip={selectedModel ? `Model: ${(modelsByProvider.get(selectedProvider)?.models ?? []).find((m: any) => modelRefKey({ providerID: m.providerID, modelID: m.modelID }) === selectedModel)?.displayName || selectedModel}` : "Select model"}
             />
           </div>
         </div>
@@ -1859,6 +1891,20 @@ export default function ChatPage() {
                         onMouseLeave={() => setHoveredMsgIdx(null)}
                       >
                         <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 shadow-sm">
+                          {m.reasoning && (
+                            <details className="group/think mb-3 rounded-lg border border-indigo-100 bg-indigo-50/60 text-xs">
+                              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-indigo-500 [&::-webkit-details-marker]:hidden">
+                                <Brain size={11} className="shrink-0" />
+                                <span className="flex-1 font-medium">
+                                  {m.isStreaming && !m.content ? 'Thinking…' : 'Reasoning'}
+                                </span>
+                                <ChevronRight size={10} className="shrink-0 text-indigo-400 transition-transform group-open/think:rotate-90" />
+                              </summary>
+                              <div className="border-t border-indigo-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-500 whitespace-pre-wrap">
+                                {m.reasoning}
+                              </div>
+                            </details>
+                          )}
                           <div className="prose prose-sm max-w-none prose-slate prose-p:my-1 prose-li:my-0.5 prose-headings:my-2 prose-pre:bg-slate-100 prose-pre:text-xs prose-code:text-xs prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded">
                             <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                               {m.content}
@@ -1933,6 +1979,20 @@ export default function ChatPage() {
                   onMouseLeave={() => setHoveredMsgIdx(null)}
                 >
                   <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 shadow-sm">
+                    {m.reasoning && (
+                      <details className="group/think mb-3 rounded-lg border border-indigo-100 bg-indigo-50/60 text-xs">
+                        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-indigo-500 [&::-webkit-details-marker]:hidden">
+                          <Brain size={11} className="shrink-0" />
+                          <span className="flex-1 font-medium">
+                            {m.isStreaming && !m.content ? 'Thinking…' : 'Reasoning'}
+                          </span>
+                          <ChevronRight size={10} className="shrink-0 text-indigo-400 transition-transform group-open/think:rotate-90" />
+                        </summary>
+                        <div className="border-t border-indigo-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-500 whitespace-pre-wrap">
+                          {m.reasoning}
+                        </div>
+                      </details>
+                    )}
                     <div className="prose prose-sm max-w-none prose-slate prose-p:my-1 prose-li:my-0.5 prose-headings:my-2 prose-pre:bg-slate-100 prose-pre:text-xs prose-code:text-xs prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded">
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                         {m.content}
@@ -1965,7 +2025,13 @@ export default function ChatPage() {
                     <span key={a.fileName} className="inline-flex items-center gap-1 rounded border bg-slate-100 px-2 py-1 text-xs text-slate-700">
                       <Paperclip size={12} />
                       {a.fileName}
-                      <button type="button" onClick={() => removeAttachment(a.fileName)} className="text-slate-500 hover:text-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(a.fileName)}
+                        className="text-slate-500 hover:text-slate-700"
+                        title={`Remove ${a.fileName}`}
+                        aria-label={`Remove attachment ${a.fileName}`}
+                      >
                         <X size={12} />
                       </button>
                     </span>
@@ -1978,6 +2044,8 @@ export default function ChatPage() {
                 style={{ minHeight: 40, maxHeight: 120 }}
                 rows={1}
                 value={input}
+                title="Message input. Press Enter to send, Shift+Enter for a new line."
+                aria-label="Chat message input"
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -1989,8 +2057,10 @@ export default function ChatPage() {
               <button
                 onClick={() => handleSend()}
                 disabled={isStreaming || (!input.trim() && attachments.length === 0)}
-                className="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-md text-white transition-opacity disabled:opacity-40"
+                className="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-md border border-[#00529f] text-white shadow-sm transition hover:brightness-110 disabled:opacity-40"
                 style={{ background: "#005CB9" }}
+                title={isStreaming ? "Generating response..." : "Send message"}
+                aria-label={isStreaming ? "Generating response" : "Send message"}
               >
                 {isStreaming ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
               </button>
@@ -2009,6 +2079,7 @@ export default function ChatPage() {
               className="h-10"
               onClick={() => fileInputRef.current?.click()}
               disabled={isStreaming || attachments.length >= MAX_ATTACHMENTS}
+              title={attachments.length >= MAX_ATTACHMENTS ? `Maximum ${MAX_ATTACHMENTS} attachments reached` : "Attach files to your message"}
             >
               <Paperclip size={14} className="mr-1" />
               Attach

@@ -103,6 +103,6 @@ class AgentRuntimeServiceDynamicExposureTest {
         AgentRuntimeService service = AgentRuntimeServiceTestFixtures.create(f);
         service.runTurn(new AgentSession("s-x"), "i cannot access this thing", ChatState.builder().build(), mock(SseEventSender.class));
 
-        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any());
+        verify(f.orchestrator, times(1)).streamTurn(any(), any(), any(), any(), any(), any());
     }
 }

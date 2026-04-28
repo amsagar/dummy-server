@@ -41,6 +41,7 @@ public class ChatMessageRepository {
                 .addValue("sessionId", message.getSessionId())
                 .addValue("role", message.getRole())
                 .addValue("content", message.getContent())
+                .addValue("turnId", message.getTurnId())
                 .addValue("createdAt", message.getCreatedAt());
         namedJdbc.update(sql, params);
         return message;

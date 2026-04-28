@@ -149,7 +149,12 @@ public class ToolExecutionService {
                         truncate(response.body(), 1200));
                 if (response.statusCode() >= 200 && response.statusCode() < 300) {
                     state.reset();
-                    return new ExecutionResult(true, response.body(), null);
+                    String responseBody = response.body();
+                    if (responseBody == null || responseBody.isBlank()) {
+                        return new ExecutionResult(false, null,
+                                "HTTP " + response.statusCode() + " but response body was empty — service may have returned no data");
+                    }
+                    return new ExecutionResult(true, responseBody, null);
                 }
                 last = new RuntimeException("HTTP " + response.statusCode() + ": " + truncate(response.body(), 500));
             } catch (Exception e) {

@@ -90,6 +90,14 @@ public class ModelController {
         }
     }
 
+    @DeleteMapping("/api/v1/models/{providerID}/{modelID}")
+    @Operation(summary = "Remove a registered model")
+    public ResponseEntity<?> deleteModel(@PathVariable String providerID,
+                                         @PathVariable String modelID) {
+        modelRegistryService.deleteModel(providerID, modelID);
+        return ResponseEntity.ok(Map.of("deleted", true, "providerID", providerID, "modelID", modelID));
+    }
+
     @PostMapping("/api/v1/models")
     @Operation(summary = "Register or update a model — API key is encrypted before storage")
     public ResponseEntity<?> registerModel(@RequestBody ModelRegisterRequest req) {

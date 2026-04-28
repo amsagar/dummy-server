@@ -7,6 +7,7 @@ import com.pods.agent.repository.AgentDomainRepository;
 import com.pods.agent.repository.AgentToolRepository;
 import com.pods.agent.repository.McpRegistryRepository;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
@@ -311,6 +312,42 @@ public class McpClientService {
         } catch (Exception e) {
             throw new IllegalArgumentException("GitHub user repo lookup failed: " + e.getMessage(), e);
         }
+    }
+
+    @PostConstruct
+    public void cleanupOrphanedMcpDomains() {
+        try {
+            Set<String> registeredNames = mcpRegistryRepository.findAll().stream()
+                    .map(s -> ("MCP " + s.getName()).toLowerCase())
+                    .collect(java.util.stream.Collectors.toSet());
+            int deleted = 0;
+            for (AgentDomain domain : domainRepository.findAll()) {
+                if (domain.getName() == null || !domain.getName().toLowerCase().startsWith("mcp ")) continue;
+                if (!registeredNames.contains(domain.getName().toLowerCase())) {
+                    domainRepository.delete(domain.getId());
+                    deleted++;
+                    log.info("[McpClientService] Cleaned up orphaned MCP domain: {}", domain.getName());
+                }
+            }
+            if (deleted > 0) {
+                toolRegistryService.refresh();
+                log.info("[McpClientService] Removed {} orphaned MCP domain(s) on startup", deleted);
+            }
+        } catch (Exception e) {
+            log.warn("[McpClientService] Orphan cleanup failed (non-fatal): {}", e.getMessage());
+        }
+    }
+
+    public void deleteServer(String serverId) {
+        McpRegistryEntry server = mcpRegistryRepository.findById(serverId)
+                .orElseThrow(() -> new IllegalArgumentException("MCP server not found: " + serverId));
+        findDomainId(server).ifPresent(domainId -> {
+            domainRepository.delete(domainId);
+            log.info("[McpClientService] Deleted domain {} for MCP server {}", domainId, server.getName());
+        });
+        mcpRegistryRepository.delete(serverId);
+        toolRegistryService.refresh();
+        log.info("[McpClientService] Deleted MCP server {} and refreshed tool cache", server.getName());
     }
 
     public Map<String, Object> discoverAndSyncTools(String serverId) {

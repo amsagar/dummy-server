@@ -2,6 +2,7 @@ import * as React from "react";
 import { useState, useRef, useEffect } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export interface SearchableSelectOption {
   value: string;
@@ -19,6 +20,12 @@ interface SearchableSelectProps {
   className?: string;
   /** Width class for the dropdown panel, e.g. "w-72". Defaults to "w-full". */
   dropdownWidth?: string;
+  /** Optional title shown on hover for the trigger button. */
+  triggerTitle?: string;
+  /** Accessible label for the trigger button. */
+  triggerAriaLabel?: string;
+  /** Optional rich tooltip text shown over the trigger. */
+  tooltip?: string;
 }
 
 export function SearchableSelect({
@@ -30,6 +37,9 @@ export function SearchableSelect({
   disabled = false,
   className,
   dropdownWidth,
+  triggerTitle,
+  triggerAriaLabel,
+  tooltip,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -62,45 +72,49 @@ export function SearchableSelect({
     }
   }, [open]);
 
+  const triggerButton = (
+    <button
+      type="button"
+      disabled={disabled}
+      title={triggerTitle ?? selected?.label ?? placeholder}
+      aria-label={triggerAriaLabel ?? placeholder}
+      className={cn(
+        "flex h-9 w-full items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm ring-offset-background transition-all",
+        "hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#005CB9]/30 focus:ring-offset-1",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        open && "border-[#005CB9]/50 ring-2 ring-[#005CB9]/25"
+      )}
+      onClick={() => { if (!disabled) setOpen((o) => !o); }}
+    >
+      <span className={cn("truncate", !selected && "text-muted-foreground")}>
+        {selected ? selected.label : placeholder}
+      </span>
+      <ChevronDown size={14} className={cn("shrink-0 text-slate-400 transition-transform", open && "rotate-180")} />
+    </button>
+  );
+
   return (
     <div ref={containerRef} className={cn("relative", className)}>
       {/* Trigger */}
-      <button
-        type="button"
-        disabled={disabled}
-        className={cn(
-          "flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background",
-          "placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
-          "disabled:cursor-not-allowed disabled:opacity-50",
-          open && "ring-2 ring-ring ring-offset-2"
-        )}
-        onClick={() => { if (!disabled) setOpen((o) => !o); }}
-      >
-        <span className={cn("truncate", !selected && "text-muted-foreground")}>
-          {selected ? (
-            <span>
-              {selected.label}
-              {selected.sublabel && (
-                <span className="ml-1.5 text-xs text-slate-400">{selected.sublabel}</span>
-              )}
-            </span>
-          ) : placeholder}
-        </span>
-        <ChevronDown size={14} className={cn("shrink-0 text-slate-400 transition-transform", open && "rotate-180")} />
-      </button>
+      {tooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{triggerButton}</TooltipTrigger>
+          <TooltipContent side="top"><p>{tooltip}</p></TooltipContent>
+        </Tooltip>
+      ) : triggerButton}
 
       {/* Dropdown */}
       {open && (
         <div className={cn(
-          "absolute z-50 mt-1 rounded-md border bg-white shadow-lg",
+          "absolute z-[70] mt-1 rounded-xl border border-slate-200 bg-white shadow-xl",
           dropdownWidth ?? "w-full"
         )}>
           {/* Search box */}
-          <div className="flex items-center gap-1.5 border-b px-2 py-1.5">
+          <div className="flex items-center gap-1.5 border-b border-slate-100 px-2.5 py-2">
             <Search size={13} className="text-slate-400 shrink-0" />
             <input
               ref={inputRef}
-              className="flex-1 text-xs outline-none placeholder:text-slate-400 bg-transparent"
+              className="flex-1 bg-transparent text-xs text-slate-700 outline-none placeholder:text-slate-400"
               placeholder={searchPlaceholder}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -116,17 +130,19 @@ export function SearchableSelect({
           </div>
 
           {/* Options list */}
-          <div className="max-h-60 overflow-y-auto py-1">
+          <div className="max-h-64 overflow-y-auto py-1.5">
             {filtered.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-slate-400">No results found</div>
+              <div className="px-3 py-3 text-xs text-slate-400">No results found</div>
             ) : (
               filtered.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
                   className={cn(
-                    "flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-slate-50 transition-colors",
-                    opt.value === value && "bg-blue-50 text-blue-700"
+                    "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs transition-colors",
+                    opt.value === value
+                      ? "bg-blue-50 text-blue-700"
+                      : "text-slate-700 hover:bg-slate-50"
                   )}
                   onClick={() => {
                     onValueChange(opt.value);

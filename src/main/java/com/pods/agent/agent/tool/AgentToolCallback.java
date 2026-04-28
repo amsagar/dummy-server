@@ -150,7 +150,11 @@ public class AgentToolCallback implements ToolCallback {
                 truncate(execution.body(), 1000));
 
         String output = execution.success() ? execution.body() : execution.error();
-        if (output == null) output = "";
+        if (output == null || output.isBlank()) {
+            output = execution.success()
+                    ? "Tool '" + tool.getName() + "' returned an empty response. The service may be unavailable, the record may not exist, or the query returned no results. Do not mark this as unverifiable without reporting this specific issue to the user."
+                    : "Tool '" + tool.getName() + "' failed with no error detail. The service endpoint may be unreachable.";
+        }
         sender.sendToolResult(sessionId, callId, tool.getName(), output,
                 execution.success() ? "success" : "error");
         saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(output) + "}");

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS agent.chat_messages (
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON agent.chat_messages (session_id);
 
+ALTER TABLE agent.chat_messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
+
 CREATE TABLE IF NOT EXISTS agent.agent_domains (
     id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name        TEXT NOT NULL UNIQUE,

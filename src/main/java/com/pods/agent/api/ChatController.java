@@ -38,7 +38,7 @@ public class ChatController {
     private static final Set<String> SESSION_EVENT_TYPES = Set.of(
             "tool.match", "tool.call", "tool.done", "tool.result",
             "question", "approval_required",
-            "step.started", "step.finished"
+            "reasoning"
     );
 
     private final ChatService chatService;
@@ -195,12 +195,15 @@ public class ChatController {
         var dbMessages = messageRepository.findBySessionId(sessionId, limit, offset);
         long total = messageRepository.countBySessionId(sessionId);
         List<Map<String, Object>> messages = dbMessages.stream()
-                .map(m -> Map.<String, Object>of(
-                        "id", m.getId(),
-                        "role", m.getRole(),
-                        "content", m.getContent() != null ? m.getContent() : "",
-                        "createdAt", m.getCreatedAt()
-                ))
+                .map(m -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", m.getId());
+                    row.put("role", m.getRole());
+                    row.put("content", m.getContent() != null ? m.getContent() : "");
+                    row.put("turnId", m.getTurnId());
+                    row.put("createdAt", m.getCreatedAt());
+                    return row;
+                })
                 .toList();
 
         return ResponseEntity.ok(Map.of(

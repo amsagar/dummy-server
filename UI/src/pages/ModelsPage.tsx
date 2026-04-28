@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useState, useMemo, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Cpu, Plus, Loader2, KeyRound, Eye, EyeOff, ChevronDown, Pencil, DollarSign } from "lucide-react";
+import { Cpu, Plus, Loader2, KeyRound, Eye, EyeOff, ChevronDown, ChevronRight, Pencil, DollarSign, Info, Trash2 } from "lucide-react";
 import { api } from "@/services/api";
 import { ModelConfig, ProviderEntry } from "@/types";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,15 @@ const PROVIDER_COLORS: Record<string, string> = {
   google:       "bg-red-100 text-red-700 border-red-200",
   ollama:       "bg-purple-100 text-purple-700 border-purple-200",
   groq:         "bg-yellow-100 text-yellow-700 border-yellow-200",
+};
+
+const PROVIDER_GROUP_COLORS: Record<string, string> = {
+  anthropic:    "bg-orange-50/60 border-orange-100",
+  openai:       "bg-emerald-50/60 border-emerald-100",
+  azure_openai: "bg-blue-50/60 border-blue-100",
+  google:       "bg-red-50/60 border-red-100",
+  ollama:       "bg-purple-50/60 border-purple-100",
+  groq:         "bg-yellow-50/60 border-yellow-100",
 };
 
 function ProviderBadge({ providerID, name }: { providerID: string; name?: string }) {
@@ -68,7 +77,6 @@ function ModelDropdown({ models, selected, onToggle, onClear, disabled }: ModelD
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // close & reset search when disabled (provider changed)
   useEffect(() => { if (disabled) { setOpen(false); setSearch(''); } }, [disabled]);
 
   const filtered = search.trim()
@@ -83,7 +91,6 @@ function ModelDropdown({ models, selected, onToggle, onClear, disabled }: ModelD
 
   return (
     <div ref={ref} className={cn("relative", disabled && "opacity-50 pointer-events-none")}>
-      {/* Trigger */}
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
@@ -99,10 +106,8 @@ function ModelDropdown({ models, selected, onToggle, onClear, disabled }: ModelD
         <ChevronDown size={14} className={cn("shrink-0 text-slate-400 transition-transform", open && "rotate-180")} />
       </button>
 
-      {/* Dropdown panel */}
       {open && (
         <div className="absolute z-50 mt-1 w-full rounded-md border bg-white shadow-lg">
-          {/* Search */}
           <div className="flex items-center gap-2 px-3 py-2 border-b bg-slate-50">
             <svg className="w-3.5 h-3.5 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -124,7 +129,6 @@ function ModelDropdown({ models, selected, onToggle, onClear, disabled }: ModelD
               </button>
             )}
           </div>
-          {/* List */}
           <div className="max-h-52 overflow-y-auto">
             {filtered.length === 0 ? (
               <div className="text-xs text-slate-400 text-center py-4">No models found</div>
@@ -185,6 +189,11 @@ export default function ModelsPage() {
   const [editForm, setEditForm] = useState<EditForm>(defaultEditForm);
   const [showEditKey, setShowEditKey] = useState(false);
 
+  const [deleteTarget, setDeleteTarget] = useState<ModelConfig | null>(null);
+
+  // Track which provider groups are collapsed (all expanded by default)
+  const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(new Set());
+
   const queryClient = useQueryClient();
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['models'] });
 
@@ -223,6 +232,13 @@ export default function ModelsPage() {
     onError: (err: any) => toast.error(err.message || "Failed to disable"),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: ({ providerID, modelID }: { providerID: string; modelID: string }) =>
+      api.delete(`/models/${providerID}/${modelID}`),
+    onSuccess: () => { toast.success("Model removed"); invalidate(); setDeleteTarget(null); },
+    onError: (err: any) => toast.error(err.message || "Failed to remove model"),
+  });
+
   const providerOptions = useMemo(() =>
     (providers ?? []).map(p => ({ value: p.id, label: p.name, sublabel: p.id })),
     [providers]
@@ -232,6 +248,54 @@ export default function ModelsPage() {
     if (!form.providerID || !providers) return [];
     return providers.find(p => p.id === form.providerID)?.models ?? [];
   }, [form.providerID, providers]);
+
+  // Per-provider credential status derived from registered models
+  const providerCredentials = useMemo(() => {
+    const map: Record<string, { hasKey: boolean; baseUrl?: string; providerName?: string }> = {};
+    (allModels ?? []).forEach(m => {
+      if (!map[m.providerID]) {
+        map[m.providerID] = { hasKey: false, providerName: m.providerName };
+      }
+      if (m.hasKey && !map[m.providerID].hasKey) {
+        map[m.providerID].hasKey = true;
+        map[m.providerID].baseUrl = m.baseUrl;
+      }
+    });
+    return map;
+  }, [allModels]);
+
+  // Credential info for the currently-selected provider in the register form
+  const selectedProviderCreds = form.providerID ? providerCredentials[form.providerID] : undefined;
+  const willReuseCredentials = !!selectedProviderCreds?.hasKey && !form.apiKey;
+
+  // Group chat models by provider (exclude embeddings — they have their own page)
+  const groupedModels = useMemo(() => {
+    const groups = new Map<string, ModelConfig[]>();
+    (allModels ?? []).filter(m => m.modelKind !== 'embedding').forEach(m => {
+      if (!groups.has(m.providerID)) groups.set(m.providerID, []);
+      groups.get(m.providerID)!.push(m);
+    });
+    return groups;
+  }, [allModels]);
+
+  const openRegisterForProvider = (pid: string) => {
+    const creds = providerCredentials[pid];
+    setForm({
+      ...defaultRegisterForm,
+      providerID: pid,
+      baseUrl: creds?.baseUrl ?? '',
+    });
+    setShowRegisterKey(false);
+    setRegisterOpen(true);
+  };
+
+  const toggleProviderCollapse = (pid: string) => {
+    setCollapsedProviders(prev => {
+      const next = new Set(prev);
+      next.has(pid) ? next.delete(pid) : next.add(pid);
+      return next;
+    });
+  };
 
   const handleRegister = async () => {
     const { providerID, selectedModelIDs, apiKey, baseUrl, enabled } = form;
@@ -269,8 +333,6 @@ export default function ModelsPage() {
     });
   };
 
-  const displayed = allModels ?? [];
-
   return (
     <div className="space-y-4">
       {/* ── Header ──────────────────────────────────────────────────────────── */}
@@ -279,121 +341,194 @@ export default function ModelsPage() {
           <h1 className="text-xl font-semibold text-[#123262]">AI Models</h1>
           <p className="text-sm text-gray-500 mt-0.5">Registered LLM providers and model configurations</p>
         </div>
-        <Button onClick={() => setRegisterOpen(true)} className="h-9 px-4 text-sm font-medium text-white rounded-lg" style={{ background: "#005CB9" }}>
+        <Button onClick={() => { setForm(defaultRegisterForm); setShowRegisterKey(false); setRegisterOpen(true); }} className="h-9 px-4 text-sm font-medium text-white rounded-lg" style={{ background: "#005CB9" }}>
           <Plus size={15} className="mr-1.5" /> Register Model
         </Button>
       </div>
 
       {/* ── Table ───────────────────────────────────────────────────────────── */}
       <div className="overflow-hidden border border-gray-200 rounded-xl bg-white">
-          {isLoading ? (
-            <div className="p-6 space-y-3">
-              {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-10 w-full" />)}
-            </div>
-          ) : displayed.length === 0 ? (
-            <div className="text-center py-16 text-slate-400">
-              <Cpu size={32} className="mx-auto mb-3 opacity-30" />
-              <p className="text-sm">No models registered. Click "Register Model" to add one.</p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-gray-50">
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Provider</TableHead>
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Model ID</TableHead>
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</TableHead>
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Cost</TableHead>
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</TableHead>
-                  <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {displayed.map((m) => (
-                  <TableRow key={`${m.providerID}/${m.modelID}`}>
-                    <TableCell>
-                      <ProviderBadge providerID={m.providerID} name={m.providerName} />
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-slate-500 max-w-[180px] truncate">
-                      {m.modelID}
-                    </TableCell>
-                    <TableCell className="text-sm font-medium max-w-[200px] truncate">
-                      <div className="flex items-center gap-1.5">
-                        {m.displayName}
-                        {m.hasKey && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="text-green-600 cursor-default">
-                                <KeyRound size={11} />
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top"><p>API key stored (encrypted)</p></TooltipContent>
-                          </Tooltip>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <CostCell input={m.costInput} output={m.costOutput} />
-                    </TableCell>
-                    <TableCell>
-                      <span className={cn(
-                        "px-2 py-0.5 rounded-full text-xs font-semibold border",
-                        m.enabled
-                          ? "bg-green-100 text-green-700 border-green-200"
-                          : "bg-slate-100 text-slate-500 border-slate-200"
-                      )}>
-                        {m.enabled ? "Enabled" : "Disabled"}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              size="sm" variant="outline"
-                              className="h-7 text-xs"
-                              onClick={() => openEdit(m)}
-                            >
-                              <Pencil size={11} className="mr-1" /> Edit
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent side="top"><p>Edit model configuration</p></TooltipContent>
-                        </Tooltip>
-                        {m.enabled ? (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                size="sm" variant="outline"
-                                className="h-7 text-xs text-red-600 border-red-200 hover:bg-red-50"
-                                disabled={disableMutation.isPending}
-                                onClick={() => disableMutation.mutate({ providerID: m.providerID, modelID: m.modelID })}
-                              >
-                                Disable
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top"><p>Disable this model</p></TooltipContent>
-                          </Tooltip>
-                        ) : (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                size="sm" variant="outline"
-                                className="h-7 text-xs text-green-700 border-green-200 hover:bg-green-50"
-                                disabled={enableMutation.isPending}
-                                onClick={() => enableMutation.mutate({ providerID: m.providerID, modelID: m.modelID })}
-                              >
-                                Enable
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top"><p>Enable this model</p></TooltipContent>
-                          </Tooltip>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+        {isLoading ? (
+          <div className="p-6 space-y-3">
+            {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+        ) : groupedModels.size === 0 ? (
+          <div className="text-center py-16 text-slate-400">
+            <Cpu size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm">No models registered. Click "Register Model" to add one.</p>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-gray-50">
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider w-6 pl-3 pr-0"></TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider w-40">Provider</TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Model ID</TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Cost</TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</TableHead>
+                <TableHead className="text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {Array.from(groupedModels.entries()).map(([pid, models]) => {
+                const collapsed = collapsedProviders.has(pid);
+                const creds = providerCredentials[pid];
+                const headerColor = PROVIDER_GROUP_COLORS[pid?.toLowerCase()] ?? "bg-slate-50 border-slate-200";
+                const firstModel = models[0];
+
+                return (
+                  <React.Fragment key={pid}>
+                    {/* Provider group header row */}
+                    <TableRow
+                      className={cn("border-b cursor-pointer select-none hover:brightness-95 transition-all", headerColor)}
+                      onClick={() => toggleProviderCollapse(pid)}
+                    >
+                      <TableCell className="py-2.5 pl-3 pr-0 w-6">
+                        <ChevronRight
+                          size={14}
+                          className={cn("text-slate-400 transition-transform duration-150", !collapsed && "rotate-90")}
+                        />
+                      </TableCell>
+                      <TableCell className="py-2.5" colSpan={2}>
+                        <div className="flex items-center gap-2.5">
+                          <ProviderBadge providerID={pid} name={firstModel?.providerName} />
+                          <span className="text-xs text-slate-500 font-medium">
+                            {models.length} model{models.length !== 1 ? 's' : ''}
+                          </span>
+                          {creds?.hasKey && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="flex items-center gap-1 text-[10px] text-green-700 bg-green-100 border border-green-200 rounded-full px-2 py-0.5 cursor-default">
+                                  <KeyRound size={9} /> Credentials stored
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="right">
+                                <p>API key is stored for this provider. New models can be added without re-entering credentials.</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-2.5" />
+                      <TableCell className="py-2.5">
+                        <span className="text-xs text-slate-400">
+                          {models.filter(m => m.enabled).length}/{models.length} enabled
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-2.5 text-right pr-4" colSpan={2}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 text-[11px] px-2.5 gap-1"
+                          onClick={(e) => { e.stopPropagation(); openRegisterForProvider(pid); }}
+                        >
+                          <Plus size={10} /> Add Model
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+
+                    {/* Model rows */}
+                    {!collapsed && models.map((m) => (
+                      <TableRow key={`${m.providerID}/${m.modelID}`} className="hover:bg-slate-50/50">
+                        <TableCell className="py-2.5 w-6" />
+                        <TableCell className="py-2.5 w-40" />
+                        <TableCell className="font-mono text-xs text-slate-500 max-w-[180px] truncate pl-2" title={m.modelID}>
+                          {m.modelID}
+                        </TableCell>
+                        <TableCell className="text-sm font-medium max-w-[200px] truncate" title={m.displayName}>
+                          <div className="flex items-center gap-1.5">
+                            {m.displayName}
+                            {m.hasKey && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="text-green-600 cursor-default">
+                                    <KeyRound size={11} />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="top"><p>API key stored (encrypted)</p></TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <CostCell input={m.costInput} output={m.costOutput} />
+                        </TableCell>
+                        <TableCell>
+                          <span className={cn(
+                            "px-2 py-0.5 rounded-full text-xs font-semibold border",
+                            m.enabled
+                              ? "bg-green-100 text-green-700 border-green-200"
+                              : "bg-slate-100 text-slate-500 border-slate-200"
+                          )}>
+                            {m.enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm" variant="outline"
+                                  className="h-7 text-xs"
+                                  onClick={() => openEdit(m)}
+                                >
+                                  <Pencil size={11} className="mr-1" /> Edit
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top"><p>Edit model configuration</p></TooltipContent>
+                            </Tooltip>
+                            {m.enabled ? (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="sm" variant="outline"
+                                    className="h-7 text-xs text-red-600 border-red-200 hover:bg-red-50"
+                                    disabled={disableMutation.isPending}
+                                    onClick={() => disableMutation.mutate({ providerID: m.providerID, modelID: m.modelID })}
+                                  >
+                                    Disable
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top"><p>Disable this model</p></TooltipContent>
+                              </Tooltip>
+                            ) : (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="sm" variant="outline"
+                                    className="h-7 text-xs text-green-700 border-green-200 hover:bg-green-50"
+                                    disabled={enableMutation.isPending}
+                                    onClick={() => enableMutation.mutate({ providerID: m.providerID, modelID: m.modelID })}
+                                  >
+                                    Enable
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top"><p>Enable this model</p></TooltipContent>
+                              </Tooltip>
+                            )}
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm" variant="outline"
+                                  className="h-7 w-7 p-0 text-slate-400 border-slate-200 hover:text-red-600 hover:border-red-200 hover:bg-red-50"
+                                  onClick={() => setDeleteTarget(m)}
+                                >
+                                  <Trash2 size={12} />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top"><p>Remove model</p></TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
       </div>
 
       {/* ── Register Dialog ──────────────────────────────────────────────────── */}
@@ -405,7 +540,7 @@ export default function ModelsPage() {
           <DialogHeader>
             <DialogTitle>Register Model</DialogTitle>
             <DialogDescription>
-              Select a provider and one or more models, then enter your API key. Keys are encrypted (AES-256-GCM) before storage.
+              Select a provider and one or more models to register. Keys are encrypted (AES-256-GCM) before storage.
             </DialogDescription>
           </DialogHeader>
 
@@ -416,11 +551,31 @@ export default function ModelsPage() {
               <SearchableSelect
                 options={providerOptions}
                 value={form.providerID}
-                onValueChange={(pid) => setForm(f => ({ ...f, providerID: pid, selectedModelIDs: [] }))}
+                onValueChange={(pid) => {
+                  const creds = providerCredentials[pid];
+                  setForm(f => ({
+                    ...f,
+                    providerID: pid,
+                    selectedModelIDs: [],
+                    baseUrl: creds?.baseUrl ?? f.baseUrl,
+                  }));
+                }}
                 placeholder="Search and select provider…"
                 searchPlaceholder="Search providers…"
               />
             </div>
+
+            {/* Credential reuse banner */}
+            {selectedProviderCreds?.hasKey && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5">
+                <Info size={14} className="text-green-600 mt-0.5 shrink-0" />
+                <div className="text-xs text-green-800 leading-relaxed">
+                  <span className="font-semibold">Credentials already stored</span> for{" "}
+                  {selectedProviderCreds.providerName || form.providerID}.{" "}
+                  Leave the API key blank to reuse them for all selected models.
+                </div>
+              </div>
+            )}
 
             {/* Model multi-select dropdown */}
             <div>
@@ -449,13 +604,26 @@ export default function ModelsPage() {
               <label className="text-xs font-medium text-slate-700 block mb-1.5">
                 <KeyRound size={12} className="inline mr-1" />
                 API Key
-                <span className="ml-1 font-normal text-slate-400">(encrypted at rest)</span>
+                {selectedProviderCreds?.hasKey ? (
+                  <span className="ml-1 font-normal text-green-600">(optional — existing key will be reused)</span>
+                ) : (
+                  <span className="ml-1 font-normal text-slate-400">(encrypted at rest)</span>
+                )}
               </label>
               <div className="relative">
                 <input
                   type={showRegisterKey ? "text" : "password"}
-                  className="w-full h-9 rounded-md border border-input bg-background px-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
-                  placeholder={form.providerID ? `${form.providerID} API key…` : "API key…"}
+                  className={cn(
+                    "w-full h-9 rounded-md border bg-background px-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground",
+                    willReuseCredentials ? "border-green-300 focus:ring-green-400" : "border-input"
+                  )}
+                  placeholder={
+                    willReuseCredentials
+                      ? "Leave blank to reuse existing key…"
+                      : form.providerID
+                        ? `${form.providerID} API key…`
+                        : "API key…"
+                  }
                   value={form.apiKey}
                   onChange={(e) => setForm(f => ({ ...f, apiKey: e.target.value }))}
                   autoComplete="off"
@@ -580,6 +748,34 @@ export default function ModelsPage() {
             >
               {editMutation.isPending && <Loader2 size={14} className="animate-spin mr-2" />}
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Delete Confirmation Dialog ────────────────────────────────────────── */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Remove Model</DialogTitle>
+            <DialogDescription>
+              This will permanently remove{" "}
+              <span className="font-mono font-semibold text-slate-700">
+                {deleteTarget?.displayName || deleteTarget?.modelID}
+              </span>{" "}
+              from the registry. The model can be re-registered at any time.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button
+              variant="outline"
+              className="text-red-600 border-red-200 hover:bg-red-50"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteTarget && deleteMutation.mutate({ providerID: deleteTarget.providerID, modelID: deleteTarget.modelID })}
+            >
+              {deleteMutation.isPending && <Loader2 size={14} className="animate-spin mr-2" />}
+              Remove
             </Button>
           </DialogFooter>
         </DialogContent>

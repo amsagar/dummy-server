@@ -126,7 +126,7 @@ function FileTree({
                 ) : (
                   <Folder size={13} className="flex-shrink-0 text-amber-400" />
                 )}
-                <span className="text-xs text-slate-600 font-medium truncate">
+                <span className="text-xs text-slate-600 font-medium truncate" title={node.fullPath}>
                   {node.name}
                 </span>
               </div>
@@ -162,7 +162,7 @@ function FileTree({
               size={12}
               className={cn("flex-shrink-0", isSelected ? "text-[#123262]" : "text-slate-400")}
             />
-            <span className="text-xs truncate">{node.name}</span>
+            <span className="text-xs truncate" title={node.fullPath}>{node.name}</span>
           </div>
         );
       })}
@@ -367,6 +367,8 @@ export default function SkillsPage() {
                     <button
                       className="flex-shrink-0 text-slate-400 hover:text-slate-600 transition-colors"
                       onClick={(e) => { e.stopPropagation(); toggleSkillExpand(skill.id); }}
+                    title={isExpanded ? "Collapse skill files" : "Expand skill files"}
+                    aria-label={isExpanded ? "Collapse skill files" : "Expand skill files"}
                     >
                       <ChevronRight
                         size={13}
@@ -377,7 +379,7 @@ export default function SkillsPage() {
                     <span className={cn(
                       "text-sm truncate flex-1 font-medium",
                       isSelected ? "text-[#123262]" : "text-slate-700"
-                    )}>
+                    )} title={skill.name}>
                       {skill.name}
                     </span>
                     <span
@@ -454,7 +456,7 @@ export default function SkillsPage() {
               </button>
               <DropdownMenu>
                 <DropdownMenuTrigger>
-                  <button className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
+                  <button className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors" title="Skill actions" aria-label="Skill actions">
                     <MoreHorizontal size={16} />
                   </button>
                 </DropdownMenuTrigger>
@@ -503,7 +505,7 @@ export default function SkillsPage() {
                 {/* Toolbar */}
                 <div className="flex items-center justify-between px-5 py-2 border-b border-slate-100 bg-slate-50/70 flex-shrink-0">
                   <span className="text-xs font-mono text-slate-500">
-                    {selectedFile.filePath}
+                    <span title={selectedFile.filePath}>{selectedFile.filePath}</span>
                     {dirtyFiles.has(selectedFile.id) && (
                       <span className="ml-2 text-[10px] text-amber-500 font-sans">● unsaved</span>
                     )}
@@ -517,6 +519,7 @@ export default function SkillsPage() {
                           viewMode === mode ? "bg-white text-[#123262] shadow-sm" : "text-slate-500 hover:text-slate-700"
                         )}
                         onClick={() => setViewMode(mode)}
+                        title={mode === "preview" ? "Render markdown preview" : "Edit raw markdown"}
                       >
                         {mode === "preview" ? <><Eye size={12} className="inline mr-1" />Preview</> : <><Code2 size={12} className="inline mr-1" />Raw</>}
                       </button>

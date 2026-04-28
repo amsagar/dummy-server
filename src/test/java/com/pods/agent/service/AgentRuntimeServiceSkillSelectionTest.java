@@ -47,7 +47,7 @@ class AgentRuntimeServiceSkillSelectionTest {
         );
 
         ArgumentCaptor<String> contextCaptor = ArgumentCaptor.forClass(String.class);
-        verify(f.orchestrator, atLeastOnce()).streamTurn(any(), contextCaptor.capture(), any(), any(), any());
+        verify(f.orchestrator, atLeastOnce()).streamTurn(any(), contextCaptor.capture(), any(), any(), any(), any());
         String stepContext = contextCaptor.getAllValues().get(contextCaptor.getAllValues().size() - 1);
         assertFalse(stepContext.contains("<skill_content"));
         assertTrue(stepContext.contains("Validate order 10045"));

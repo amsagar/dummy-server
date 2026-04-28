@@ -177,7 +177,7 @@ public class ChatService {
                     scheduleAsyncTitleGeneration(sessionId, userId, sourceMessage, state, sender);
                 }
 
-                saveMessage(sessionId, "user", finalUserMessage);
+                saveMessage(sessionId, "user", finalUserMessage, null);
 
                 long turnStart = System.currentTimeMillis();
                 String response = WorkspaceContextHolder.withWorkspace(workspace, () ->
@@ -186,7 +186,7 @@ public class ChatService {
                 );
                 long elapsed = System.currentTimeMillis() - turnStart;
 
-                saveMessage(sessionId, "assistant", response);
+                saveMessage(sessionId, "assistant", response, turnId);
 
                 sessionRepository.updateLastActive(sessionId, userId, System.currentTimeMillis());
                 persistContextState(sessionId, state, compactionResult);
@@ -407,12 +407,13 @@ public class ChatService {
         }
     }
 
-    private void saveMessage(String sessionId, String role, String content) {
+    private void saveMessage(String sessionId, String role, String content, String turnId) {
         try {
             messageRepository.save(ChatMessage.builder()
                     .sessionId(sessionId)
                     .role(role)
                     .content(content)
+                    .turnId(turnId)
                     .createdAt(System.currentTimeMillis())
                     .build());
         } catch (Exception e) {

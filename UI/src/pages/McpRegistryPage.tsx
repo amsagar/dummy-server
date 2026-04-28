@@ -318,7 +318,7 @@ export default function McpRegistryPage() {
                   <TableCell className="text-right" data-no-row-nav="true">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                        <Button size="icon" variant="outline" className="h-8 w-8" aria-label="Server actions">
+                        <Button size="icon" variant="outline" className="h-8 w-8" aria-label="Server actions" title="Server actions">
                           <MoreHorizontal size={14} />
                         </Button>
                       </DropdownMenuTrigger>

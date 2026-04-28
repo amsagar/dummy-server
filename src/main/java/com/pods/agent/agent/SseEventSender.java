@@ -45,6 +45,10 @@ public class SseEventSender {
         send(Map.of("type", "text.delta", "content", content));
     }
 
+    public void sendReasoningDelta(String content) {
+        send(Map.of("type", "reasoning.delta", "content", content));
+    }
+
     public void sendPlanCreated(String sessionId, String mode, String plan) {
         send(Map.of("type", "plan.created", "sessionId", sessionId, "mode", mode, "plan", plan));
     }

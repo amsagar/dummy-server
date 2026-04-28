@@ -445,7 +445,7 @@ export default function ToolsPage() {
             <h4 className="text-sm font-semibold text-[#123262]">Domains</h4>
             <p className="text-xs text-gray-500">Click View tools to open the tools page for that domain.</p>
           </div>
-          <Button size="sm" onClick={() => setCreateDomainOpen(true)}>
+          <Button size="sm" onClick={() => setCreateDomainOpen(true)} title="Create a new tool domain">
             Create Domain
           </Button>
         </div>
@@ -455,6 +455,7 @@ export default function ToolsPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search domains"
           className="max-w-sm"
+          title="Search domains by name, description, or status"
         />
 
         <Table>
@@ -503,7 +504,7 @@ export default function ToolsPage() {
                   <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button size="icon" variant="outline" className="h-8 w-8">
+                        <Button size="icon" variant="outline" className="h-8 w-8" aria-label="Open domain actions" title="Domain actions">
                           <MoreHorizontal size={14} />
                         </Button>
                       </DropdownMenuTrigger>

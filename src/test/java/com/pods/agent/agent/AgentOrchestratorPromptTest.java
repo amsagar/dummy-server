@@ -27,8 +27,7 @@ class AgentOrchestratorPromptTest {
                 mock(SkillRegistryService.class),
                 mock(InstructionLoaderService.class),
                 mock(MemoryService.class),
-                new RuntimeTuningProperties(),
-                new tools.jackson.databind.ObjectMapper()
+                new RuntimeTuningProperties()
         );
 
         String prompt = orchestrator.baseSystemPromptForTest();
@@ -44,8 +43,7 @@ class AgentOrchestratorPromptTest {
                 skillRegistryService,
                 mock(InstructionLoaderService.class),
                 mock(MemoryService.class),
-                new RuntimeTuningProperties(),
-                new tools.jackson.databind.ObjectMapper()
+                new RuntimeTuningProperties()
         );
 
         String normalized = orchestrator.normalizeUserMessageForHistory(
@@ -71,8 +69,7 @@ class AgentOrchestratorPromptTest {
                 skillRegistryService,
                 mock(InstructionLoaderService.class),
                 mock(MemoryService.class),
-                props,
-                new tools.jackson.databind.ObjectMapper()
+                props
         );
 
         String prompt = orchestrator.buildSystemPromptForTest(ChatState.builder().build(), new AgentSession("s4"));

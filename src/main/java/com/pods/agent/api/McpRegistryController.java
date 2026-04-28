@@ -130,7 +130,7 @@ public class McpRegistryController {
         if (mcpRegistryRepository.findById(id).isEmpty()) {
             return ResponseEntityFactory.notFound("MCP server not found: " + id);
         }
-        mcpRegistryRepository.delete(id);
+        mcpClientService.deleteServer(id);
         return ResponseEntity.ok(Map.of("deleted", true, "id", id));
     }
 

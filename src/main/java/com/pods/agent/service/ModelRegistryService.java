@@ -58,7 +58,10 @@ public class ModelRegistryService {
      * List only enabled models.
      */
     public List<ModelConfig> listEnabled() {
-        return merge(true).stream().filter(ModelConfig::isEnabled).toList();
+        return merge(true).stream()
+                .filter(ModelConfig::isEnabled)
+                .filter(m -> !"embedding".equalsIgnoreCase(m.getModelKind()))
+                .toList();
     }
 
     /**
@@ -106,12 +109,24 @@ public class ModelRegistryService {
      */
     public ModelConfig register(ModelRegisterRequest req) {
         String encryptedKey = null;
+        String baseUrl = req.getBaseUrl();
+
         if (req.getApiKey() != null && !req.getApiKey().isBlank()) {
             if (!encryption.isConfigured()) {
                 throw new IllegalStateException(
                         "Encryption key not configured on server — set PODS_ENCRYPTION_KEY env variable");
             }
             encryptedKey = encryption.encrypt(req.getApiKey());
+        } else {
+            // No key provided — inherit credentials from another model in the same provider
+            var existing = modelRepository.findCredentialsByProvider(req.getProviderID());
+            if (existing.isPresent()) {
+                encryptedKey = existing.get().encryptedKey();
+                if ((baseUrl == null || baseUrl.isBlank()) && existing.get().baseUrl() != null) {
+                    baseUrl = existing.get().baseUrl();
+                }
+                log.info("[ModelRegistryService] Reusing provider credentials for {}/{}", req.getProviderID(), req.getModelID());
+            }
         }
 
         ModelConfig model = ModelConfig.builder()
@@ -119,12 +134,17 @@ public class ModelRegistryService {
                 .modelId(req.getModelID())
                 .displayName(req.getDisplayName())
                 .enabled(req.isEnabled())
-                .baseUrl(req.getBaseUrl())
+                .baseUrl(baseUrl)
                 .build();
 
         modelRepository.upsert(model, encryptedKey);
         log.info("[ModelRegistryService] Registered {}/{} hasKey={}", req.getProviderID(), req.getModelID(), encryptedKey != null);
         return findById(req.getProviderID(), req.getModelID()).orElseThrow();
+    }
+
+    public void deleteModel(String providerID, String modelID) {
+        modelRepository.delete(providerID, modelID);
+        log.info("[ModelRegistryService] Deleted {}/{}", providerID, modelID);
     }
 
     /**

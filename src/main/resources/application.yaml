@@ -30,7 +30,7 @@ pods:
   models:
     allowed-providers: openai, azure, azure_openai, anthropic, google-vertex, ollama
   runtime:
-    # Catalog-gated rollout defaults
+    enable-anthropic-thinking: true
     base-only-default-tool-injection-enabled: true
     dynamic-tool-exposure-enabled: true
     tool-shortlist-default-size: 24

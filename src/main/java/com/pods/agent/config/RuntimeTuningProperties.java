@@ -56,6 +56,7 @@ public class RuntimeTuningProperties {
     private int qualityExpansionMaxRetries = 2;
     private int maxToolCallbacksPerTurn = 120;
     private int maxOutputTokens = 8192;
+    private boolean enableAnthropicThinking = false;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
     private StrictScope strictScope = new StrictScope();
 
@@ -487,6 +488,14 @@ public class RuntimeTuningProperties {
 
     public void setMaxOutputTokens(int maxOutputTokens) {
         this.maxOutputTokens = maxOutputTokens;
+    }
+
+    public boolean isEnableAnthropicThinking() {
+        return enableAnthropicThinking;
+    }
+
+    public void setEnableAnthropicThinking(boolean enableAnthropicThinking) {
+        this.enableAnthropicThinking = enableAnthropicThinking;
     }
 
 }

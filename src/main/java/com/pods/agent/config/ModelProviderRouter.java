@@ -4,6 +4,8 @@ import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.client.AnthropicClientAsync;
 import com.anthropic.client.okhttp.AnthropicOkHttpClientAsync;
+import com.anthropic.models.messages.ThinkingConfigAdaptive;
+import com.anthropic.models.messages.ThinkingConfigParam;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.azure.core.credential.AzureKeyCredential;
 import com.pods.agent.domain.ModelRef;
@@ -57,6 +59,26 @@ public class ModelProviderRouter {
         return runtimeTuningProperties.getMaxOutputTokens();
     }
 
+    /**
+     * o-series and GPT-5+ models reject max_tokens and require max_completion_tokens.
+     */
+    private static boolean requiresCompletionTokens(String modelID) {
+        if (modelID == null) return false;
+        String id = modelID.toLowerCase();
+        return id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")
+                || id.startsWith("gpt-5") || id.startsWith("gpt-o");
+    }
+
+    private OpenAiChatOptions openAiOptions(String modelID) {
+        OpenAiChatOptions.Builder b = OpenAiChatOptions.builder().model(modelID);
+        if (requiresCompletionTokens(modelID)) {
+            b.maxCompletionTokens(maxTokens());
+        } else {
+            b.maxTokens(maxTokens());
+        }
+        return b.build();
+    }
+
     public Spec resolve(@Nullable ModelRef model) {
         if (model == null || model.providerID() == null) {
             throw new IllegalStateException(
@@ -100,16 +122,21 @@ public class ModelProviderRouter {
             AnthropicClient anthropicClient = clientBuilder.build();
             AnthropicClientAsync anthropicClientAsync = asyncClientBuilder.build();
 
+            AnthropicChatOptions.Builder optionsBuilder = AnthropicChatOptions.builder()
+                    .model(modelID)
+                    .maxTokens(maxTokens());
+            if (runtimeTuningProperties.isEnableAnthropicThinking()) {
+                optionsBuilder.thinking(ThinkingConfigParam.ofAdaptive(
+                        ThinkingConfigAdaptive.builder().build()));
+            }
             AnthropicChatModel model = AnthropicChatModel.builder()
                     .anthropicClient(anthropicClient)
                     .anthropicClientAsync(anthropicClientAsync)
-                    .options(AnthropicChatOptions.builder()
-                            .model(modelID)
-                            .maxTokens(maxTokens())
-                            .build())
+                    .options(optionsBuilder.build())
                     .build();
 
-            log.debug("[ModelProviderRouter] → anthropic/{}", modelID);
+            log.debug("[ModelProviderRouter] → anthropic/{} (thinking={})", modelID,
+                    runtimeTuningProperties.isEnableAnthropicThinking());
             return new Spec(ChatClient.create(model), null);
         } catch (Exception e) {
             throw wrapError("anthropic", modelID, e);
@@ -131,7 +158,7 @@ public class ModelProviderRouter {
                             .credential(new AzureKeyCredential(apiKey)))
                     .defaultOptions(AzureOpenAiChatOptions.builder()
                             .deploymentName(modelID)
-                            .maxTokens(maxTokens())
+                            .maxCompletionTokens(maxTokens())
                             .build())
                     .build();
 
@@ -153,7 +180,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(apiBuilder.build())
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
+                    .defaultOptions(openAiOptions(modelID))
                     .build();
 
             log.debug("[ModelProviderRouter] → openai/{}", modelID);
@@ -177,7 +204,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(api)
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
+                    .defaultOptions(openAiOptions(modelID))
                     .build();
 
             log.debug("[ModelProviderRouter] → google/{} (via OpenAI-compatible bridge)", modelID);
@@ -229,7 +256,7 @@ public class ModelProviderRouter {
 
             OpenAiChatModel model = OpenAiChatModel.builder()
                     .openAiApi(api)
-                    .defaultOptions(OpenAiChatOptions.builder().model(modelID).maxTokens(maxTokens()).build())
+                    .defaultOptions(openAiOptions(modelID))
                     .build();
 
             log.debug("[ModelProviderRouter] → {}/{} (openai-compatible, base={})", providerID, modelID, baseUrl);

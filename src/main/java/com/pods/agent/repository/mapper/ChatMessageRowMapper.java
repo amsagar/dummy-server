@@ -17,6 +17,7 @@ public class ChatMessageRowMapper implements RowMapper<ChatMessage> {
                 .sessionId(rs.getString("session_id"))
                 .role(rs.getString("role"))
                 .content(rs.getString("content"))
+                .turnId(rs.getString("turn_id"))
                 .createdAt(rs.getLong("created_at"))
                 .build();
     }

@@ -14,5 +14,6 @@ public class ChatMessage {
     private String sessionId;
     private String role;
     private String content;
+    private String turnId;
     private long createdAt;
 }

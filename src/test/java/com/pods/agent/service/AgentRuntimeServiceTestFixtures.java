@@ -49,7 +49,7 @@ final class AgentRuntimeServiceTestFixtures {
     static Fixture build() {
         Fixture f = new Fixture();
         f.orchestrator = mock(AgentOrchestrator.class);
-        when(f.orchestrator.streamTurn(any(), any(), any(), any(), any())).thenReturn("ok");
+        when(f.orchestrator.streamTurn(any(), any(), any(), any(), any(), any())).thenReturn("ok");
         f.toolRegistryService = mock(ToolRegistryService.class);
         f.policyEngine = mock(GuardrailPolicyEngine.class);
         f.runtimeEventRepository = mock(RuntimeEventRepository.class);

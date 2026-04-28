@@ -4,6 +4,8 @@ import com.pods.agent.api.dto.ChatState;
 import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuntimeTuningProperties;
 import com.pods.agent.domain.ModelRef;
+import com.pods.agent.domain.RuntimeEvent;
+import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.instruction.InstructionLoaderService;
 import com.pods.agent.service.SkillRegistryService;
@@ -44,6 +46,7 @@ public class AgentOrchestrator {
     private final InstructionLoaderService instructionLoaderService;
     private final MemoryService memoryService;
     private final RuntimeTuningProperties runtimeTuningProperties;
+    private final RuntimeEventRepository runtimeEventRepository;
     private final ObjectMapper objectMapper;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
@@ -53,64 +56,17 @@ public class AgentOrchestrator {
                              InstructionLoaderService instructionLoaderService,
                              MemoryService memoryService,
                              RuntimeTuningProperties runtimeTuningProperties,
+                             RuntimeEventRepository runtimeEventRepository,
                              ObjectMapper objectMapper) {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.instructionLoaderService = instructionLoaderService;
         this.memoryService = memoryService;
         this.runtimeTuningProperties = runtimeTuningProperties;
+        this.runtimeEventRepository = runtimeEventRepository;
         this.objectMapper = objectMapper;
         this.baseSystemPrompt = loadBaseSystemPrompt();
         this.memoryToolsPrompt = loadPromptResource("prompts/AUTO_MEMORY_TOOLS_SYSTEM_PROMPT.md");
-    }
-
-    public String chat(AgentSession session, String userText, ChatState state, SseEventSender sender) {
-        ModelRef modelRef = state != null ? state.getModel() : null;
-        ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
-        ChatClient client = modelSpec.client();
-
-        session.getMessages().add(new UserMessage(normalizeUserMessageForHistory(userText)));
-        applyPromptWindowGuard(session, state, userText);
-
-        log.info("[AgentOrchestrator] Starting chat: session={}, model={}",
-                session.getSessionId(),
-                modelRef != null ? modelRef : "default");
-
-        try {
-            String systemPrompt = buildSystemPrompt(state, session);
-            List<Message> history = sanitizeMessageList(buildMessageList(session));
-            var promptSpec = client.prompt()
-                    .system(systemPrompt)
-                    .messages(history)
-                    .user(userText)
-                    .advisors(new org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor());
-
-            if (modelSpec.options() != null) {
-                promptSpec = promptSpec.options(modelSpec.options());
-            }
-
-            StringBuilder fullResponse = new StringBuilder();
-
-            promptSpec.stream()
-                    .content()
-                    .doOnNext(delta -> {
-                        log.debug("[AgentOrchestrator] Delta received: {}", delta);
-                        fullResponse.append(delta);
-                        sender.sendTextDelta(delta);
-                    })
-                    .blockLast();
-
-            String finalContent = fullResponse.toString();
-            if (!finalContent.isBlank()) {
-                session.getMessages().add(new AssistantMessage(finalContent));
-            }
-
-            return finalContent.isEmpty() ? "Done." : finalContent;
-
-        } catch (Exception e) {
-            log.error("[AgentOrchestrator] Chat failed: {}", e.getMessage(), e);
-            throw e;
-        }
     }
 
     /**
@@ -124,7 +80,8 @@ public class AgentOrchestrator {
                              String userText,
                              ChatState state,
                              SseEventSender sender,
-                             List<ToolCallback> tools) {
+                             List<ToolCallback> tools,
+                             String turnId) {
         ModelRef modelRef = state != null ? state.getModel() : null;
         ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
         ChatClient client = modelSpec.client();
@@ -158,20 +115,49 @@ public class AgentOrchestrator {
             }
 
             StringBuilder fullResponse = new StringBuilder();
+            StringBuilder nativeReasoning = new StringBuilder();
+            ThinkTagParser thinkParser = new ThinkTagParser(sender, fullResponse);
             promptSpec.stream()
-                    .content()
-                    .doOnNext(delta -> {
+                    .chatResponse()
+                    .doOnNext(chatResponse -> {
+                        if (chatResponse == null || chatResponse.getResult() == null) return;
+                        var output = chatResponse.getResult().getOutput();
+                        String delta = output == null ? null : output.getText();
                         if (delta == null || delta.isEmpty()) return;
                         log.debug("[AgentOrchestrator] Delta received: {}", delta);
-                        fullResponse.append(delta);
-                        sender.sendTextDelta(delta);
+                        boolean isNativeThinking = Boolean.TRUE.equals(
+                                output.getMetadata() != null ? output.getMetadata().get("thinking") : null);
+                        if (isNativeThinking) {
+                            nativeReasoning.append(delta);
+                            sender.sendReasoningDelta(delta);
+                        } else {
+                            thinkParser.feed(delta);
+                        }
                     })
                     .blockLast();
+            thinkParser.flush();
 
             String finalContent = fullResponse.toString();
             if (!finalContent.isBlank()) {
                 session.getMessages().add(new AssistantMessage(finalContent));
             }
+
+            // Persist accumulated reasoning (native + <think>-tag) as a single event
+            String allReasoning = nativeReasoning + thinkParser.getAccumulatedReasoning();
+            if (!allReasoning.isBlank() && turnId != null) {
+                try {
+                    String payload = objectMapper.writeValueAsString(Map.of("content", allReasoning));
+                    runtimeEventRepository.save(RuntimeEvent.builder()
+                            .sessionId(session.getSessionId())
+                            .turnId(turnId)
+                            .eventType("reasoning")
+                            .payload(payload)
+                            .build());
+                } catch (Exception ex) {
+                    log.warn("[AgentOrchestrator] Failed to persist reasoning: {}", ex.getMessage());
+                }
+            }
+
             return finalContent.isEmpty() ? "Done." : finalContent;
         } catch (Exception e) {
             log.error("[AgentOrchestrator] streamTurn failed: {}", e.getMessage(), e);
@@ -387,49 +373,92 @@ public class AgentOrchestrator {
                 .append("</anthropic_cache_hint>\n");
     }
 
-    private String buildSkillContentContext(List<SkillRegistryService.SkillSnapshot> skills) {
-        int maxChars = Math.max(1000, runtimeTuningProperties.getMaxSkillContentChars());
-        int maxFilesPerSkill = Math.max(1, runtimeTuningProperties.getMaxSkillFilesPerSkill());
-        StringBuilder content = new StringBuilder("\n## Skill Content\n");
-        int budgetUsed = 0;
-        List<SkillRegistryService.SkillSnapshot> ordered = skills.stream()
-                .filter(Objects::nonNull)
-                .sorted(Comparator.comparing(s -> s.skill().getName(), String.CASE_INSENSITIVE_ORDER))
-                .toList();
-        for (SkillRegistryService.SkillSnapshot skill : ordered) {
-            if (budgetUsed >= maxChars) break;
-            String skillName = skill.skill().getName();
-            content.append("<skill name=\"").append(skillName).append("\">\n");
-            String skillMd = skill.files().entrySet().stream()
-                    .filter(e -> "SKILL.md".equalsIgnoreCase(e.getKey()))
-                    .map(Map.Entry::getValue)
-                    .findFirst()
-                    .orElse("");
-            if (!skillMd.isBlank()) {
-                String clipped = clipToBudget(skillMd, maxChars - budgetUsed);
-                content.append(clipped).append("\n");
-                budgetUsed += clipped.length();
-            }
-            int fileCount = 0;
-            for (Map.Entry<String, String> entry : skill.files().entrySet()) {
-                if ("SKILL.md".equalsIgnoreCase(entry.getKey())) continue;
-                if (fileCount >= maxFilesPerSkill || budgetUsed >= maxChars) break;
-                content.append("<file path=\"").append(entry.getKey()).append("\">\n");
-                String clipped = clipToBudget(entry.getValue(), maxChars - budgetUsed);
-                content.append(clipped).append("\n</file>\n");
-                budgetUsed += clipped.length();
-                fileCount++;
-            }
-            content.append("</skill>\n");
-        }
-        return content.toString();
-    }
+    /**
+     * Stateful streaming parser that splits <think>…</think> blocks out of the text stream.
+     * Thinking content is emitted as reasoning.delta; everything else goes to text.delta and
+     * accumulates in fullResponse. Works for Ollama DeepSeek-R1, OpenAI o-series via LiteLLM,
+     * and any other provider that embeds reasoning in <think> tags.
+     */
+    private static final class ThinkTagParser {
+        private static final String OPEN = "<think>";
+        private static final String CLOSE = "</think>";
 
-    private String clipToBudget(String text, int remainingChars) {
-        if (text == null || text.isBlank() || remainingChars <= 0) return "";
-        if (text.length() <= remainingChars) return text;
-        if (remainingChars <= 20) return "";
-        return text.substring(0, remainingChars - 20) + "\n...[truncated]";
+        private final SseEventSender sender;
+        private final StringBuilder fullResponse;
+        private final StringBuilder buf = new StringBuilder();
+        private final StringBuilder accumulatedReasoning = new StringBuilder();
+        private boolean inThink = false;
+
+        ThinkTagParser(SseEventSender sender, StringBuilder fullResponse) {
+            this.sender = sender;
+            this.fullResponse = fullResponse;
+        }
+
+        String getAccumulatedReasoning() {
+            return accumulatedReasoning.toString();
+        }
+
+        void feed(String delta) {
+            buf.append(delta);
+            process();
+        }
+
+        void flush() {
+            // Emit whatever remains — if still in a think block treat it as reasoning
+            String rest = buf.toString();
+            buf.setLength(0);
+            if (rest.isEmpty()) return;
+            if (inThink) {
+                accumulatedReasoning.append(rest);
+                sender.sendReasoningDelta(rest);
+            } else {
+                fullResponse.append(rest);
+                sender.sendTextDelta(rest);
+            }
+        }
+
+        private void emitReasoning(String text) {
+            accumulatedReasoning.append(text);
+            sender.sendReasoningDelta(text);
+        }
+
+        private void process() {
+            while (buf.length() > 0) {
+                if (!inThink) {
+                    int tagIdx = buf.indexOf(OPEN);
+                    if (tagIdx >= 0) {
+                        if (tagIdx > 0) {
+                            String before = buf.substring(0, tagIdx);
+                            fullResponse.append(before);
+                            sender.sendTextDelta(before);
+                        }
+                        buf.delete(0, tagIdx + OPEN.length());
+                        inThink = true;
+                    } else {
+                        int safe = buf.length() - (OPEN.length() - 1);
+                        if (safe <= 0) break;
+                        String safe_text = buf.substring(0, safe);
+                        fullResponse.append(safe_text);
+                        sender.sendTextDelta(safe_text);
+                        buf.delete(0, safe);
+                        break;
+                    }
+                } else {
+                    int closeIdx = buf.indexOf(CLOSE);
+                    if (closeIdx >= 0) {
+                        if (closeIdx > 0) emitReasoning(buf.substring(0, closeIdx));
+                        buf.delete(0, closeIdx + CLOSE.length());
+                        inThink = false;
+                    } else {
+                        int safe = buf.length() - (CLOSE.length() - 1);
+                        if (safe <= 0) break;
+                        emitReasoning(buf.substring(0, safe));
+                        buf.delete(0, safe);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
 }

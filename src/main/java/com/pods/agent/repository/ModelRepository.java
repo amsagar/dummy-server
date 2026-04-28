@@ -58,6 +58,27 @@ public class ModelRepository {
         return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
     }
 
+    /**
+     * Returns the first stored credentials for any model under the given provider.
+     * Used to propagate credentials to newly-added models without re-entering the key.
+     */
+    public Optional<ModelCredentials> findCredentialsByProvider(String providerID) {
+        List<ModelCredentials> results = jdbc.query(
+                sql.getQuery("MODEL.GET_KEY_FOR_PROVIDER"),
+                (rs, n) -> new ModelCredentials(
+                        rs.getString("encrypted_key"),
+                        rs.getString("base_url")
+                ),
+                providerID
+        );
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+    }
+
+    public void delete(String providerID, String modelID) {
+        jdbc.update(sql.getQuery("MODEL.DELETE"), providerID, modelID);
+        log.info("[ModelRepository] Deleted {}/{}", providerID, modelID);
+    }
+
     public void setEnabled(String providerID, String modelID, boolean enabled) {
         var params = new MapSqlParameterSource()
                 .addValue("providerID", providerID)

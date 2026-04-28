@@ -226,8 +226,6 @@ public class AgentRuntimeService {
         String stepId = "step-1";
         transitionState(session.getSessionId(), turnId, sender, PlannerState.PLAN, "model-driven-" + stepId + "-plan");
         sender.sendTaskStarted(session.getSessionId(), stepId, "MODEL_STEP");
-        sender.sendStepStarted(session.getSessionId(), 1, null);
-        saveSessionEvent(session.getSessionId(), turnId, "step.started", "{\"step\":1}");
 
         if (shouldCompactLoopContext(session, state)) {
             compactSessionInLoop(session, state, sender, turnId, 1);
@@ -261,7 +259,7 @@ public class AgentRuntimeService {
 
         String response;
         try {
-            response = orchestrator.streamTurn(session, stepContext, state, sender, toolCallbacks);
+            response = orchestrator.streamTurn(session, stepContext, state, sender, toolCallbacks, turnId);
         } catch (Exception e) {
             log.error("[AgentRuntime] streamTurn failed: {}", e.getMessage(), e);
             response = "I hit an error generating the response: " + e.getMessage();
@@ -272,9 +270,6 @@ public class AgentRuntimeService {
         recordSelectionSignals(session.getSessionId(), userText, tools, response);
 
         sender.sendTaskDone(session.getSessionId(), stepId, "FINAL");
-        sender.sendStepFinished(session.getSessionId(), 1, "final", false);
-        saveSessionEvent(session.getSessionId(), turnId, "step.finished",
-                "{\"step\":1,\"mode\":\"final\"}");
         transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "core-loop-complete");
         hookRegistryService.emit("post-response",
                 java.util.Map.of("sessionId", session.getSessionId(), "turnId", turnId));
