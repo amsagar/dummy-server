@@ -45,6 +45,33 @@ public class RuntimeEventRepository {
                 .build(), sessionId);
     }
 
+    public List<RuntimeEvent> findByTurnId(String turnId) {
+        return jdbc.query(sql.getQuery("RUNTIME_EVENT.FIND_BY_TURN"), (rs, n) -> RuntimeEvent.builder()
+                .id(rs.getString("id"))
+                .sessionId(rs.getString("session_id"))
+                .turnId(rs.getString("turn_id"))
+                .eventType(rs.getString("event_type"))
+                .payload(rs.getString("payload"))
+                .createdAt(rs.getLong("created_at"))
+                .build(), turnId);
+    }
+
+    public List<RuntimeEvent> findByTurnIdAfter(String turnId, long afterCreatedAt, int limit) {
+        return namedJdbc.query(sql.getQuery("RUNTIME_EVENT.FIND_BY_TURN_AFTER"),
+                new MapSqlParameterSource()
+                        .addValue("turnId", turnId)
+                        .addValue("afterCreatedAt", afterCreatedAt)
+                        .addValue("limit", limit),
+                (rs, n) -> RuntimeEvent.builder()
+                        .id(rs.getString("id"))
+                        .sessionId(rs.getString("session_id"))
+                        .turnId(rs.getString("turn_id"))
+                        .eventType(rs.getString("event_type"))
+                        .payload(rs.getString("payload"))
+                        .createdAt(rs.getLong("created_at"))
+                        .build());
+    }
+
     public int deleteFromTime(String sessionId, long createdAt) {
         return namedJdbc.update(sql.getQuery("RUNTIME_EVENT.DELETE_FROM_TIME"), new MapSqlParameterSource()
                 .addValue("sessionId", sessionId)

@@ -69,6 +69,8 @@ public class AgentRuntimeService {
     private final AgentToolCallbackFactory agentToolCallbackFactory;
     private final ToolEmbeddingIndexService toolEmbeddingIndexService;
     private final EmbeddingAutoRouterService embeddingAutoRouterService;
+    private final ToolChainRuntimeService toolChainRuntimeService;
+    private final ToolChainService toolChainService;
     private final Map<String, Map<String, Double>> toolMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> toolDomainMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> skillMemorySignals = new ConcurrentHashMap<>();
@@ -92,7 +94,9 @@ public class AgentRuntimeService {
                                MemoryService memoryService,
                                AgentToolCallbackFactory agentToolCallbackFactory,
                                ToolEmbeddingIndexService toolEmbeddingIndexService,
-                               EmbeddingAutoRouterService embeddingAutoRouterService) {
+                               EmbeddingAutoRouterService embeddingAutoRouterService,
+                               ToolChainRuntimeService toolChainRuntimeService,
+                               ToolChainService toolChainService) {
         this.orchestrator = orchestrator;
         this.toolRegistryService = toolRegistryService;
         this.policyEngine = policyEngine;
@@ -113,6 +117,8 @@ public class AgentRuntimeService {
         this.agentToolCallbackFactory = agentToolCallbackFactory;
         this.toolEmbeddingIndexService = toolEmbeddingIndexService;
         this.embeddingAutoRouterService = embeddingAutoRouterService;
+        this.toolChainRuntimeService = toolChainRuntimeService;
+        this.toolChainService = toolChainService;
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender) {
@@ -120,10 +126,45 @@ public class AgentRuntimeService {
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender, String turnId) {
-        String runtimeMode = "aicore_loop";
+        String runtimeMode = state.getRuntimeMode() == null || state.getRuntimeMode().isBlank()
+                ? "aicore_loop"
+                : state.getRuntimeMode();
         state.setRuntimeMode(runtimeMode);
         String normalizedUserText = userText == null ? "" : userText.trim();
         session.getMessages().add(new UserMessage(normalizedUserText));
+
+        if (!isToolChainDesignerMode(runtimeMode)
+                && (state.getToolChainId() == null || state.getToolChainId().isBlank())
+                && !normalizedUserText.isBlank()) {
+            maybeResolveToolChainByIntent(session, normalizedUserText, state, sender, turnId);
+        }
+
+        if (shouldExecuteToolChain(state)) {
+            transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "toolchain-execution");
+            try {
+                var run = toolChainRuntimeService.execute(
+                        state.getToolChainId(),
+                        state.getToolChainVersion(),
+                        "chat",
+                        UserContextHolder.currentUserId(),
+                        Map.of("message", normalizedUserText, "sessionId", session.getSessionId()),
+                        Map.of("async", false),
+                        sender
+                );
+                String result = run.getOutputSnapshot() == null ? "{\"runId\":\"" + run.getId() + "\",\"status\":\"" + run.getStatus() + "\"}" : run.getOutputSnapshot();
+                session.getMessages().add(new AssistantMessage(result));
+                transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-execution-done");
+                return result;
+            } catch (Exception e) {
+                log.warn("[AgentRuntime] ToolChain execution failed, falling back to dynamic flow: {}", e.getMessage());
+                if ("strict".equalsIgnoreCase(runtimeMode)) {
+                    String error = "ToolChain execution failed: " + e.getMessage();
+                    session.getMessages().add(new AssistantMessage(error));
+                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-failed-strict");
+                    return error;
+                }
+            }
+        }
 
         if ("auto".equalsIgnoreCase(state.getModelSelectionMode())) {
             ModelRef auto = modelAutoRouterService.pickModel(userText, session.getMessages().size(), true);
@@ -140,7 +181,7 @@ public class AgentRuntimeService {
                 .eventType("plan.created")
                 .payload("{\"mode\":\"" + runtimeMode + "\"}")
                 .build());
-        if (isCapabilitiesQuery(userText)) {
+        if (!isToolChainDesignerMode(runtimeMode) && isCapabilitiesQuery(userText)) {
             if (runtimeTuningProperties.isStrictScopeOnly() && !runtimeTuningProperties.isAllowCapabilitiesQueries()) {
                 transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "strict-out-of-scope");
                 return outOfScopeRefusalMessage();
@@ -171,6 +212,107 @@ public class AgentRuntimeService {
 
         String mcpContext = buildMcpContext();
         return runModelDrivenCoreLoop(session, normalizedUserText, state, sender, turnId, runtimeMode, mcpContext);
+    }
+
+    private boolean shouldExecuteToolChain(ChatState state) {
+        if (state == null) return false;
+        if (isToolChainDesignerMode(state.getRuntimeMode())) return false;
+        if (state.getToolChainId() != null && !state.getToolChainId().isBlank()) return true;
+        String mode = state.getRuntimeMode();
+        return mode != null && mode.toLowerCase(Locale.ROOT).contains("toolchain");
+    }
+
+    private void maybeResolveToolChainByIntent(AgentSession session,
+                                               String userText,
+                                               ChatState state,
+                                               SseEventSender sender,
+                                               String turnId) {
+        List<ToolChainService.IntentMatch> matches = toolChainService.findIntentMatches(userText, 0.30, 3);
+        if (matches.isEmpty()) return;
+        String selectedToolChainId;
+        Integer selectedVersion;
+        if (matches.size() == 1) {
+            ToolChainService.IntentMatch hit = matches.get(0);
+            String question = "I found a matching ToolChain \"" + hit.name() + "\" for this request. Continue with ToolChain execution or use normal AI loop?";
+            String requestId = askToolChainQuestion(session, sender, turnId, question, List.of(
+                    new PendingInteractionService.QuestionOption("toolchain:" + hit.toolChainId(), "Use " + hit.name()),
+                    new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop")
+            ));
+            String choice = awaitSelection(requestId);
+            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
+            selectedToolChainId = hit.toolChainId();
+            selectedVersion = hit.version();
+        } else {
+            List<PendingInteractionService.QuestionOption> options = new ArrayList<>();
+            for (ToolChainService.IntentMatch hit : matches) {
+                String label = hit.name() + " (score " + String.format(Locale.ROOT, "%.2f", hit.score()) + ")";
+                options.add(new PendingInteractionService.QuestionOption("toolchain:" + hit.toolChainId(), label));
+            }
+            options.add(new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop"));
+            String question = "Multiple ToolChains match your request. Which path should I run?";
+            String requestId = askToolChainQuestion(session, sender, turnId, question, options);
+            String choice = awaitSelection(requestId);
+            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
+            String tcId = choice.replace("toolchain:", "");
+            ToolChainService.IntentMatch chosen = matches.stream()
+                    .filter(m -> m.toolChainId().equals(tcId))
+                    .findFirst()
+                    .orElse(matches.get(0));
+            selectedToolChainId = chosen.toolChainId();
+            selectedVersion = chosen.version();
+        }
+        state.setToolChainId(selectedToolChainId);
+        state.setToolChainVersion(selectedVersion);
+    }
+
+    private String askToolChainQuestion(AgentSession session,
+                                        SseEventSender sender,
+                                        String turnId,
+                                        String question,
+                                        List<PendingInteractionService.QuestionOption> options) {
+        PendingInteractionService.QuestionMetadata metadata = new PendingInteractionService.QuestionMetadata(
+                "single_select",
+                options,
+                false,
+                1,
+                1
+        );
+        String requestId = pendingInteractionService.create(
+                session.getSessionId(),
+                turnId,
+                "question",
+                question,
+                metadata
+        );
+        sender.sendQuestion(session.getSessionId(), requestId, question, metadata);
+        saveSessionEvent(session.getSessionId(), turnId, "question",
+                "{\"requestId\":\"" + requestId + "\",\"question\":\"" + sanitize(question) + "\"}");
+        return requestId;
+    }
+
+    private String awaitSelection(String requestId) {
+        if (requestId == null || requestId.isBlank()) return null;
+        try {
+            PendingInteractionService.InteractionReply reply = pendingInteractionService.awaitReply(
+                    requestId,
+                    runtimeTuningProperties.getHitlReplyTimeoutMs()
+            );
+            if (reply == null || reply.message() == null) return null;
+            String message = reply.message();
+            if (message.startsWith("options=")) {
+                String optionsPart = message.substring("options=".length());
+                int delimiter = optionsPart.indexOf(';');
+                String selected = delimiter >= 0 ? optionsPart.substring(0, delimiter) : optionsPart;
+                if (selected.contains(",")) {
+                    return selected.split(",")[0].trim();
+                }
+                return selected.trim();
+            }
+            return message.trim();
+        } catch (Exception e) {
+            log.info("[AgentRuntime] ToolChain selection prompt timed out or failed: {}", e.getMessage());
+            return null;
+        }
     }
 
     private record ScopeGateOutcome(boolean refused, String refusal, double topCosine) {}
@@ -414,9 +556,25 @@ public class AgentRuntimeService {
         if (observationContext != null && !observationContext.isBlank()) {
             context.append("Tool observations:\n").append(observationContext).append("\n\n");
         }
+        if (isToolChainDesignerMode(runtimeMode)) {
+            context.append("""
+<toolchain_designer_mode>
+You are in ToolChain designer creation mode.
+- Do NOT route to or execute existing ToolChains.
+- Use available tools + skills to gather what you need for creating/editing a ToolChain draft.
+- Prefer the ToolChain architect skill (toolchain-architect) for graph/schema/synthesis design.
+- Ask only design/clarification questions required to build the ToolChain draft.
+</toolchain_designer_mode>
+
+""");
+        }
         context.append("Runtime mode: ").append(runtimeMode).append("\n\n");
         context.append(userText == null ? "" : userText);
         return context.toString();
+    }
+
+    private boolean isToolChainDesignerMode(String runtimeMode) {
+        return runtimeMode != null && "toolchain_designer".equalsIgnoreCase(runtimeMode.trim());
     }
 
     private String buildWorkspaceManifest(AgentSession session) {
@@ -758,7 +916,7 @@ public class AgentRuntimeService {
     private String buildSelectedSkillContext(AgentSession session, String userText, ChatState state) {
         List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
         if (skills.isEmpty()) return "";
-        SkillContextMode mode = resolveSkillContextMode(userText);
+        SkillContextMode mode = resolveSkillContextMode(userText, state == null ? null : state.getRuntimeMode());
         if (mode == SkillContextMode.NONE) return "";
         if (mode == SkillContextMode.CATALOG_ONLY) return buildSkillCatalogContext(skills);
         List<SkillRegistryService.SkillSnapshot> shortlisted = buildSkillShortlist(userText, session.getSessionId());
@@ -913,8 +1071,13 @@ public class AgentRuntimeService {
         return Math.max(1, runtimeTuningProperties.getSkillShortlistDefaultSize());
     }
 
-    private SkillContextMode resolveSkillContextMode(String userText) {
+    private SkillContextMode resolveSkillContextMode(String userText, String runtimeMode) {
         if (userText == null || userText.isBlank()) return SkillContextMode.NONE;
+        if (isToolChainDesignerMode(runtimeMode)) {
+            return runtimeTuningProperties.isIncludeFullSkillFiles()
+                    ? SkillContextMode.FULL_SKILL_FILES
+                    : SkillContextMode.CATALOG_ONLY;
+        }
         if (isCapabilitiesQuery(userText) || isCatalogOnlySkillQuery(userText)) {
             return SkillContextMode.CATALOG_ONLY;
         }

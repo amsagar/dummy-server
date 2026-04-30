@@ -32,7 +32,26 @@ public class PendingInteractionService {
     }
 
     public String create(String sessionId, String turnId, String type, String prompt, QuestionMetadata metadata) {
-        String id = UUID.randomUUID().toString();
+        return create(sessionId, turnId, type, prompt, metadata, null);
+    }
+
+    /**
+     * Register a pending interaction. When {@code externalRequestId} is supplied, the row is
+     * inserted with that exact id so downstream callers (HITL replies that reference an
+     * LLM-emitted question id) resolve the same row. The LLM commonly emits stable keys like
+     * "validate-order-scope" across runs, so a stale row from a prior session can already
+     * exist; we delete it (and discard any orphan future) and reinsert with the same id so
+     * session.pendingQuestionJson, persisted system messages, and the HITL row stay in sync.
+     */
+    public String create(String sessionId, String turnId, String type, String prompt,
+                         QuestionMetadata metadata, String externalRequestId) {
+        String id = (externalRequestId == null || externalRequestId.isBlank())
+                ? UUID.randomUUID().toString()
+                : externalRequestId;
+        if (hitlRepository.findById(id).isPresent()) {
+            hitlRepository.deleteById(id);
+            pendingFutures.remove(id);
+        }
         hitlRepository.save(HitlInteraction.builder()
                 .id(id)
                 .sessionId(sessionId)

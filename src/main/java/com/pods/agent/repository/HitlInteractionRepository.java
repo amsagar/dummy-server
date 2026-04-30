@@ -66,6 +66,10 @@ public class HitlInteractionRepository {
                 .addValue("createdAt", createdAt));
     }
 
+    public int deleteById(String id) {
+        return jdbc.update(sql.getQuery("HITL.DELETE_BY_ID"), id);
+    }
+
     private HitlInteraction map(java.sql.ResultSet rs) throws java.sql.SQLException {
         return HitlInteraction.builder()
                 .id(rs.getString("id"))

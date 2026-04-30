@@ -25,6 +25,7 @@ public class SseEventSender {
     }
 
     public void send(Map<String, Object> payload) {
+        if (emitter == null) return;
         try {
             var envelope = new LinkedHashMap<String, Object>(payload);
             envelope.putIfAbsent("schemaVersion", "v2");
@@ -176,15 +177,32 @@ public class SseEventSender {
         send(payload);
     }
 
+    public void sendDone(String sessionId) {
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("type", "done");
+        payload.put("sessionId", sessionId);
+        send(payload);
+    }
+
     public void sendError(String message) {
         send(Map.of("type", "error", "message", message));
     }
 
     public void complete() {
-        emitter.complete();
+        if (emitter == null) return;
+        try {
+            emitter.complete();
+        } catch (Exception e) {
+            log.warn("[SseEventSender] complete() failed (likely already-closed stream): {}", e.getMessage());
+        }
     }
 
     public void completeWithError(Throwable t) {
-        emitter.completeWithError(t);
+        if (emitter == null) return;
+        try {
+            emitter.completeWithError(t);
+        } catch (Exception e) {
+            log.warn("[SseEventSender] completeWithError() failed (likely already-closed stream): {}", e.getMessage());
+        }
     }
 }

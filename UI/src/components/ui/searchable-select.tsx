@@ -50,7 +50,9 @@ export function SearchableSelect({
 
   const filtered = options.filter((o) => {
     const q = search.toLowerCase();
-    return o.label.toLowerCase().includes(q) || (o.sublabel?.toLowerCase().includes(q) ?? false);
+    const label = typeof o.label === "string" ? o.label : String(o.label ?? "");
+    const sublabel = typeof o.sublabel === "string" ? o.sublabel : String(o.sublabel ?? "");
+    return label.toLowerCase().includes(q) || sublabel.toLowerCase().includes(q);
   });
 
   // Close on outside click
@@ -76,7 +78,10 @@ export function SearchableSelect({
     <button
       type="button"
       disabled={disabled}
-      title={triggerTitle ?? selected?.label ?? placeholder}
+      title={
+        triggerTitle ??
+        ((typeof selected?.label === "string" ? selected.label : String(selected?.label ?? "")) || placeholder)
+      }
       aria-label={triggerAriaLabel ?? placeholder}
       className={cn(
         "flex h-9 w-full items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm ring-offset-background transition-all",
@@ -87,7 +92,7 @@ export function SearchableSelect({
       onClick={() => { if (!disabled) setOpen((o) => !o); }}
     >
       <span className={cn("truncate", !selected && "text-muted-foreground")}>
-        {selected ? selected.label : placeholder}
+        {selected ? (typeof selected.label === "string" ? selected.label : String(selected.label ?? "")) : placeholder}
       </span>
       <ChevronDown size={14} className={cn("shrink-0 text-slate-400 transition-transform", open && "rotate-180")} />
     </button>
@@ -155,9 +160,9 @@ export function SearchableSelect({
                     className={cn("shrink-0", opt.value === value ? "opacity-100 text-blue-600" : "opacity-0")}
                   />
                   <span className="truncate flex-1">
-                    {opt.label}
-                    {opt.sublabel && (
-                      <span className="ml-1.5 text-[10px] text-slate-400">{opt.sublabel}</span>
+                    {typeof opt.label === "string" ? opt.label : String(opt.label ?? "")}
+                    {opt.sublabel != null && String(opt.sublabel).length > 0 && (
+                      <span className="ml-1.5 text-[10px] text-slate-400">{String(opt.sublabel)}</span>
                     )}
                   </span>
                 </button>

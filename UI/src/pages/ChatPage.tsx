@@ -1,31 +1,21 @@
 import * as React from "react";
 import { useState, useEffect, useRef } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import mermaid from "mermaid";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Send,
   Trash2,
   Plus,
   Bot,
-  Loader2,
   MessageSquare,
   Pencil,
   Archive,
   ArchiveRestore,
   Copy,
   Check,
-  RotateCcw,
   ChevronDown,
   ChevronRight,
-  Brain,
   Paperclip,
   X,
-  Maximize2,
-  ZoomIn,
-  ZoomOut,
-  Code2,
   Square,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
@@ -39,116 +29,25 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { SPINNER_VERBS } from "@/lib/spinnerVerbs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  AssistantBubble,
+  UserBubble,
+  SystemEventGroup,
+  type ChatMessage,
+  type HitlQuestionMetadata,
+  buildRenderItems,
+  formatPayload,
+  normalizeQuestionMetadata,
+} from "@/components/chat";
 
-let mermaidInitialized = false;
-
-function ensureMermaidInitialized() {
-  if (mermaidInitialized) return;
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: "loose",
-    theme: "default",
-    suppressErrorRendering: true,
-  });
-  // Prevent Mermaid from injecting global error UI into the page.
-  (mermaid as any).parseError = () => {};
-  mermaidInitialized = true;
-}
-
-type MsgType = 'user' | 'assistant' | 'system';
-
-interface Message {
-  id: string;
-  type: MsgType;
-  content: string;
-  reasoning?: string;
-  isStreaming?: boolean;
-  dbId?: string;
-  createdAt?: number;
-  turnId?: string;
-  eventType?: string;
-  requestId?: string;
-  hitlStatus?: string;
-  hitlResponse?: string;
-  eventPayload?: any;
-}
+type Message = ChatMessage;
+type MsgType = ChatMessage["type"];
 
 interface ChatAttachment {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
   contentBase64: string;
-}
-
-interface HitlQuestionOption {
-  id: string;
-  label: string;
-}
-
-interface HitlQuestionMetadata {
-  responseMode?: "single_select" | "multi_select" | "text";
-  options?: HitlQuestionOption[];
-  allowCustomText?: boolean;
-  minSelections?: number;
-  maxSelections?: number;
-}
-
-function normalizeQuestionMetadata(raw: any): HitlQuestionMetadata | undefined {
-  if (!raw) return undefined;
-  const optionsRaw = Array.isArray(raw.options) ? raw.options : [];
-  const options: HitlQuestionOption[] = optionsRaw
-    .map((opt: any) => {
-      if (typeof opt === "string") return { id: opt, label: opt };
-      if (opt && typeof opt === "object") {
-        const label = String(opt.label ?? opt.id ?? "").trim();
-        const id = String(opt.id ?? label).trim();
-        if (!id) return null;
-        return { id, label: label || id };
-      }
-      return null;
-    })
-    .filter(Boolean) as HitlQuestionOption[];
-  if (options.length > 0) {
-    return {
-      responseMode: raw.responseMode || "single_select",
-      options,
-      allowCustomText: raw.allowCustomText !== false,
-      minSelections: raw.minSelections,
-      maxSelections: raw.maxSelections,
-    };
-  }
-  if (Array.isArray(raw.questions) && raw.questions.length > 0) {
-    const first = raw.questions[0];
-    const qOptions = Array.isArray(first?.options) ? first.options : [];
-    const normalized = qOptions
-      .map((opt: any) => {
-        const label = String(opt?.label ?? opt?.id ?? "").trim();
-        const id = String(opt?.id ?? label).trim();
-        if (!id) return null;
-        return { id, label: label || id };
-      })
-      .filter(Boolean) as HitlQuestionOption[];
-    if (normalized.length > 0) {
-      return {
-        responseMode: "single_select",
-        options: normalized,
-        allowCustomText: true,
-        minSelections: 1,
-        maxSelections: 1,
-      };
-    }
-  }
-  if (raw.responseMode || raw.allowCustomText !== undefined) {
-    return {
-      responseMode: raw.responseMode || "text",
-      options: [],
-      allowCustomText: raw.allowCustomText !== false,
-      minSelections: raw.minSelections,
-      maxSelections: raw.maxSelections,
-    };
-  }
-  return undefined;
 }
 
 const ALLOWED_EXTENSIONS = new Set([
@@ -165,31 +64,6 @@ function genId() {
   return Math.random().toString(36).slice(2);
 }
 
-function formatPayload(payload: any): string {
-  if (payload === null || payload === undefined) return "";
-  if (typeof payload === "string") return payload;
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return String(payload);
-  }
-}
-
-function formatHitlResponse(response?: string) {
-  if (!response) return "";
-  if (response.startsWith("options=")) {
-    const parts = response.split(";").map((p) => p.trim());
-    const optionsPart = parts.find((p) => p.startsWith("options="));
-    const messagePart = parts.find((p) => p.startsWith("message="));
-    const selected = optionsPart ? optionsPart.replace("options=", "").trim() : "";
-    const text = messagePart ? messagePart.replace("message=", "").trim() : "";
-    if (selected && text) return `Selected: ${selected} | Message: ${text}`;
-    if (selected) return `Selected: ${selected}`;
-    if (text) return text;
-  }
-  return response;
-}
-
 function moveAssistantAfterFollowingSystemEvents(messages: Message[], assistantId: string): Message[] {
   const assistantIdx = messages.findIndex((m) => m.id === assistantId);
   if (assistantIdx < 0) return messages;
@@ -204,210 +78,6 @@ function moveAssistantAfterFollowingSystemEvents(messages: Message[], assistantI
   return next;
 }
 
-type MarkdownCodeProps = React.ComponentPropsWithoutRef<"code"> & {
-  inline?: boolean;
-};
-
-function MermaidBlock({ chart }: { chart: string }) {
-  const [svg, setSvg] = React.useState("");
-  const [error, setError] = React.useState("");
-  const [zoom, setZoom] = React.useState(1);
-  const [expanded, setExpanded] = React.useState(false);
-  const [showRawCode, setShowRawCode] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
-  const [panX, setPanX] = React.useState(0);
-  const [panY, setPanY] = React.useState(0);
-  const [isDragging, setIsDragging] = React.useState(false);
-  const dragStartRef = React.useRef<{ mouseX: number; mouseY: number; panX: number; panY: number } | null>(null);
-  const renderId = React.useMemo(() => `mermaid-${Math.random().toString(36).slice(2)}`, []);
-
-  React.useEffect(() => {
-    let mounted = true;
-    ensureMermaidInitialized();
-
-    const render = async () => {
-      try {
-        const { svg } = await mermaid.render(renderId, chart);
-        if (!mounted) return;
-        setError("");
-        setSvg(svg);
-      } catch (err) {
-        if (!mounted) return;
-        const message = err instanceof Error ? err.message : "Invalid Mermaid chart";
-        setSvg("");
-        setError(message);
-      }
-    };
-
-    void render();
-    return () => {
-      mounted = false;
-    };
-  }, [chart, renderId]);
-
-  if (error) {
-    return (
-      <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-        Mermaid render error: {error}
-      </div>
-    );
-  }
-
-  if (!svg) {
-    return (
-      <div className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-        <Loader2 size={12} className="animate-spin" />
-        Rendering Mermaid chart...
-      </div>
-    );
-  }
-
-  const zoomIn = () => setZoom((z) => Math.min(3, +(z + 0.2).toFixed(2)));
-  const zoomOut = () => setZoom((z) => Math.max(0.4, +(z - 0.2).toFixed(2)));
-  const resetView = () => {
-    setZoom(1);
-    setPanX(0);
-    setPanY(0);
-  };
-  const copyRawCode = async () => {
-    try {
-      await navigator.clipboard.writeText(chart);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
-    }
-  };
-  const handleCanvasWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const delta = event.deltaY < 0 ? 0.1 : -0.1;
-    setZoom((z) => Math.max(0.4, Math.min(3, +(z + delta).toFixed(2))));
-  };
-  const handleCanvasMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    setIsDragging(true);
-    dragStartRef.current = {
-      mouseX: event.clientX,
-      mouseY: event.clientY,
-      panX,
-      panY,
-    };
-  };
-  const handleCanvasMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDragging || !dragStartRef.current) return;
-    const dx = event.clientX - dragStartRef.current.mouseX;
-    const dy = event.clientY - dragStartRef.current.mouseY;
-    setPanX(dragStartRef.current.panX + dx);
-    setPanY(dragStartRef.current.panY + dy);
-  };
-  const stopDragging = () => {
-    setIsDragging(false);
-    dragStartRef.current = null;
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-1">
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
-          onClick={() => setExpanded(true)}
-        >
-          <Maximize2 size={12} />
-          Expand
-        </button>
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
-          onClick={() => setShowRawCode((v) => !v)}
-        >
-          <Code2 size={12} />
-          {showRawCode ? "Hide Code" : "View Code"}
-        </button>
-      </div>
-      {showRawCode ? (
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-          {chart}
-        </pre>
-      ) : null}
-      <div
-        className="overflow-auto rounded-md border border-slate-200 bg-white p-2"
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
-
-      <Dialog open={expanded} onOpenChange={setExpanded}>
-        <DialogContent className="h-[92vh] w-[96vw] max-w-[96vw] bg-white p-4 sm:max-w-[96vw]">
-          <DialogHeader>
-            <DialogTitle>Mermaid Diagram</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              onClick={zoomOut}
-            >
-              <ZoomOut size={14} />
-              Zoom Out
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              onClick={zoomIn}
-            >
-              <ZoomIn size={14} />
-              Zoom In
-            </button>
-            <button
-              type="button"
-              className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              onClick={resetView}
-            >
-              Reset
-            </button>
-            <button
-              type="button"
-              className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              onClick={() => setShowRawCode((v) => !v)}
-            >
-              {showRawCode ? "Hide Code" : "Show Code"}
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              onClick={copyRawCode}
-            >
-              <Copy size={12} />
-              {copied ? "Copied" : "Copy Code"}
-            </button>
-            <span className="text-xs text-slate-500">Zoom: {Math.round(zoom * 100)}%</span>
-          </div>
-
-          {showRawCode ? (
-            <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-              {chart}
-            </pre>
-          ) : null}
-
-          <div
-            className="h-[78vh] overflow-hidden rounded-md border border-slate-200 bg-white p-3"
-            onWheel={handleCanvasWheel}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={stopDragging}
-            onMouseLeave={stopDragging}
-            onDoubleClick={resetView}
-            style={{ cursor: isDragging ? "grabbing" : "grab" }}
-          >
-            <div
-              style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})`, transformOrigin: "top left" }}
-              dangerouslySetInnerHTML={{ __html: svg }}
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -468,25 +138,6 @@ export default function ChatPage() {
   const [historyTotal, setHistoryTotal] = useState(0);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
-  const markdownComponents = React.useMemo(
-    () => ({
-      code({ inline, className, children, ...props }: MarkdownCodeProps) {
-        const match = /language-([\w-]+)/.exec(className || "");
-        const language = match?.[1]?.toLowerCase();
-        const code = String(children ?? "").replace(/\n$/, "");
-        if (!inline && language === "mermaid") {
-          return <MermaidBlock chart={code} />;
-        }
-        return (
-          <code className={className} {...props}>
-            {children}
-          </code>
-        );
-      },
-    }),
-    []
-  );
-
   useEffect(() => {
     if (!isStreaming) return;
     const intervalId = window.setInterval(() => {
@@ -1554,20 +1205,20 @@ export default function ChatPage() {
             {sessionId ? <span className="text-xs text-slate-500">#{sessionId.slice(0, 8)}</span> : null}
           </div>
           <div className="flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <select
-                  value={modelSelectionMode}
-                  onChange={(e) => setModelSelectionMode(e.target.value as any)}
-                  className="h-7 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700"
-                  title="Choose model routing mode"
-                >
-                  <option value="manual">Manual Model</option>
-                  <option value="auto">Auto Route</option>
-                </select>
-              </TooltipTrigger>
-              <TooltipContent side="bottom"><p>Choose model routing mode</p></TooltipContent>
-            </Tooltip>
+            <SearchableSelect
+              options={[
+                { value: "manual", label: "Manual Model", sublabel: "manual" },
+                { value: "auto", label: "Auto Route", sublabel: "auto" },
+              ]}
+              value={modelSelectionMode}
+              onValueChange={(value) => setModelSelectionMode(value as "manual" | "auto")}
+              placeholder="Routing"
+              searchPlaceholder="Search mode…"
+              className="w-32"
+              triggerTitle="Choose model routing mode"
+              triggerAriaLabel="Choose model routing mode"
+              tooltip="Choose model routing mode"
+            />
             <SearchableSelect
               options={providerList.map(pid => ({
                 value: pid,
@@ -1628,402 +1279,79 @@ export default function ChatPage() {
             )}
 
             {(() => {
-              // Group consecutive system messages; user/assistant messages stay as individual items
-              type RenderItem =
-                | { kind: 'msg'; msg: Message; idx: number }
-                | { kind: 'group'; msgs: Array<{ msg: Message; idx: number }> };
-
-              // Keep live render order consistent with history hydration:
-              // for each turn, show user -> system events -> assistant.
-              const turnOrdered: Array<{ msg: Message; idx: number }> = [];
-              let cursor = 0;
-              while (cursor < messages.length) {
-                const current = messages[cursor];
-                if (current.type !== "user") {
-                  turnOrdered.push({ msg: current, idx: cursor });
-                  cursor++;
-                  continue;
-                }
-                turnOrdered.push({ msg: current, idx: cursor });
-                cursor++;
-                const segment: Array<{ msg: Message; idx: number }> = [];
-                while (cursor < messages.length && messages[cursor].type !== "user") {
-                  segment.push({ msg: messages[cursor], idx: cursor });
-                  cursor++;
-                }
-                const systems = segment.filter((entry) => entry.msg.type === "system");
-                const nonSystems = segment.filter((entry) => entry.msg.type !== "system");
-                turnOrdered.push(...systems, ...nonSystems);
-              }
-
-              const items: RenderItem[] = [];
-              let i = 0;
-              while (i < turnOrdered.length) {
-                if (turnOrdered[i].msg.type !== 'system') {
-                  items.push({ kind: 'msg', msg: turnOrdered[i].msg, idx: turnOrdered[i].idx });
-                  i++;
-                } else {
-                  const group: Array<{ msg: Message; idx: number }> = [];
-                  while (i < turnOrdered.length && turnOrdered[i].msg.type === 'system') {
-                    group.push({ msg: turnOrdered[i].msg, idx: turnOrdered[i].idx });
-                    i++;
-                  }
-                  items.push({ kind: 'group', msgs: group });
-                }
-              }
-
-              // Render a single system event as a nested collapsible row
-              const renderSystemEvent = (m: Message) => {
-                const pending = m.requestId ? pendingInteractions.find((p) => p.requestId === m.requestId) : undefined;
-                const draftValue = m.requestId ? (interactionDrafts[m.requestId] ?? "") : "";
-                const selected = m.requestId ? (interactionSelections[m.requestId] ?? []) : [];
-                const metadata = pending?.metadata || normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload);
-                const mode = metadata?.responseMode || "text";
-                const isToolEvent = m.eventType === "tool.call" || m.eventType === "tool.done" || m.eventType === "tool.result" || m.eventType === "tool.match";
-                if (isToolEvent) {
-                  const payloadText = m.eventType === "tool.call"
-                    ? formatPayload(m.eventPayload?.input)
-                    : (m.eventType === "tool.done" || m.eventType === "tool.result")
-                    ? formatPayload(m.eventPayload?.output)
-                    : formatPayload({
-                        reason: m.eventPayload?.reason,
-                        needsClarification: m.eventPayload?.needsClarification,
-                        selectedTool: m.eventPayload?.selectedTool,
-                        score: m.eventPayload?.score,
-                        candidates: m.eventPayload?.candidates,
-                      });
-                  return (
-                    <details key={m.id} className="group/item rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
-                      <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
-                        <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
-                        <span className="w-20 shrink-0 font-mono text-[10px] text-slate-400">{m.eventType}</span>
-                        <span className="min-w-0 flex-1 truncate text-slate-600">{m.content}</span>
-                      </summary>
-                      {payloadText ? (
-                        <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-100 bg-slate-50 p-2 text-[10px] text-slate-700">
-                          {payloadText}
-                        </pre>
-                      ) : null}
-                    </details>
-                  );
-                }
-
-                if (m.eventType === "question") {
-                  const isResolved = m.hitlStatus && m.hitlStatus !== "pending";
-                  return (
-                    <details key={m.id} open={!isResolved} className="group/item rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
-                      <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
-                        <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
-                        <span className="font-medium text-slate-600">Question</span>
-                        <span className="min-w-0 flex-1 truncate text-slate-500">{m.content}</span>
-                      </summary>
-                      <div className="mt-2 space-y-2">
-                        <div className="text-slate-700">{m.content}</div>
-                        {isResolved ? (
-                          <div className="flex items-start gap-2">
-                            <span className="mt-0.5 shrink-0 text-[10px] font-medium uppercase text-slate-400">Answer</span>
-                            <span className="text-slate-600">{formatHitlResponse(m.hitlResponse)}</span>
-                          </div>
-                        ) : pending?.type === "question" ? (
-                          <div className="flex items-center gap-2">
-                            {(mode === "single_select" || mode === "multi_select") && metadata?.options?.length ? (
-                              <div className="w-full space-y-2">
-                                <div className="flex flex-wrap gap-2">
-                                  {metadata.options.map((opt) => {
-                                    const active = selected.includes(opt.id);
-                                    return (
-                                      <button key={opt.id} type="button"
-                                        onClick={() => {
-                                          if (!m.requestId) return;
-                                          setInteractionSelections((prev) => {
-                                            const current = prev[m.requestId as string] || [];
-                                            if (mode === "single_select") return { ...prev, [m.requestId as string]: [opt.id] };
-                                            const next = current.includes(opt.id) ? current.filter((id) => id !== opt.id) : [...current, opt.id];
-                                            return { ...prev, [m.requestId as string]: next };
-                                          });
-                                        }}
-                                        className={`rounded border px-2 py-1 text-xs ${active ? "border-[#005CB9] bg-[#EFF6FF] text-[#123262]" : "border-gray-200 bg-white text-slate-700"}`}
-                                      >{opt.label}</button>
-                                    );
-                                  })}
-                                </div>
-                                {metadata.allowCustomText && (
-                                  <input value={draftValue}
-                                    onChange={(e) => { if (!m.requestId) return; setInteractionDrafts((prev) => ({ ...prev, [m.requestId as string]: e.target.value })); }}
-                                    placeholder="Optional clarification..."
-                                    className="h-8 w-full rounded border border-gray-200 bg-white px-2 text-xs text-slate-700"
-                                  />
-                                )}
-                              </div>
-                            ) : (
-                              <input value={draftValue}
-                                onChange={(e) => { if (!m.requestId) return; setInteractionDrafts((prev) => ({ ...prev, [m.requestId as string]: e.target.value })); }}
-                                placeholder="Type your answer..."
-                                className="h-8 flex-1 rounded border border-gray-200 bg-white px-2 text-xs text-slate-700"
-                              />
-                            )}
-                            <Button size="sm" variant="outline" onClick={() => answerPending(pending.requestId, "reply", selected)}>Continue</Button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </details>
-                  );
-                }
-
-                if (m.eventType === "approval_required") {
-                  const isResolved = m.hitlStatus && m.hitlStatus !== "pending";
-                  return (
-                    <details key={m.id} open={!isResolved} className="group/item rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
-                      <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
-                        <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
-                        <span className="font-medium text-slate-600">Approval request</span>
-                        {isResolved && (
-                          <span className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${m.hitlStatus === "approved" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-                            {m.hitlStatus}
-                          </span>
-                        )}
-                        <span className="min-w-0 flex-1 truncate text-slate-500">{m.content}</span>
-                      </summary>
-                      <div className="mt-2 space-y-2">
-                        <div className="text-slate-700">{m.content}</div>
-                        {isResolved ? (
-                          m.hitlResponse ? <div className="text-slate-500">{m.hitlResponse}</div> : null
-                        ) : pending?.type && pending.type !== "question" ? (
-                          <div className="space-y-2">
-                            <input value={draftValue}
-                              onChange={(e) => { if (!m.requestId) return; setInteractionDrafts((prev) => ({ ...prev, [m.requestId as string]: e.target.value })); }}
-                              placeholder="Optional reason..."
-                              className="h-8 w-full rounded border border-gray-200 bg-white px-2 text-xs text-slate-700"
-                            />
-                            <div className="flex gap-2">
-                              <Button size="sm" variant="outline" onClick={() => answerPending(pending.requestId, "approve")}>Approve</Button>
-                              <Button size="sm" variant="outline" onClick={() => answerPending(pending.requestId, "reject")}>Reject</Button>
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    </details>
-                  );
-                }
-
-                // Fallthrough (approval_status, etc.)
-                return (
-                  <details key={m.id} className="group/item rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
-                    <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
-                      <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
-                      <span className="font-mono text-[10px] text-slate-400">{m.eventType || "system"}</span>
-                      <span className="min-w-0 flex-1 truncate text-slate-600">{m.content}</span>
-                    </summary>
-                  </details>
-                );
-              };
-
+              const items = buildRenderItems(messages);
               const hasSystemGroup = items.some((entry) => entry.kind === "group");
               const deferredStreamingAssistant: Array<{ msg: Message; idx: number }> = [];
 
+              const renderAssistant = (m: Message, idx: number) => (
+                <AssistantBubble
+                  key={m.id}
+                  message={m}
+                  spinnerVerb={currentSpinnerVerb}
+                  hovered={hoveredMsgIdx === idx}
+                  copied={copiedId === String(idx)}
+                  onMouseEnter={() => setHoveredMsgIdx(idx)}
+                  onMouseLeave={() => setHoveredMsgIdx(null)}
+                  onCopy={() => copyMessage(m.content, idx)}
+                />
+              );
+
               const renderedItems = items.map((item) => {
-                if (item.kind === 'msg') {
+                if (item.kind === "msg") {
                   const { msg: m, idx } = item;
-                  if (m.type === 'user') {
+                  if (m.type === "user") {
                     const isEditing = editingMsgIdx === idx;
                     return (
-                      <div key={m.id} className="flex items-end justify-end gap-2"
+                      <UserBubble
+                        key={m.id}
+                        content={m.content}
+                        hovered={hoveredMsgIdx === idx}
+                        copied={copiedId === String(idx)}
+                        isEditing={isEditing}
+                        editDraft={editDraft}
+                        isStreaming={isStreaming}
                         onMouseEnter={() => setHoveredMsgIdx(idx)}
                         onMouseLeave={() => setHoveredMsgIdx(null)}
-                      >
-                        {/* Action buttons appear to the left of the bubble on hover */}
-                        {hoveredMsgIdx === idx && !isEditing && (
-                          <div className="flex shrink-0 items-center gap-1">
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => { setEditDraft(m.content); setEditingMsgIdx(idx); }}
-                                  className="rounded border bg-white p-1.5 text-slate-500 shadow-sm hover:bg-slate-50">
-                                  <Pencil size={11} />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top"><p>Edit &amp; resend</p></TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => copyMessage(m.content, idx)}
-                                  className="rounded border bg-white p-1.5 text-slate-500 shadow-sm hover:bg-slate-50">
-                                  {copiedId === String(idx) ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top"><p>{copiedId === String(idx) ? "Copied!" : "Copy"}</p></TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => handleResend(idx, m.content)} disabled={isStreaming}
-                                  className="rounded border bg-white p-1.5 text-slate-500 shadow-sm hover:bg-slate-50 disabled:opacity-40">
-                                  <RotateCcw size={11} />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top"><p>Resend</p></TooltipContent>
-                            </Tooltip>
-                          </div>
-                        )}
-                        {isEditing ? (
-                          <div className="flex w-[82%] flex-col gap-2">
-                            <textarea
-                              value={editDraft}
-                              onChange={(e) => setEditDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault();
-                                  handleResend(idx, editDraft);
-                                  setEditingMsgIdx(null);
-                                }
-                                if (e.key === 'Escape') setEditingMsgIdx(null);
-                              }}
-                              rows={Math.max(2, editDraft.split('\n').length)}
-                              autoFocus
-                              className="w-full resize-none rounded-xl border border-[#005CB9] px-4 py-2.5 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-[#005CB9]/30"
-                            />
-                            <div className="flex justify-end gap-2">
-                              <Button size="sm" variant="outline" onClick={() => setEditingMsgIdx(null)}>Cancel</Button>
-                              <Button size="sm" className="text-white" style={{ background: "#005CB9" }}
-                                onClick={() => { handleResend(idx, editDraft); setEditingMsgIdx(null); }}
-                                disabled={isStreaming || !editDraft.trim()}
-                              >Send</Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="max-w-[82%] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm text-white" style={{ background: "#005CB9" }}>
-                            {m.content}
-                          </div>
-                        )}
-                      </div>
+                        onCopy={() => copyMessage(m.content, idx)}
+                        onResend={() => handleResend(idx, m.content)}
+                        onStartEdit={() => {
+                          setEditDraft(m.content);
+                          setEditingMsgIdx(idx);
+                        }}
+                        onCancelEdit={() => setEditingMsgIdx(null)}
+                        onChangeEditDraft={setEditDraft}
+                        onSubmitEdit={() => {
+                          handleResend(idx, editDraft);
+                          setEditingMsgIdx(null);
+                        }}
+                      />
                     );
                   }
-                  if (m.type === 'assistant') {
+                  if (m.type === "assistant") {
                     if (m.isStreaming && hasSystemGroup) {
                       deferredStreamingAssistant.push({ msg: m, idx });
                       return null;
                     }
-                    return (
-                      <div key={m.id} className="group relative flex justify-start"
-                        onMouseEnter={() => setHoveredMsgIdx(idx)}
-                        onMouseLeave={() => setHoveredMsgIdx(null)}
-                      >
-                        <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 shadow-sm">
-                          {m.reasoning && (
-                            <details className="group/think mb-3 rounded-lg border border-indigo-100 bg-indigo-50/60 text-xs">
-                              <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-indigo-500 [&::-webkit-details-marker]:hidden">
-                                <Brain size={11} className="shrink-0" />
-                                <span className="flex-1 font-medium">
-                                  {m.isStreaming && !m.content ? 'Thinking…' : 'Reasoning'}
-                                </span>
-                                <ChevronRight size={10} className="shrink-0 text-indigo-400 transition-transform group-open/think:rotate-90" />
-                              </summary>
-                              <div className="border-t border-indigo-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-500 whitespace-pre-wrap">
-                                {m.reasoning}
-                              </div>
-                            </details>
-                          )}
-                          <div className="prose prose-sm max-w-none prose-slate prose-p:my-1 prose-li:my-0.5 prose-headings:my-2 prose-pre:bg-slate-100 prose-pre:text-xs prose-code:text-xs prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                              {m.content}
-                            </ReactMarkdown>
-                          </div>
-                          {m.isStreaming && (
-                            <div className="mt-2 inline-flex items-center gap-1.5 text-xs text-slate-500">
-                              <Loader2 size={12} className="animate-spin" />
-                              <span>{currentSpinnerVerb}...</span>
-                              <span className="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-slate-400" />
-                            </div>
-                          )}
-                        </div>
-                        {hoveredMsgIdx === idx && !m.isStreaming && (
-                          <div className="absolute -bottom-6 left-0 flex items-center gap-1">
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => copyMessage(m.content, idx)} className="rounded border bg-white p-1.5 text-slate-500 shadow-sm hover:bg-slate-50">
-                                  {copiedId === String(idx) ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="bottom"><p>{copiedId === String(idx) ? "Copied!" : "Copy"}</p></TooltipContent>
-                            </Tooltip>
-                          </div>
-                        )}
-                      </div>
-                    );
+                    return renderAssistant(m, idx);
                   }
                   return null;
                 }
 
-                // Render a group of consecutive system events as a 2-level collapsible
-                const { msgs } = item;
-                const groupKey = msgs[0].msg.id;
-
-                // Build group summary label
-                const toolNames = msgs
-                  .filter(({ msg }) => msg.eventType === 'tool.call')
-                  .map(({ msg }) => msg.eventPayload?.toolName)
-                  .filter(Boolean) as string[];
-                const questionCount = msgs.filter(({ msg }) => msg.eventType === 'question').length;
-                const approvalCount = msgs.filter(({ msg }) => msg.eventType === 'approval_required').length;
-                const hasPending = msgs.some(({ msg }) =>
-                  msg.requestId && pendingInteractions.some((p) => p.requestId === msg.requestId)
-                );
-
-                const parts: string[] = [];
-                if (toolNames.length === 1) parts.push(`Called ${toolNames[0]}`);
-                else if (toolNames.length === 2) parts.push(`Called ${toolNames[0]}, ${toolNames[1]}`);
-                else if (toolNames.length > 2) parts.push(`Called ${toolNames[0]} +${toolNames.length - 1} more`);
-                if (questionCount > 0) parts.push(`${questionCount} question${questionCount > 1 ? 's' : ''}`);
-                if (approvalCount > 0) parts.push(`${approvalCount} approval${approvalCount > 1 ? 's' : ''}`);
-                const groupSummary = parts.join(' · ') || `${msgs.length} event${msgs.length > 1 ? 's' : ''}`;
-
                 return (
-                  <details key={groupKey} open={hasPending} className="group/outer mx-2 rounded-xl border border-slate-200 bg-slate-50 text-xs">
-                    <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 [&::-webkit-details-marker]:hidden">
-                      <ChevronRight size={10} className="shrink-0 text-slate-400 transition-transform group-open/outer:rotate-90" />
-                      <span className="flex-1 text-slate-600">{groupSummary}</span>
-                      <span className="text-[10px] text-slate-400">{msgs.length} event{msgs.length > 1 ? 's' : ''}</span>
-                    </summary>
-                    <div className="space-y-1 border-t border-slate-200 px-2 pb-2 pt-1.5">
-                      {msgs.map(({ msg }) => renderSystemEvent(msg))}
-                    </div>
-                  </details>
+                  <SystemEventGroup
+                    key={item.msgs[0].msg.id}
+                    messages={item.msgs.map((entry) => entry.msg)}
+                    pendingInteractions={pendingInteractions}
+                    interactionDrafts={interactionDrafts}
+                    interactionSelections={interactionSelections}
+                    setInteractionDrafts={setInteractionDrafts}
+                    setInteractionSelections={setInteractionSelections}
+                    answerPending={answerPending}
+                  />
                 );
               });
 
-              const deferredItems = deferredStreamingAssistant.map(({ msg: m, idx }) => (
-                <div key={m.id} className="group relative flex justify-start"
-                  onMouseEnter={() => setHoveredMsgIdx(idx)}
-                  onMouseLeave={() => setHoveredMsgIdx(null)}
-                >
-                  <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 shadow-sm">
-                    {m.reasoning && (
-                      <details className="group/think mb-3 rounded-lg border border-indigo-100 bg-indigo-50/60 text-xs">
-                        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-indigo-500 [&::-webkit-details-marker]:hidden">
-                          <Brain size={11} className="shrink-0" />
-                          <span className="flex-1 font-medium">
-                            {m.isStreaming && !m.content ? 'Thinking…' : 'Reasoning'}
-                          </span>
-                          <ChevronRight size={10} className="shrink-0 text-indigo-400 transition-transform group-open/think:rotate-90" />
-                        </summary>
-                        <div className="border-t border-indigo-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-500 whitespace-pre-wrap">
-                          {m.reasoning}
-                        </div>
-                      </details>
-                    )}
-                    <div className="prose prose-sm max-w-none prose-slate prose-p:my-1 prose-li:my-0.5 prose-headings:my-2 prose-pre:bg-slate-100 prose-pre:text-xs prose-code:text-xs prose-code:bg-slate-100 prose-code:px-1 prose-code:rounded">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                        {m.content}
-                      </ReactMarkdown>
-                    </div>
-                    {m.isStreaming && (
-                      <div className="mt-2 inline-flex items-center gap-1.5 text-xs text-slate-500">
-                        <Loader2 size={12} className="animate-spin" />
-                        <span>{currentSpinnerVerb}...</span>
-                        <span className="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-slate-400" />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ));
+              const deferredItems = deferredStreamingAssistant.map(({ msg, idx }) => renderAssistant(msg, idx));
 
               return [...renderedItems, ...deferredItems];
             })()}

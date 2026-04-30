@@ -22,6 +22,8 @@ public class ChatState {
     private String runtimeMode;
     private String modelSelectionMode;
     private String agentProfileId;
+    private String toolChainId;
+    private Integer toolChainVersion;
     private String rollingSummary;
 
     public ChatState copy() {
@@ -32,6 +34,8 @@ public class ChatState {
                 .runtimeMode(this.runtimeMode)
                 .modelSelectionMode(this.modelSelectionMode)
                 .agentProfileId(this.agentProfileId)
+                .toolChainId(this.toolChainId)
+                .toolChainVersion(this.toolChainVersion)
                 .rollingSummary(this.rollingSummary)
                 .build();
     }

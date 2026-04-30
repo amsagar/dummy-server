@@ -80,6 +80,16 @@ public class ModelProviderRouter {
     }
 
     public Spec resolve(@Nullable ModelRef model) {
+        return resolve(model, false);
+    }
+
+    /**
+     * Resolve a chat client. If {@code disableThinking} is true, Anthropic models will be configured
+     * WITHOUT extended thinking even when the global {@code enableAnthropicThinking} flag is on.
+     * Use this for structured-output calls (JSON generation) where extended thinking can consume the
+     * entire token budget and prevent the actual answer from being emitted.
+     */
+    public Spec resolve(@Nullable ModelRef model, boolean disableThinking) {
         if (model == null || model.providerID() == null) {
             throw new IllegalStateException(
                     "No model selected — choose a model via the chat interface");
@@ -96,7 +106,7 @@ public class ModelProviderRouter {
         }
 
         return switch (provider) {
-            case "anthropic" -> resolveAnthropic(modelID);
+            case "anthropic" -> resolveAnthropic(modelID, disableThinking);
             case "azure", "azure_openai" -> resolveAzure(provider, modelID);
             case "openai" -> resolveOpenAI(modelID);
             case "google", "google-vertex" -> resolveGoogle(modelID);
@@ -108,6 +118,10 @@ public class ModelProviderRouter {
     // ── Provider resolvers ────────────────────────────────────────────────────
 
     private Spec resolveAnthropic(String modelID) {
+        return resolveAnthropic(modelID, false);
+    }
+
+    private Spec resolveAnthropic(String modelID, boolean disableThinking) {
         var creds = getCredsOrThrow("anthropic", modelID);
         try {
             String apiKey = encryptionService.decrypt(creds.encryptedKey());
@@ -122,10 +136,11 @@ public class ModelProviderRouter {
             AnthropicClient anthropicClient = clientBuilder.build();
             AnthropicClientAsync anthropicClientAsync = asyncClientBuilder.build();
 
+            boolean thinkingEnabled = runtimeTuningProperties.isEnableAnthropicThinking() && !disableThinking;
             AnthropicChatOptions.Builder optionsBuilder = AnthropicChatOptions.builder()
                     .model(modelID)
                     .maxTokens(maxTokens());
-            if (runtimeTuningProperties.isEnableAnthropicThinking()) {
+            if (thinkingEnabled) {
                 optionsBuilder.thinking(ThinkingConfigParam.ofAdaptive(
                         ThinkingConfigAdaptive.builder().build()));
             }
@@ -135,8 +150,7 @@ public class ModelProviderRouter {
                     .options(optionsBuilder.build())
                     .build();
 
-            log.debug("[ModelProviderRouter] → anthropic/{} (thinking={})", modelID,
-                    runtimeTuningProperties.isEnableAnthropicThinking());
+            log.debug("[ModelProviderRouter] → anthropic/{} (thinking={})", modelID, thinkingEnabled);
             return new Spec(ChatClient.create(model), null);
         } catch (Exception e) {
             throw wrapError("anthropic", modelID, e);

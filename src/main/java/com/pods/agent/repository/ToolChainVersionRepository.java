@@ -1,0 +1,94 @@
+package com.pods.agent.repository;
+
+import com.pods.agent.domain.ToolChainVersion;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Repository
+public class ToolChainVersionRepository {
+    private final JdbcTemplate jdbc;
+    private final NamedParameterJdbcTemplate namedJdbc;
+    private final SqlQueryLoader sql;
+
+    public ToolChainVersionRepository(JdbcTemplate jdbc, NamedParameterJdbcTemplate namedJdbc, SqlQueryLoader sql) {
+        this.jdbc = jdbc;
+        this.namedJdbc = namedJdbc;
+        this.sql = sql;
+    }
+
+    public ToolChainVersion save(ToolChainVersion version) {
+        if (version.getId() == null) version.setId(UUID.randomUUID().toString());
+        if (version.getCreatedAt() == 0) version.setCreatedAt(System.currentTimeMillis());
+        namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.INSERT"), new MapSqlParameterSource()
+                .addValue("id", version.getId())
+                .addValue("toolChainId", version.getToolChainId())
+                .addValue("version", version.getVersion())
+                .addValue("graphJson", version.getGraphJson())
+                .addValue("inputSchema", version.getInputSchema())
+                .addValue("outputSchema", version.getOutputSchema())
+                .addValue("responseMode", version.getResponseMode())
+                .addValue("synthesisPrompt", version.getSynthesisPrompt())
+                .addValue("intentsJson", version.getIntentsJson())
+                .addValue("ragConfigJson", version.getRagConfigJson())
+                .addValue("published", version.isPublished())
+                .addValue("createdBy", version.getCreatedBy())
+                .addValue("createdAt", version.getCreatedAt()));
+        return version;
+    }
+
+    public Optional<ToolChainVersion> findById(String id) {
+        var rows = jdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_BY_ID"), (rs, n) -> map(rs), id);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public List<ToolChainVersion> findByChain(String toolChainId) {
+        return jdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_BY_CHAIN"), (rs, n) -> map(rs), toolChainId);
+    }
+
+    public Optional<ToolChainVersion> findByChainAndVersion(String toolChainId, int version) {
+        var rows = namedJdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_BY_CHAIN_AND_VERSION"),
+                new MapSqlParameterSource()
+                        .addValue("toolChainId", toolChainId)
+                        .addValue("version", version),
+                (rs, n) -> map(rs));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public Optional<ToolChainVersion> findPublished(String toolChainId) {
+        var rows = namedJdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_PUBLISHED"),
+                new MapSqlParameterSource().addValue("toolChainId", toolChainId),
+                (rs, n) -> map(rs));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public void publish(String versionId, String toolChainId) {
+        namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.UNPUBLISH_CHAIN"),
+                new MapSqlParameterSource().addValue("toolChainId", toolChainId));
+        namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.SET_PUBLISHED"),
+                new MapSqlParameterSource().addValue("id", versionId));
+    }
+
+    private ToolChainVersion map(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return ToolChainVersion.builder()
+                .id(rs.getString("id"))
+                .toolChainId(rs.getString("tool_chain_id"))
+                .version(rs.getInt("version"))
+                .graphJson(rs.getString("graph_json"))
+                .inputSchema(rs.getString("input_schema"))
+                .outputSchema(rs.getString("output_schema"))
+                .responseMode(rs.getString("response_mode"))
+                .synthesisPrompt(rs.getString("synthesis_prompt"))
+                .intentsJson(rs.getString("intents_json"))
+                .ragConfigJson(rs.getString("rag_config_json"))
+                .published(rs.getBoolean("is_published"))
+                .createdBy(rs.getString("created_by"))
+                .createdAt(rs.getLong("created_at"))
+                .build();
+    }
+}

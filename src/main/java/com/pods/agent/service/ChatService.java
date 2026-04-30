@@ -435,12 +435,22 @@ public class ChatService {
         if (request.getTimezone() != null && !request.getTimezone().isBlank()) {
             state.setTimezone(request.getTimezone());
         }
-        state.setRuntimeMode("aicore_loop");
+        if (request.getRuntimeMode() != null && !request.getRuntimeMode().isBlank()) {
+            state.setRuntimeMode(request.getRuntimeMode());
+        } else if (state.getRuntimeMode() == null || state.getRuntimeMode().isBlank()) {
+            state.setRuntimeMode("aicore_loop");
+        }
         if (request.getModelSelectionMode() != null && !request.getModelSelectionMode().isBlank()) {
             state.setModelSelectionMode(request.getModelSelectionMode());
         }
         if (request.getAgentProfileId() != null && !request.getAgentProfileId().isBlank()) {
             state.setAgentProfileId(request.getAgentProfileId());
+        }
+        if (request.getToolChainId() != null && !request.getToolChainId().isBlank()) {
+            state.setToolChainId(request.getToolChainId());
+        }
+        if (request.getToolChainVersion() != null) {
+            state.setToolChainVersion(request.getToolChainVersion());
         }
         var resolved = request.resolvedModel();
         if (resolved != null) {

@@ -1,0 +1,26 @@
+package com.pods.agent.domain;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class ToolChainVersion {
+    private String id;
+    private String toolChainId;
+    private int version;
+    private String graphJson;
+    private String inputSchema;
+    private String outputSchema;
+    private String responseMode;
+    private String synthesisPrompt;
+    private String intentsJson;
+    private String ragConfigJson;
+    private boolean published;
+    private String createdBy;
+    private long createdAt;
+}

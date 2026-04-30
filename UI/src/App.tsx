@@ -22,6 +22,7 @@ import {
   Wrench,
   FolderTree,
   Server,
+  Workflow,
   LogOut,
   UserCircle2,
 } from "lucide-react";
@@ -37,6 +38,11 @@ import ToolDomainPage from "./pages/ToolDomainPage";
 import SkillsPage from "./pages/SkillsPage";
 import McpRegistryPage from "./pages/McpRegistryPage";
 import McpServerToolsPage from "./pages/McpServerToolsPage";
+import ToolChainsPage from "./pages/ToolChainsPage";
+import ToolChainDesignerPage from "./pages/ToolChainDesignerPage";
+import ToolChainRunsPage from "./pages/ToolChainRunsPage";
+import ToolChainRunDetailPage from "./pages/ToolChainRunDetailPage";
+import ToolChainApprovalsPage from "./pages/ToolChainApprovalsPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import { clearAuthToken, getAuthUser, isAuthenticated } from "./services/api";
@@ -56,6 +62,7 @@ function Sidebar() {
     { icon: Cpu, name: "Models", path: "/models" },
     { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
+    { icon: Workflow, name: "ToolChains", path: "/toolchains" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
   ];
@@ -187,6 +194,7 @@ function Header() {
     "/embedding-models": "Embedding Models",
     "/tools": "Tools",
     "/tools/": "Tools",
+    "/toolchains": "ToolChains",
     "/skills": "Skills",
     "/mcp-registry": "MCP Registry",
     "/mcp-registry/": "MCP Registry",
@@ -194,6 +202,7 @@ function Header() {
 
   const title =
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
+    (location.pathname.startsWith("/toolchains/") ? "ToolChains" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
     "PODS AI Agent";
@@ -249,6 +258,12 @@ export default function App() {
                 <Route path="/embedding-models" element={<EmbeddingModelsPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/tools/:domainId" element={<ToolDomainPage />} />
+                <Route path="/toolchains" element={<ToolChainsPage />} />
+                <Route path="/toolchains/designer" element={<ToolChainDesignerPage />} />
+                <Route path="/toolchains/:id/designer" element={<ToolChainDesignerPage />} />
+                <Route path="/toolchains/:id/runs" element={<ToolChainRunsPage />} />
+                <Route path="/toolchains/runs/:runId" element={<ToolChainRunDetailPage />} />
+                <Route path="/toolchains/approvals" element={<ToolChainApprovalsPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/mcp-registry" element={<McpRegistryPage />} />
                 <Route path="/mcp-registry/:serverId/tools" element={<McpServerToolsPage />} />

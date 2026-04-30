@@ -1,0 +1,1432 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useParams } from "react-router-dom";
+import { ReactFlow, Background, Controls, MiniMap, addEdge, applyNodeChanges, useEdgesState, useNodesState } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { api, getAuthToken } from "@/services/api";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
+import ToolChainSessionList from "@/components/toolchain/ToolChainSessionList";
+import ToolChainConfigChatPanel from "@/components/toolchain/ToolChainConfigChatPanel";
+import NodeInspectorPanel from "@/components/toolchain/NodeInspectorPanel";
+import NodeEditorDialog from "@/components/toolchain/NodeEditorDialog";
+import {
+  type ChatMessage,
+  type InteractionAction,
+  type PendingInteraction,
+  normalizeQuestionMetadata,
+} from "@/components/chat";
+import { cn } from "@/lib/utils";
+import { ArrowLeft } from "lucide-react";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { modelRefKey, parseModelRefKey } from "@/types";
+
+const starterGraph = {
+  nodes: [
+    { id: "start", type: "input", data: { label: "Start" }, position: { x: 40, y: 100 } },
+    { id: "task_1", type: "default", data: { label: "Tool Step", config: { toolName: "task" } }, position: { x: 280, y: 100 } },
+    { id: "end", type: "output", data: { label: "End" }, position: { x: 540, y: 100 } },
+  ],
+  edges: [
+    { id: "e-start-task", source: "start", target: "task_1" },
+    { id: "e-task-end", source: "task_1", target: "end" },
+  ],
+};
+
+function genId() {
+  return Math.random().toString(36).slice(2);
+}
+
+const CHAT_PANEL_WIDTH_STORAGE_KEY = "toolchain-designer.chat-panel-width";
+const CHAT_PANEL_WIDTH_MIN = 320;
+const CHAT_PANEL_WIDTH_DEFAULT = 380;
+
+function clampChatPanelWidthValue(candidateWidth: number): number {
+  const width = Number.isFinite(candidateWidth) ? candidateWidth : CHAT_PANEL_WIDTH_DEFAULT;
+  const max = typeof window === "undefined"
+    ? 900
+    : Math.max(CHAT_PANEL_WIDTH_MIN, Math.floor(window.innerWidth * 0.55));
+  return Math.max(CHAT_PANEL_WIDTH_MIN, Math.min(max, Math.round(width)));
+}
+
+function readInitialChatPanelWidth(): number {
+  if (typeof window === "undefined") return CHAT_PANEL_WIDTH_DEFAULT;
+  const raw = window.localStorage.getItem(CHAT_PANEL_WIDTH_STORAGE_KEY);
+  if (!raw) return clampChatPanelWidthValue(CHAT_PANEL_WIDTH_DEFAULT);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return clampChatPanelWidthValue(CHAT_PANEL_WIDTH_DEFAULT);
+  return clampChatPanelWidthValue(parsed);
+}
+
+function toFiniteNumber(value: any): number | null {
+  const out = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(out) ? out : null;
+}
+
+function parseMetadata(raw: any): Record<string, any> {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw as Record<string, any>;
+  if (typeof raw !== "string") return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeLayoutPositions(raw: any): Record<string, { x: number; y: number }> {
+  if (!raw || typeof raw !== "object") return {};
+  const normalized: Record<string, { x: number; y: number }> = {};
+  for (const [nodeId, coords] of Object.entries(raw as Record<string, any>)) {
+    if (!nodeId) continue;
+    const x = toFiniteNumber((coords as any)?.x);
+    const y = toFiniteNumber((coords as any)?.y);
+    if (x === null || y === null) continue;
+    normalized[nodeId] = { x, y };
+  }
+  return normalized;
+}
+
+function buildReadableFallbackPositions(nodes: any[], edges: any[]): Record<string, { x: number; y: number }> {
+  const nodeIds = nodes.map((node) => String(node.id));
+  const inDegree = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  for (const id of nodeIds) {
+    inDegree.set(id, 0);
+    outgoing.set(id, []);
+  }
+  for (const edge of edges || []) {
+    const from = String(edge.from ?? edge.source ?? "");
+    const to = String(edge.to ?? edge.target ?? "");
+    if (!inDegree.has(from) || !inDegree.has(to)) continue;
+    outgoing.get(from)?.push(to);
+    inDegree.set(to, (inDegree.get(to) || 0) + 1);
+  }
+  const queue: string[] = nodeIds.filter((nodeId) => (inDegree.get(nodeId) || 0) === 0);
+  const level = new Map<string, number>();
+  for (const id of queue) level.set(id, 0);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const currentLevel = level.get(current) || 0;
+    for (const next of outgoing.get(current) || []) {
+      level.set(next, Math.max(level.get(next) || 0, currentLevel + 1));
+      inDegree.set(next, (inDegree.get(next) || 0) - 1);
+      if ((inDegree.get(next) || 0) === 0) queue.push(next);
+    }
+  }
+  const maxKnownLevel = Math.max(0, ...Array.from(level.values(), (v) => v || 0));
+  let fallbackLevel = maxKnownLevel;
+  for (const id of nodeIds) {
+    if (!level.has(id)) {
+      fallbackLevel += 1;
+      level.set(id, fallbackLevel);
+    }
+  }
+  const grouped = new Map<number, string[]>();
+  for (const id of nodeIds) {
+    const depth = level.get(id) || 0;
+    if (!grouped.has(depth)) grouped.set(depth, []);
+    grouped.get(depth)!.push(id);
+  }
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const [depth, ids] of Array.from(grouped.entries()).sort((a, b) => a[0] - b[0])) {
+    ids.forEach((id, idx) => {
+      positions[id] = { x: 100 + depth * 260, y: 80 + idx * 130 };
+    });
+  }
+  return positions;
+}
+
+function graphToFlow(parsed: any, layoutPositions: Record<string, { x: number; y: number }>, fallbackY: number) {
+  const graphNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
+  const graphEdges = Array.isArray(parsed?.edges) ? parsed.edges : [];
+  const autoPositions = buildReadableFallbackPositions(graphNodes, graphEdges);
+  const rfNodes = graphNodes.map((node: any, idx: number) => {
+    const id = String(node.id);
+    const rawX = toFiniteNumber(node?.position?.x);
+    const rawY = toFiniteNumber(node?.position?.y);
+    const config = node.config || {};
+    const approvalMode = String(config?.approvalMode || "").toLowerCase();
+    const needsApproval =
+      node.type === "approval" || approvalMode === "required" || approvalMode === "required_if_sensitive";
+    return {
+      id,
+      type: node.type === "start" ? "input" : node.type === "end" ? "output" : "default",
+      data: { label: node.label || node.id, config },
+      style: needsApproval
+        ? {
+            background: "#f3e8ff",
+            border: "1px solid #8b5cf6",
+            color: "#4c1d95",
+          }
+        : undefined,
+      position:
+        layoutPositions[id] ||
+        (rawX !== null && rawY !== null
+          ? { x: rawX, y: rawY }
+          : autoPositions[id] || { x: 80 + idx * 220, y: fallbackY }),
+    };
+  });
+  const rfEdges = graphEdges.map((edge: any, idx: number) => ({
+    id: edge.id || `e-${idx}-${edge.from || edge.source}-${edge.to || edge.target}`,
+    source: edge.from || edge.source,
+    target: edge.to || edge.target,
+    label: edge.condition || edge.data?.label || undefined,
+  }));
+  return { rfNodes, rfEdges };
+}
+
+function shouldRenderDraftGraph(stateLike: any): boolean {
+  if (!stateLike) return false;
+  const graphJson = typeof stateLike.graphJson === "string" ? stateLike.graphJson : "";
+  if (!graphJson.trim()) return false;
+  if (stateLike.graphAvailable === false) return false;
+  return true;
+}
+
+export default function ToolChainDesignerPage() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const routeToolChainId = id ?? "";
+  const [toolChainId, setToolChainId] = useState<string>(routeToolChainId);
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [nodes, setNodes] = useNodesState(starterGraph.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(starterGraph.edges);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<any | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [pendingInteractions, setPendingInteractions] = useState<PendingInteraction[]>([]);
+  const [interactionDrafts, setInteractionDrafts] = useState<Record<string, string>>({});
+  const [interactionSelections, setInteractionSelections] = useState<Record<string, string[]>>({});
+  const [isConfigStreaming, setIsConfigStreaming] = useState(false);
+  const [sessionBootstrapPending, setSessionBootstrapPending] = useState(false);
+  const [sessionStatus, setSessionStatus] = useState<string>("draft");
+  const [showSessionsMenu, setShowSessionsMenu] = useState(false);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [rollbackVerifyOpen, setRollbackVerifyOpen] = useState(false);
+  const [rollbackText, setRollbackText] = useState("");
+  const [rollbackVersion, setRollbackVersion] = useState<number | null>(null);
+  const [modelSelectionMode, setModelSelectionMode] = useState<"manual" | "auto">("manual");
+  const [selectedModel, setSelectedModel] = useState<string>(localStorage.getItem("lastModelId") || "");
+  const [selectedProvider, setSelectedProvider] = useState<string>(
+    localStorage.getItem("lastModelId")?.split("/")[0] || ""
+  );
+  const [chatPanelWidth, setChatPanelWidth] = useState<number>(() => readInitialChatPanelWidth());
+  const [isResizingChatPanel, setIsResizingChatPanel] = useState(false);
+  const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null);
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [boardOnlyFullscreen, setBoardOnlyFullscreen] = useState(false);
+  const activeSessionRef = useRef<string | null>(null);
+  const activeToolChainRef = useRef<string>("");
+  const layoutPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+  const layoutSaveTimerRef = useRef<number | null>(null);
+  const modelInitializedRef = useRef<string>("");
+  const streamedAssistantIdRef = useRef<string | null>(null);
+  const seenQuestionRequestIdsRef = useRef<Set<string>>(new Set());
+  const chatResizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const hasHydratedWidthRef = useRef(false);
+
+  useEffect(() => {
+    setToolChainId(routeToolChainId);
+  }, [routeToolChainId]);
+
+  useEffect(() => {
+    activeSessionRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    activeToolChainRef.current = toolChainId || "";
+  }, [toolChainId]);
+
+  const { data: versions = [] } = useQuery<any[]>({
+    queryKey: ["toolchain-versions", toolChainId],
+    queryFn: () => api.toolchains.versions(toolChainId),
+    enabled: !!toolChainId,
+  });
+
+  const { data: allToolChains = [] } = useQuery<any[]>({
+    queryKey: ["toolchains"],
+    queryFn: () => api.toolchains.list(),
+  });
+
+  const currentToolChain = useMemo(
+    () => (toolChainId ? allToolChains.find((row: any) => row.id === toolChainId) ?? null : null),
+    [allToolChains, toolChainId]
+  );
+
+  const toolChainDefaultModel = useMemo(() => {
+    const metadata = parseMetadata(currentToolChain?.metadataJson);
+    const modelRef = metadata?.defaultModelRef;
+    if (!modelRef || typeof modelRef !== "object") return null;
+    const providerID = String((modelRef as any).providerID || "").trim();
+    const modelID = String((modelRef as any).modelID || "").trim();
+    if (!providerID || !modelID) return null;
+    return { providerID, modelID };
+  }, [currentToolChain]);
+
+  const latest = useMemo(() => (Array.isArray(versions) && versions.length > 0 ? versions[0] : null), [versions]);
+
+  useEffect(() => {
+    if (activeSessionId) return;
+    if (!latest?.graphJson) return;
+    try {
+      const parsed = JSON.parse(latest.graphJson);
+      if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
+        setNodes(rfNodes);
+        setEdges(rfEdges);
+      }
+    } catch {
+      // no-op
+    }
+  }, [latest, setEdges, setNodes, activeSessionId]);
+
+  useEffect(() => {
+    if (!isFullscreen && !boardOnlyFullscreen) return;
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (boardOnlyFullscreen) setBoardOnlyFullscreen(false);
+        else if (isFullscreen) setIsFullscreen(false);
+      }
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onEsc);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", onEsc);
+    };
+  }, [isFullscreen, boardOnlyFullscreen]);
+
+  const clampChatPanelWidth = useCallback((candidateWidth: number) => {
+    return clampChatPanelWidthValue(candidateWidth);
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedWidthRef.current) {
+      hasHydratedWidthRef.current = true;
+      return;
+    }
+    window.localStorage.setItem(CHAT_PANEL_WIDTH_STORAGE_KEY, String(clampChatPanelWidth(chatPanelWidth)));
+  }, [chatPanelWidth, clampChatPanelWidth]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setChatPanelWidth((prev) => clampChatPanelWidth(prev));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [clampChatPanelWidth]);
+
+  useEffect(() => {
+    if (!isResizingChatPanel) return;
+    const onMouseMove = (event: MouseEvent) => {
+      const start = chatResizeStartRef.current;
+      if (!start) return;
+      const delta = start.startX - event.clientX;
+      setChatPanelWidth(clampChatPanelWidth(start.startWidth + delta));
+    };
+    const onMouseUp = () => {
+      setIsResizingChatPanel(false);
+      chatResizeStartRef.current = null;
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [isResizingChatPanel, clampChatPanelWidth]);
+
+  const { data: sessionsData } = useQuery<any>({
+    queryKey: ["toolchain-config-sessions", toolChainId],
+    queryFn: () => api.toolchains.configSessions(toolChainId),
+    enabled: !!toolChainId,
+  });
+
+  const sessions = sessionsData?.sessions || [];
+
+  const { data: modelsData = [] } = useQuery<any[]>({
+    queryKey: ["models-enabled"],
+    queryFn: () => api.get("/models/enabled"),
+  });
+
+  const modelsByProvider = useMemo(() => {
+    const map = new Map<string, { providerName?: string; models: any[] }>();
+    for (const m of modelsData || []) {
+      if (m.modelKind === "embedding") continue;
+      const pid = m.providerID as string;
+      if (!map.has(pid)) map.set(pid, { providerName: m.providerName, models: [] });
+      map.get(pid)!.models.push(m);
+    }
+    return map;
+  }, [modelsData]);
+  const providerList = useMemo(() => Array.from(modelsByProvider.keys()), [modelsByProvider]);
+
+  useEffect(() => {
+    if (!activeSessionId && sessions.length > 0 && !sessionBootstrapPending) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [sessions, activeSessionId, sessionBootstrapPending]);
+
+  useEffect(() => {
+    const initKey = toolChainId || "__global__";
+    if (modelInitializedRef.current !== initKey) {
+      modelInitializedRef.current = "";
+    }
+  }, [toolChainId]);
+
+  useEffect(() => {
+    if (!modelsData?.length) return;
+    const initKey = toolChainId || "__global__";
+    if (modelInitializedRef.current === initKey) return;
+    const availableModelKeys = new Set(
+      modelsData
+        .filter((m) => m.modelKind !== "embedding")
+        .map((m) => modelRefKey({ providerID: m.providerID, modelID: m.modelID }))
+    );
+    const fromToolChain = toolChainDefaultModel
+      ? modelRefKey({ providerID: toolChainDefaultModel.providerID, modelID: toolChainDefaultModel.modelID })
+      : "";
+    const fromLocal = localStorage.getItem("lastModelId") || "";
+    const first = modelsData.find((m) => m.modelKind !== "embedding");
+    const firstKey = first ? modelRefKey({ providerID: first.providerID, modelID: first.modelID }) : "";
+    const chosen = [fromToolChain, fromLocal, firstKey].find((value) => value && availableModelKeys.has(value)) || "";
+    if (!chosen) return;
+    const parsed = parseModelRefKey(chosen);
+    if (!parsed) return;
+    setSelectedProvider(parsed.providerID);
+    setSelectedModel(chosen);
+    localStorage.setItem("lastModelId", chosen);
+    modelInitializedRef.current = initKey;
+  }, [modelsData, toolChainDefaultModel, toolChainId]);
+
+  const persistDefaultModelMutation = useMutation({
+    mutationFn: async (nextModelKey: string) => {
+      if (!toolChainId || !currentToolChain) return null;
+      const modelRef = parseModelRefKey(nextModelKey);
+      const metadata = parseMetadata(currentToolChain.metadataJson);
+      if (modelRef) {
+        metadata.defaultModelRef = { providerID: modelRef.providerID, modelID: modelRef.modelID };
+      } else {
+        delete metadata.defaultModelRef;
+      }
+      return api.toolchains.update(toolChainId, {
+        name: currentToolChain.name,
+        description: currentToolChain.description,
+        enabled: currentToolChain.enabled,
+        metadata,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to save default model"),
+  });
+
+  const { data: sessionDetail } = useQuery<any>({
+    queryKey: ["toolchain-config-session-detail", toolChainId, activeSessionId],
+    queryFn: () => api.toolchains.configSessionDetail(toolChainId, activeSessionId!),
+    enabled: !!toolChainId && !!activeSessionId,
+  });
+
+  const { data: sessionLayout } = useQuery<any>({
+    queryKey: ["toolchain-config-session-layout", toolChainId, activeSessionId],
+    queryFn: () => api.toolchains.configSessionLayout(toolChainId, activeSessionId!),
+    enabled: !!toolChainId && !!activeSessionId,
+  });
+
+  useEffect(() => {
+    layoutPositionsRef.current = normalizeLayoutPositions(sessionLayout?.positions);
+  }, [sessionLayout]);
+
+  // Parsed graph derived from sessionDetail.graphJson — drives the node inspector.
+  // We can't read directly from React Flow's `nodes` because that array carries the
+  // stripped/styled shape, not the underlying config (argMappings, inputKey, etc.).
+  const parsedGraph = useMemo<{ nodes: any[]; edges: any[] } | null>(() => {
+    const raw = sessionDetail?.graphJson;
+    if (!raw || typeof raw !== "string" || !raw.trim()) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
+        edges: Array.isArray(parsed?.edges) ? parsed.edges : [],
+      };
+    } catch {
+      return null;
+    }
+  }, [sessionDetail?.graphJson]);
+
+  const inspectedNode = useMemo(() => {
+    if (!parsedGraph || !inspectedNodeId) return null;
+    return parsedGraph.nodes.find((n) => String(n.id) === inspectedNodeId) || null;
+  }, [parsedGraph, inspectedNodeId]);
+
+  const editingNode = useMemo(() => {
+    if (!parsedGraph || !editingNodeId) return null;
+    return parsedGraph.nodes.find((n) => String(n.id) === editingNodeId) || null;
+  }, [parsedGraph, editingNodeId]);
+
+  const catalogTools = useMemo<any[]>(() => {
+    const fromBundle = sessionDetail?.contextBundle?.toolsCatalog;
+    if (Array.isArray(fromBundle)) return fromBundle;
+    return [];
+  }, [sessionDetail?.contextBundle?.toolsCatalog]);
+
+  const catalogMcp = useMemo<any[]>(() => {
+    const fromBundle = sessionDetail?.contextBundle?.mcpCatalog;
+    if (Array.isArray(fromBundle)) return fromBundle;
+    return [];
+  }, [sessionDetail?.contextBundle?.mcpCatalog]);
+
+  useEffect(() => {
+    return () => {
+      if (layoutSaveTimerRef.current !== null) {
+        window.clearTimeout(layoutSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionDetail) return;
+    // While a stream is in flight, the SSE handler is the source of truth for
+    // chatMessages, pendingQuestion, status, and the graph. A mid-stream
+    // sessionDetail refetch with stale data would otherwise clobber the
+    // rendered toolchain graph and the question/answer cards.
+    if (isConfigStreaming) return;
+    setSessionStatus(sessionDetail.status || "draft");
+    if (sessionDetail.pendingQuestion?.question) {
+      setPendingQuestion(sessionDetail.pendingQuestion);
+    } else {
+      setPendingQuestion(null);
+    }
+    if (shouldRenderDraftGraph(sessionDetail)) {
+      try {
+        const parsed = JSON.parse(sessionDetail.graphJson);
+        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
+        if (rfNodes.length > 0) {
+          setNodes(rfNodes);
+          setEdges(rfEdges);
+        }
+      } catch {
+        // ignore parse failures
+      }
+    }
+    // Intentionally DO NOT reset to starterGraph here when sessionDetail has no
+    // graphJson — a stale post-stream refetch would otherwise wipe the graph
+    // the SSE handler just rendered. New-session reset goes through
+    // startNewConfigSession() instead.
+    const hydrated: ChatMessage[] = (sessionDetail.messages || []).map((m: any) => ({
+      id: String(m.id ?? genId()),
+      type: (m.type ?? m.role ?? "assistant") as ChatMessage["type"],
+      content: String(m.content ?? ""),
+      reasoning: "",
+      createdAt: m.createdAt,
+      eventType: m.eventType,
+      requestId: m.requestId,
+      hitlStatus: m.hitlStatus,
+      hitlResponse: m.hitlResponse,
+      eventPayload: m.eventPayload,
+    }));
+    setChatMessages(hydrated);
+    // Seed pendingInteractions from any hydrated question rows still in
+    // "pending" state so the inline answer UI works after a reload.
+    const hydratedPending: PendingInteraction[] = hydrated
+      .filter((m) => m.type === "system" && m.eventType === "question" && m.hitlStatus === "pending" && !!m.requestId)
+      .map((m) => ({
+        requestId: m.requestId as string,
+        type: "question",
+        prompt: m.content,
+        metadata: normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload),
+      }));
+    setPendingInteractions(hydratedPending);
+    setInteractionDrafts({});
+    setInteractionSelections({});
+  }, [sessionDetail, setEdges, setNodes, isConfigStreaming, nodes.length]);
+
+  const saveLayoutMutation = useMutation({
+    mutationFn: ({ sessionId, positions }: { sessionId: string; positions: Record<string, { x: number; y: number }> }) =>
+      api.toolchains.saveConfigSessionLayout(toolChainId, sessionId, { positions }),
+    onError: (e: any) => toast.error(e.message || "Failed to save board layout"),
+  });
+
+  const persistNodeLayout = useCallback(
+    (nextNodes: any[]) => {
+      if (!toolChainId || !activeSessionId) return;
+      const positions = nextNodes.reduce((acc, node) => {
+        const x = toFiniteNumber(node?.position?.x);
+        const y = toFiniteNumber(node?.position?.y);
+        if (x !== null && y !== null) {
+          acc[String(node.id)] = { x, y };
+        }
+        return acc;
+      }, {} as Record<string, { x: number; y: number }>);
+      layoutPositionsRef.current = positions;
+      if (layoutSaveTimerRef.current !== null) {
+        window.clearTimeout(layoutSaveTimerRef.current);
+      }
+      layoutSaveTimerRef.current = window.setTimeout(() => {
+        saveLayoutMutation.mutate({ sessionId: activeSessionId, positions });
+      }, 450);
+    },
+    [activeSessionId, saveLayoutMutation, toolChainId]
+  );
+
+  const handleNodesChange = useCallback(
+    (changes: any[]) => {
+      setNodes((current) => {
+        const next = applyNodeChanges(changes, current);
+        const shouldPersist = changes.some((change: any) => change?.type === "position" && change?.dragging === false);
+        if (shouldPersist) persistNodeLayout(next);
+        return next;
+      });
+    },
+    [persistNodeLayout, setNodes]
+  );
+
+  const appendSystemMessage = (
+    eventType: string,
+    content: string,
+    requestId?: string,
+    eventPayload?: any
+  ) => {
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: genId(),
+        type: "system",
+        content,
+        eventType,
+        requestId,
+        eventPayload,
+        hitlStatus: requestId ? "pending" : undefined,
+      },
+    ]);
+  };
+
+  const markRequestResolved = (requestId: string, response: string) => {
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.requestId === requestId && m.hitlStatus === "pending"
+          ? { ...m, hitlStatus: "answered", hitlResponse: response }
+          : m
+      )
+    );
+    setPendingInteractions((prev) => prev.filter((p) => p.requestId !== requestId));
+    setPendingQuestion((prev: any) => (prev && prev.id === requestId ? null : prev));
+  };
+
+  const sendConfigChatStream = async (payload: any) => {
+    const userText = payload.message || payload.answerText || payload.selectedOptionLabel || payload.selectedOptionId || "";
+    const isReplyPayload = !!(payload.answerText || payload.selectedOptionId);
+    const targetRequestId = payload.requestId as string | undefined;
+    const replyText = payload.selectedOptionLabel || payload.answerText || payload.selectedOptionId || "";
+    let forceReplyContinuation = false;
+    // If we have a requestId AND a session, ALWAYS try the fast /reply path
+    // first — it works whether or not the SSE stream is currently open. We only
+    // gate the in-stream-no-requestId case (legacy text answer typed into the
+    // composer) on isConfigStreaming so it goes through the existing flow.
+    const shouldTryReplyEndpoint = isReplyPayload && activeSessionId && (Boolean(targetRequestId) || isConfigStreaming);
+    if (shouldTryReplyEndpoint) {
+      // Keep question replies in the HITL card flow (parity with main chat).
+      // Do not inject selected answer text as a new user transcript bubble.
+      try {
+        const replyPayload = {
+          sessionId: activeSessionId,
+          toolChainId: toolChainId || payload.toolChainId || undefined,
+          requestId: targetRequestId,
+          answerText: payload.answerText,
+          selectedOptionId: payload.selectedOptionId,
+          selectedOptionLabel: payload.selectedOptionLabel,
+          modelSelectionMode: payload.modelSelectionMode,
+          modelRef: payload.modelRef,
+        };
+        let replyResult: any = null;
+        if (toolChainId) {
+          replyResult = await api.toolchains.configSessionReply(toolChainId, activeSessionId, replyPayload);
+        } else {
+          replyResult = await api.toolchains.configSessionReplyGlobal(activeSessionId, replyPayload);
+        }
+        if (targetRequestId) {
+          markRequestResolved(targetRequestId, replyText);
+        } else {
+          setPendingQuestion(null);
+        }
+        if (!replyResult?.noActiveStream) {
+          return;
+        }
+        forceReplyContinuation = true;
+      } catch (e: any) {
+        // The 400 "No active stream is waiting for this session reply" means
+        // the stream had already closed (e.g. after page reload). Fall through
+        // to the new-stream path so processMessage can resolve the HITL row
+        // via the backend safety net.
+        const message = String(e?.message || "");
+        const isNoActiveStream = /no active stream/i.test(message) || /pending interaction not found/i.test(message);
+        if (!isNoActiveStream) {
+          toast.error(message || "Failed to submit answer");
+          return;
+        }
+        // Optimistically collapse the inline question card. Backend's
+        // processMessage will set the same hitl_status server-side; subsequent
+        // hydration confirms it.
+        if (targetRequestId) markRequestResolved(targetRequestId, replyText);
+        forceReplyContinuation = true;
+        // else: fall through to start a fresh stream below.
+      }
+    }
+    if (isConfigStreaming && !forceReplyContinuation) return;
+    // Add a user bubble only for fresh user prompts. Don't add one when this
+    // call is a fall-through from a HITL answer reply — the answer already
+    // appears inline on the now-resolved question card.
+    if (userText && !isReplyPayload) {
+      setChatMessages((prev) => [...prev, { id: genId(), type: "user", content: userText }]);
+    }
+    streamedAssistantIdRef.current = null;
+    seenQuestionRequestIdsRef.current = new Set();
+    setIsConfigStreaming(true);
+    // Tracks whether the latest state.updated this stream left a pending question.
+    // When true, we keep isConfigStreaming on after done so the user perceives a
+    // single continuous turn through the question→answer→continuation cycle.
+    let clarificationPending = false;
+    try {
+      const token = getAuthToken();
+      const isRequirementFirst = !toolChainId;
+      const url = isRequirementFirst
+        ? api.toolchains.configChatGlobalStreamUrl()
+        : api.toolchains.configChatStreamUrl(toolChainId);
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          ...payload,
+          toolChainId: toolChainId || payload.toolChainId || undefined,
+          createIfMissing: isRequirementFirst || payload.createIfMissing === true,
+          toolChainName: payload.toolChainName || userText || "AI Generated ToolChain",
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No stream response");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const processLine = (line: string) => {
+        const normalized = line.trim();
+        const dataLine = normalized.startsWith("data: ") ? normalized.slice(6) : normalized.startsWith("data:") ? normalized.slice(5) : null;
+        if (!dataLine) return;
+        try {
+          const ev = JSON.parse(dataLine);
+          switch (ev.type) {
+            case "connected":
+              if (ev.sessionId) setActiveSessionId(ev.sessionId);
+              setSessionBootstrapPending(false);
+              break;
+            case "toolchain.bound":
+              if (ev.toolChainId && ev.toolChainId !== toolChainId) {
+                setToolChainId(ev.toolChainId);
+                queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+                navigate(`/toolchains/${ev.toolChainId}/designer`, { replace: true });
+              }
+              break;
+            case "text.delta":
+              setChatMessages((prev) => {
+                const delta = String(ev.content || "");
+                if (!delta) return prev;
+                const existingId = streamedAssistantIdRef.current;
+                if (existingId) {
+                  return prev.map((m) =>
+                    m.id === existingId ? { ...m, content: `${m.content || ""}${delta}`, isStreaming: true } : m
+                  );
+                }
+                const nextId = genId();
+                streamedAssistantIdRef.current = nextId;
+                return [...prev, { id: nextId, type: "assistant", content: delta, reasoning: "", isStreaming: true }];
+              });
+              break;
+            case "reasoning.delta":
+              setChatMessages((prev) => {
+                const delta = String(ev.content || "");
+                if (!delta) return prev;
+                const existingId = streamedAssistantIdRef.current;
+                if (existingId) {
+                  return prev.map((m) =>
+                    m.id === existingId
+                      ? { ...m, reasoning: `${String(m.reasoning || "")}${delta}`, isStreaming: true }
+                      : m
+                  );
+                }
+                const nextId = genId();
+                streamedAssistantIdRef.current = nextId;
+                return [...prev, { id: nextId, type: "assistant", content: "", reasoning: delta, isStreaming: true }];
+              });
+              break;
+            case "tool.call": {
+              const toolName = String(ev.toolName || ev.tool || "");
+              appendSystemMessage("tool.call", `Calling tool: ${toolName}`, undefined, {
+                toolName,
+                input: ev.input ?? ev.arguments,
+              });
+              break;
+            }
+            case "tool.done": {
+              const toolName = String(ev.toolName || ev.tool || "");
+              appendSystemMessage("tool.done", `Tool completed: ${toolName}`, undefined, {
+                toolName,
+                output: ev.output ?? ev.result,
+              });
+              break;
+            }
+            case "tool.result": {
+              const toolName = String(ev.toolName || ev.tool || "");
+              appendSystemMessage("tool.result", `Tool completed: ${toolName}`, undefined, {
+                toolName,
+                output: ev.output ?? ev.result,
+              });
+              break;
+            }
+            case "tool.match":
+              appendSystemMessage(
+                "tool.match",
+                ev.needsClarification
+                  ? `Tool clarification needed (${String(ev.reason || "ambiguous")})`
+                  : `Tool matched${ev.selectedTool ? `: ${String(ev.selectedTool)}` : ""}`,
+                undefined,
+                {
+                  reason: ev.reason,
+                  needsClarification: ev.needsClarification,
+                  selectedTool: ev.selectedTool,
+                  score: ev.score,
+                  candidates: ev.candidates,
+                }
+              );
+              break;
+            case "question": {
+              const requestId = String(ev.requestId || genId());
+              const isNew = !seenQuestionRequestIdsRef.current.has(requestId);
+              if (isNew) {
+                seenQuestionRequestIdsRef.current.add(requestId);
+                appendSystemMessage("question", String(ev.question || ""), requestId, {
+                  metadata: ev.metadata,
+                });
+              }
+              const normalized = normalizeQuestionMetadata(ev.metadata);
+              setPendingInteractions((prev) => [
+                ...prev.filter((p) => p.requestId !== requestId),
+                { requestId, type: "question", prompt: String(ev.question || ""), metadata: normalized },
+              ]);
+              setPendingQuestion({
+                id: requestId,
+                question: ev.question,
+                options: ev.metadata?.options || [],
+              });
+              setSessionStatus("clarification_required");
+              break;
+            }
+            case "state.updated": {
+              const state = ev.state || {};
+              setSessionStatus(state.status || "draft");
+              if (state.toolChainId && state.toolChainId !== toolChainId) {
+                setToolChainId(state.toolChainId);
+                queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+                navigate(`/toolchains/${state.toolChainId}/designer`, { replace: true });
+              }
+              const embeddedQuestion = state.pendingQuestion;
+              clarificationPending = Boolean(embeddedQuestion?.question);
+              if (embeddedQuestion?.question) {
+                const requestId = String(embeddedQuestion.id || genId());
+                const isNew = !seenQuestionRequestIdsRef.current.has(requestId);
+                if (isNew) {
+                  seenQuestionRequestIdsRef.current.add(requestId);
+                  appendSystemMessage("question", String(embeddedQuestion.question || ""), requestId, {
+                    metadata: { options: embeddedQuestion.options || [] },
+                    key: embeddedQuestion.key,
+                  });
+                }
+                const normalized = normalizeQuestionMetadata({ options: embeddedQuestion.options || [] });
+                setPendingInteractions((prev) => [
+                  ...prev.filter((p) => p.requestId !== requestId),
+                  {
+                    requestId,
+                    type: "question",
+                    prompt: String(embeddedQuestion.question || ""),
+                    metadata: normalized,
+                  },
+                ]);
+                setPendingQuestion({
+                  id: requestId,
+                  question: embeddedQuestion.question,
+                  options: embeddedQuestion.options || [],
+                });
+              } else {
+                setPendingQuestion(null);
+              }
+              if (shouldRenderDraftGraph(state)) {
+                try {
+                  const parsed = JSON.parse(state.graphJson);
+                  const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
+                  if (rfNodes.length > 0) {
+                    setNodes(rfNodes);
+                    setEdges(rfEdges);
+                  }
+                } catch {
+                  // ignore stream graph parse errors
+                }
+              }
+              break;
+            }
+            case "compiled":
+              setSessionStatus("compiled");
+              toast.success(`Compiled ToolChain version v${ev.version}`);
+              queryClient.invalidateQueries({ queryKey: ["toolchain-versions", ev.toolChainId || toolChainId] });
+              break;
+            case "done":
+              setChatMessages((prev) => {
+                const doneText = ev.content !== undefined ? String(ev.content || "") : "";
+                let next = prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m));
+                if (doneText) {
+                  if (streamedAssistantIdRef.current) {
+                    next = next.map((m) =>
+                      m.id === streamedAssistantIdRef.current && !(m.content || "").trim()
+                        ? { ...m, content: doneText }
+                        : m
+                    );
+                  } else {
+                    const last = next[next.length - 1];
+                    if (last?.type === "assistant") {
+                      next = next.map((m, idx) =>
+                        idx === next.length - 1
+                          ? { ...m, content: `${String(m.content || "")}\n\n${doneText}`.trim() }
+                          : m
+                      );
+                    } else {
+                      next = [...next, { id: genId(), type: "assistant", content: doneText }];
+                    }
+                  }
+                }
+                return next;
+              });
+              if (ev.toolChainId && ev.toolChainId !== toolChainId) {
+                setToolChainId(ev.toolChainId);
+                queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+                navigate(`/toolchains/${ev.toolChainId}/designer`, { replace: true });
+              }
+              {
+                const chainId = String(ev.toolChainId || activeToolChainRef.current || "");
+                const sid = String(ev.sessionId || activeSessionRef.current || "");
+                if (chainId) {
+                queryClient.invalidateQueries({ queryKey: ["toolchain-config-sessions", chainId] });
+                queryClient.invalidateQueries({ queryKey: ["toolchain-versions", chainId] });
+                if (sid) {
+                  queryClient.invalidateQueries({ queryKey: ["toolchain-config-session-detail", chainId, sid] });
+                  queryClient.refetchQueries({ queryKey: ["toolchain-config-session-detail", chainId, sid], type: "active" });
+                }
+                }
+              }
+              break;
+            case "error":
+              setChatMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
+              toast.error(ev.message || "ToolChain streaming failed");
+              break;
+          }
+        } catch {
+          // ignore malformed SSE event
+        }
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          if (buffer.trim()) processLine(buffer);
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        for (const line of lines) processLine(line);
+      }
+    } catch (e: any) {
+      clarificationPending = false;
+      toast.error(e.message || "Failed to stream ToolChain config");
+    } finally {
+      // When the AI turn ended on a clarification request, keep the streaming
+      // indicator on so the user perceives one continuous turn — the next stream
+      // starts as soon as they answer the inline card via /reply.
+      if (!clarificationPending) {
+        setIsConfigStreaming(false);
+      }
+      setSessionBootstrapPending(false);
+      streamedAssistantIdRef.current = null;
+      setChatMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
+    }
+  };
+
+  const startNewConfigSession = () => {
+    setPendingQuestion(null);
+    setPendingInteractions([]);
+    setInteractionDrafts({});
+    setInteractionSelections({});
+    setSessionStatus("draft");
+    setChatMessages([]);
+    setNodes(starterGraph.nodes);
+    setEdges(starterGraph.edges);
+    setActiveSessionId(null);
+    setSessionBootstrapPending(true);
+    void sendConfigChatStream({
+      sessionId: null,
+      createIfMissing: !toolChainId,
+      toolChainName: "AI Generated ToolChain",
+      toolChainDescription: "Generated from requirements via AI configuration chat",
+    });
+    setShowSessionsMenu(false);
+  };
+
+  const compileMutation = useMutation({
+    mutationFn: () => api.toolchains.compileSession(toolChainId, activeSessionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchain-versions", toolChainId] });
+      queryClient.invalidateQueries({ queryKey: ["toolchain-config-session-detail", toolChainId, activeSessionId] });
+      setSessionStatus("compiled");
+      toast.success("Draft compiled successfully");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to compile version"),
+    retry: 0,
+  });
+
+  const answerPendingInteraction = async (
+    requestId: string,
+    action: InteractionAction,
+    selectedOptionIds?: string[]
+  ) => {
+    if (action !== "reply") return; // config chat only supports question replies
+    const customMessage = (interactionDrafts[requestId] || "").trim();
+    const selected = selectedOptionIds || interactionSelections[requestId] || [];
+    const selectedOptionId = selected[0];
+    const pending = pendingInteractions.find((p) => p.requestId === requestId);
+    const selectedOptionLabel = pending?.metadata?.options?.find((o) => o.id === selectedOptionId)?.label;
+    void sendConfigChatStream({
+      sessionId: activeSessionId,
+      toolChainId: toolChainId || undefined,
+      requestId,
+      answerText: customMessage || undefined,
+      selectedOptionId,
+      selectedOptionLabel,
+      modelSelectionMode,
+      modelRef: selectedModel ? parseModelRefKey(selectedModel) : null,
+    });
+  };
+
+  const publishDraftMutation = useMutation({
+    mutationFn: () => api.toolchains.publishSession(toolChainId, activeSessionId),
+    onSuccess: (result: any) => {
+      queryClient.invalidateQueries({ queryKey: ["toolchain-versions", toolChainId] });
+      queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+      toast.success(`Published draft as v${result?.version ?? ""}`.trim());
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to publish draft"),
+  });
+
+  const updateSessionMutation = useMutation({
+    mutationFn: ({ sessionId, payload }: { sessionId: string; payload: any }) =>
+      api.toolchains.updateConfigSession(toolChainId, sessionId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchain-config-sessions", toolChainId] });
+      toast.success("Session updated");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to update session"),
+  });
+
+  const deleteSessionMutation = useMutation({
+    mutationFn: (sessionId: string) => api.toolchains.deleteConfigSession(toolChainId, sessionId),
+    onSuccess: (_, sid) => {
+      queryClient.invalidateQueries({ queryKey: ["toolchain-config-sessions", toolChainId] });
+      if (activeSessionId === sid) setActiveSessionId(null);
+      toast.success("Session deleted");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to delete session"),
+  });
+
+  const publish = useMutation({
+    mutationFn: (version: number) => api.toolchains.publishVersion(toolChainId, version),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchain-versions", toolChainId] });
+      toast.success("Version published");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to publish version"),
+  });
+
+  return (
+    <div
+      className={cn(
+        "space-y-4",
+        isFullscreen && !boardOnlyFullscreen ? "fixed inset-0 z-[90] bg-[#f5f5f5] p-4" : "",
+        boardOnlyFullscreen ? "fixed inset-0 z-[100] bg-white" : ""
+      )}
+    >
+      <div className={cn("flex items-start justify-between gap-4", boardOnlyFullscreen && "hidden")}>
+        <div className="space-y-1">
+          <Button
+            variant="outline"
+            className="h-8 border-[#93C5FD] bg-[#EFF6FF] px-3 text-[#123262] hover:bg-[#DBEAFE]"
+            onClick={() => navigate("/toolchains")}
+          >
+            <ArrowLeft className="mr-1 h-4 w-4" />
+            Back to ToolChains
+          </Button>
+          <h2 className="text-xl font-semibold text-[#123262]">ToolChain Designer</h2>
+          <p className="text-sm text-slate-600">AI-driven workflow designer.</p>
+        </div>
+        <div className="relative flex min-w-[560px] flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 bg-white px-3 text-xs"
+              onClick={() => setShowSessionsMenu((v) => !v)}
+            >
+              Sessions
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={() => setIsFullscreen((v) => !v)}>
+              {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 px-3 text-xs"
+              onClick={() => setBoardOnlyFullscreen(true)}
+              title="Show only the flow board, hide the chat panel and header"
+            >
+              Board Fullscreen
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={() => setVersionsOpen(true)}>Versions</Button>
+            <Button
+              size="sm"
+              className="h-8 px-3 text-xs"
+              onClick={() => publishDraftMutation.mutate()}
+              disabled={!toolChainId || !activeSessionId || sessionStatus !== "compiled" || publishDraftMutation.isPending}
+            >
+              {publishDraftMutation.isPending ? "Publishing..." : "Publish Draft"}
+            </Button>
+          </div>
+          {showSessionsMenu ? (
+            <div className="absolute right-0 top-9 z-40 w-[280px]">
+              <ToolChainSessionList
+                sessions={sessions}
+                activeSessionId={activeSessionId}
+                onSelect={(sessionId) => {
+                  setActiveSessionId(sessionId);
+                  setShowSessionsMenu(false);
+                }}
+                onNewSession={() => {
+                  startNewConfigSession();
+                }}
+                onRenameSession={(sessionId, title) => {
+                  updateSessionMutation.mutate({ sessionId, payload: { title } });
+                  setShowSessionsMenu(false);
+                }}
+                onArchiveSession={(sessionId) => {
+                  updateSessionMutation.mutate({ sessionId, payload: { archived: true } });
+                  setShowSessionsMenu(false);
+                }}
+                onRestoreSession={(sessionId) => {
+                  updateSessionMutation.mutate({ sessionId, payload: { archived: false } });
+                  setShowSessionsMenu(false);
+                }}
+                onDeleteSession={(sessionId) => {
+                  deleteSessionMutation.mutate(sessionId);
+                  setShowSessionsMenu(false);
+                }}
+              />
+            </div>
+          ) : null}
+          <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 py-2 shadow-sm">
+            <SearchableSelect
+              options={[
+                { value: "manual", label: "Manual Model", sublabel: "manual" },
+                { value: "auto", label: "Auto Route", sublabel: "auto" },
+              ]}
+              value={modelSelectionMode}
+              onValueChange={(value) => setModelSelectionMode(value as "manual" | "auto")}
+              placeholder="Routing"
+              searchPlaceholder="Search mode…"
+              className="w-32"
+              triggerTitle="Choose model routing mode"
+              triggerAriaLabel="Choose model routing mode"
+            />
+            <SearchableSelect
+              options={providerList.map((pid) => ({
+                value: pid,
+                label: modelsByProvider.get(pid)?.providerName || pid,
+                sublabel: pid,
+              }))}
+              value={selectedProvider}
+              onValueChange={(pid) => {
+                setSelectedProvider(pid);
+                const models = modelsByProvider.get(pid)?.models ?? [];
+                if (models.length > 0) {
+                  const key = modelRefKey({ providerID: pid, modelID: models[0].modelID });
+                  setSelectedModel(key);
+                  localStorage.setItem("lastModelId", key);
+                  persistDefaultModelMutation.mutate(key);
+                }
+              }}
+              placeholder="Provider"
+              searchPlaceholder="Search providers…"
+              className="w-32"
+            />
+            <SearchableSelect
+              options={(modelsByProvider.get(selectedProvider)?.models ?? []).map((m: any) => ({
+                value: modelRefKey({ providerID: m.providerID, modelID: m.modelID }),
+                label: m.displayName,
+                sublabel: m.modelID,
+              }))}
+              value={selectedModel}
+              onValueChange={(value) => {
+                setSelectedModel(value);
+                localStorage.setItem("lastModelId", value);
+                persistDefaultModelMutation.mutate(value);
+              }}
+              placeholder="Select model"
+              searchPlaceholder="Search models…"
+              className="w-40"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div
+        className={cn("rounded-lg border bg-white p-2", boardOnlyFullscreen && "h-full rounded-none border-0 p-0")}
+        style={{
+          height: boardOnlyFullscreen
+            ? "100vh"
+            : isFullscreen
+              ? "calc(100vh - 120px)"
+              : "calc(100vh - 220px)",
+        }}
+      >
+        <div className="relative flex h-full">
+          {boardOnlyFullscreen ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="absolute right-3 top-3 z-50 h-8 bg-white px-3 text-xs shadow"
+              onClick={() => setBoardOnlyFullscreen(false)}
+            >
+              Exit Board Fullscreen
+            </Button>
+          ) : null}
+          <div className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white">
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={handleNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={(params) => setEdges((eds) => addEdge({ ...params, id: `e-${params.source}-${params.target}-${Date.now()}` }, eds))}
+              onNodeClick={(_, n) => setInspectedNodeId(String(n.id))}
+              onNodeDoubleClick={(_, n) => {
+                setInspectedNodeId(String(n.id));
+                setEditingNodeId(String(n.id));
+              }}
+              onPaneClick={() => setInspectedNodeId(null)}
+              fitView
+              proOptions={{ hideAttribution: true }}
+              style={{ width: "100%", height: "100%" }}
+            >
+              <Background />
+              <Controls />
+              <MiniMap />
+            </ReactFlow>
+          </div>
+
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize AI panel"
+            className={cn(
+              "mx-1 h-full w-1.5 shrink-0 cursor-col-resize rounded bg-transparent transition-colors hover:bg-slate-200",
+              isResizingChatPanel ? "bg-slate-300" : "",
+              boardOnlyFullscreen && "hidden"
+            )}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              chatResizeStartRef.current = { startX: event.clientX, startWidth: chatPanelWidth };
+              setIsResizingChatPanel(true);
+            }}
+          />
+
+          <div
+            className={cn("h-full shrink-0", boardOnlyFullscreen && "hidden")}
+            style={{ width: chatPanelWidth, maxWidth: "55vw", minWidth: 320 }}
+          >
+            <ToolChainConfigChatPanel
+              messages={chatMessages}
+              pendingQuestion={pendingQuestion}
+              pendingInteractions={pendingInteractions}
+              interactionDrafts={interactionDrafts}
+              interactionSelections={interactionSelections}
+              setInteractionDrafts={setInteractionDrafts}
+              setInteractionSelections={setInteractionSelections}
+              answerPending={answerPendingInteraction}
+              onSend={(payload) => {
+                const resolvedModelKey =
+                  selectedModel ||
+                  (() => {
+                    const first = modelsData?.find((m: any) => m.modelKind !== "embedding");
+                    return first ? modelRefKey({ providerID: first.providerID, modelID: first.modelID }) : "";
+                  })();
+                void sendConfigChatStream({
+                  sessionId: activeSessionId,
+                  toolChainId: toolChainId || undefined,
+                  createIfMissing: !toolChainId,
+                  toolChainName: payload.message || "AI Generated ToolChain",
+                  toolChainDescription: payload.message || "Generated from requirements",
+                  message: payload.message,
+                  answerText: payload.answerText,
+                  selectedOptionId: payload.selectedOptionId,
+                  selectedOptionLabel: payload.selectedOptionLabel,
+                  attachments: payload.attachments || [],
+                  modelSelectionMode,
+                  modelRef: resolvedModelKey ? parseModelRefKey(resolvedModelKey) : null,
+                });
+              }}
+              isSending={isConfigStreaming}
+              onNewSession={() => {
+                startNewConfigSession();
+              }}
+              onCompile={() => compileMutation.mutate()}
+              canCompile={
+                !!toolChainId &&
+                !!activeSessionId &&
+                (sessionStatus === "ready_to_compile" ||
+                  sessionStatus === "awaiting_acceptance" ||
+                  sessionStatus === "compiled")
+              }
+              isCompiling={compileMutation.isPending}
+              compileLabel="Compile Draft"
+              className="h-full"
+              onResendMessage={(content) =>
+                void sendConfigChatStream({
+                  sessionId: activeSessionId,
+                  toolChainId: toolChainId || undefined,
+                  createIfMissing: !toolChainId,
+                  toolChainName: content || "AI Generated ToolChain",
+                  toolChainDescription: content || "Generated from requirements",
+                  message: content,
+                  modelSelectionMode,
+                  modelRef: selectedModel ? parseModelRefKey(selectedModel) : null,
+                })
+              }
+            />
+          </div>
+        </div>
+      </div>
+
+      <Dialog open={versionsOpen} onOpenChange={setVersionsOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>ToolChain Versions</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[380px] space-y-2 overflow-auto">
+            {versions.map((v: any) => (
+              <div key={v.id} className="flex items-center justify-between rounded border p-2">
+                <div>
+                  <p className="text-sm font-medium">v{v.version} {v.published ? "(published)" : ""}</p>
+                  <p className="text-xs text-slate-500">responseMode: {v.responseMode || "hybrid"}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" onClick={() => publish.mutate(v.version)} disabled={publish.isPending || v.published}>Publish</Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={v.published}
+                    onClick={() => {
+                      setRollbackVersion(v.version);
+                      setRollbackText("");
+                      setRollbackOpen(true);
+                    }}
+                  >
+                    Rollback
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setVersionsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={rollbackOpen} onOpenChange={setRollbackOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Confirm Rollback</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-slate-600">
+            This will repoint published state to version v{rollbackVersion}. Existing runs stay unchanged, but new runs will use the rolled back version.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRollbackOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                setRollbackOpen(false);
+                setRollbackVerifyOpen(true);
+              }}
+            >
+              Continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={rollbackVerifyOpen} onOpenChange={setRollbackVerifyOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Final Confirmation</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-slate-600">Type ROLLBACK to confirm publishing version v{rollbackVersion}.</p>
+          <Input value={rollbackText} onChange={(e) => setRollbackText(e.target.value)} placeholder="ROLLBACK" />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRollbackVerifyOpen(false)}>Cancel</Button>
+            <Button
+              disabled={rollbackText.trim().toUpperCase() !== "ROLLBACK" || rollbackVersion == null || publish.isPending}
+              onClick={() => {
+                if (rollbackVersion == null) return;
+                publish.mutate(rollbackVersion, {
+                  onSuccess: () => {
+                    setRollbackVerifyOpen(false);
+                    setRollbackVersion(null);
+                    setRollbackText("");
+                  },
+                });
+              }}
+            >
+              Confirm Rollback
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <NodeInspectorPanel
+        open={inspectedNode !== null}
+        onOpenChange={(o) => {
+          if (!o) setInspectedNodeId(null);
+        }}
+        node={inspectedNode}
+        graph={parsedGraph}
+        toolsCatalog={catalogTools}
+        mcpCatalog={catalogMcp}
+        onEdit={(id) => setEditingNodeId(id)}
+      />
+      <NodeEditorDialog
+        open={editingNode !== null}
+        onOpenChange={(o) => {
+          if (!o) setEditingNodeId(null);
+        }}
+        node={editingNode}
+      />
+    </div>
+  );
+}

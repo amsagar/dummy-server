@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 @Component
 @Slf4j
 public class AgentOrchestrator {
+    private static final String TOOLCHAIN_ARCHITECT_SKILL = "toolchain-architect";
 
     private final ModelProviderRouter modelProviderRouter;
     private final SkillRegistryService skillRegistryService;
@@ -83,7 +84,12 @@ public class AgentOrchestrator {
                              List<ToolCallback> tools,
                              String turnId) {
         ModelRef modelRef = state != null ? state.getModel() : null;
-        ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef);
+        // ToolChain designer turns must produce a single structured JSON envelope. Extended
+        // thinking on Anthropic models can consume the entire maxTokens budget on the
+        // reasoning trace, leaving the JSON answer truncated mid-emit. Disable thinking for
+        // designer turns so the full token budget is available for the structured output.
+        boolean disableThinking = state != null && isToolchainDesignerMode(state.getRuntimeMode());
+        ModelProviderRouter.Spec modelSpec = modelProviderRouter.resolve(modelRef, disableThinking);
         ChatClient client = modelSpec.client();
 
         // The bare user message is added to session.getMessages() by AgentRuntimeService.runTurn
@@ -196,6 +202,9 @@ public class AgentOrchestrator {
                 prompt.append("\n");
             }
         }
+        if (state != null && isToolchainDesignerMode(state.getRuntimeMode())) {
+            appendToolchainDesignerSystemPrompt(prompt);
+        }
 
         if (session != null && session.getWorkspacePath() != null) {
             String instructions = instructionLoaderService.load(session.getWorkspacePath());
@@ -228,6 +237,39 @@ public class AgentOrchestrator {
         appendBudgetHint(prompt, state, session);
         appendProviderCachingHint(prompt, state);
         return prompt.toString();
+    }
+
+    private boolean isToolchainDesignerMode(String runtimeMode) {
+        return runtimeMode != null && "toolchain_designer".equalsIgnoreCase(runtimeMode.trim());
+    }
+
+    private void appendToolchainDesignerSystemPrompt(StringBuilder prompt) {
+        prompt.append("""
+
+## ToolChain Designer Mode
+You are in ToolChain creation mode.
+- Do not execute or route to existing ToolChains.
+- Your goal is to create/update a ToolChain draft from user requirements.
+- Ask only requirement/design clarification questions needed to build the draft.
+- Use tools/skills as needed to gather information for draft design.
+- Output should drive ToolChain artifact updates (graph, schemas, intents, synthesis prompt).
+""");
+        SkillRegistryService.SkillSnapshot snapshot = skillRegistryService.getEnabledSkillByName(TOOLCHAIN_ARCHITECT_SKILL);
+        if (snapshot == null) return;
+        String skillBody = snapshot.files().get("SKILL.md");
+        if (skillBody == null || skillBody.isBlank()) return;
+        prompt.append("\n### ToolChain Architect Contract\n")
+                .append(stripYamlFrontmatter(skillBody).trim())
+                .append("\n");
+    }
+
+    private String stripYamlFrontmatter(String content) {
+        if (content == null || !content.startsWith("---")) return content == null ? "" : content;
+        int end = content.indexOf("\n---", 3);
+        if (end < 0) return content;
+        int after = end + "\n---".length();
+        if (after < content.length() && content.charAt(after) == '\n') after++;
+        return content.substring(after);
     }
 
     String baseSystemPromptForTest() {
