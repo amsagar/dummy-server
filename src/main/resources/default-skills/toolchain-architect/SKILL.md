@@ -142,6 +142,92 @@ The Designer also enforces these dimensions server-side via
 is still missing, the runtime will override your turn with the next dimension's
 question. So filling them in deterministically saves a round-trip.
 
+## 5b. Edit mode (modifying an existing ToolChain)
+
+The Designer runs you in **edit mode** when the ToolChain already has a graph and the
+user is asking for a change. You will recognize edit mode because:
+
+- The user prompt says **"ToolChain designer EDIT request"** (not "request payload").
+- The prompt points at `.pods-agent/toolchain.json` in the workspace.
+- The `read`, `edit`, `apply_patch`, `glob`, and `grep` tools are in your tool list.
+
+Your job in edit mode is to mutate the file **surgically** — not to re-emit the whole
+graph. The runtime reads the file back after your turn and treats it as the new graph,
+so any change you make on disk *is* the change committed to the artifact.
+
+### Workflow in edit mode
+
+1. **First** call `read` on `.pods-agent/toolchain.json` to see the current graph.
+2. Prefer `edit` for **single-string replacements** — rename one label, change one
+   `argMappings` entry, swap one `inputKey`. Pass `path`, `old_text` (the exact bytes
+   to find — must be UNIQUE in the file, including indentation), and `new_text` (the
+   replacement). Do NOT pass `content` for single-string edits; the tool will reject
+   non-unique matches so you'll need to include surrounding context if needed.
+3. Use `apply_patch` for **multi-hunk edits** — adding a node + its edges, or changing
+   several places in one shot. The `content` argument must contain one or more hunks
+   in this exact format (multiple hunks just stack one after another):
+
+   ```
+   <<<<<<< ORIGINAL
+   <exact existing text, byte-for-byte including indentation>
+   =======
+   <replacement text>
+   >>>>>>> UPDATED
+   ```
+
+   ORIGINAL must match the file exactly and unambiguously. If a hunk doesn't match,
+   the entire patch is rejected — re-`read` the file and rebuild the hunk.
+4. Use `write` (full file overwrite) ONLY if the user explicitly asks for a
+   ground-up rewrite. It defeats the purpose of edit mode.
+5. **PRESERVE every node id that already exists.** The flow board uses node ids as
+   the layout key — renaming an id loses the user's manual node positions. Only
+   rename if the user explicitly asked.
+6. **PRESERVE labels, descriptions, and config of nodes the user did not ask to
+   change.** Don't proactively "clean up" unrelated nodes.
+7. When **adding** a node: append to `nodes`, then add the matching edges
+   (typically `start → newNode` and `newNode → synthesis` for parallel-fetch chains).
+8. When **removing** a node: remove it from `nodes` AND delete every edge that
+   references it as `from` or `to`. A dangling edge will fail validation.
+
+### Response shape in edit mode
+
+After your file edits, return ONLY this JSON in your assistant text. Do **NOT**
+include `artifactPatch` or `graphJson` in the response — the runtime reads the graph
+back from the file you edited and ignores any graphJson in the response:
+
+```json
+{
+  "assistantMessage": "1-2 sentences naming what changed (e.g. 'Renamed Get POET Timestamps label to POET Timestamps').",
+  "nextQuestion": null,
+  "responseMode": "<unchanged unless the user asked otherwise>",
+  "synthesisPrompt": "<unchanged unless the user asked otherwise>",
+  "intents": ["..."],
+  "inputSchema": {"type":"object"},
+  "outputSchema": {"type":"object"},
+  "ragConfig": {}
+}
+```
+
+### When to ask instead of editing
+
+If the user's request is ambiguous (e.g. "add a billing check" — but there are three
+plausible billing tools), **don't edit the file**. Emit `nextQuestion` only and let
+the runtime ask the user. Your file edits commit immediately, so be sure first.
+
+```json
+{
+  "nextQuestion": {
+    "id": "edit-clarification",
+    "key": "edit_target",
+    "question": "Which billing check did you mean?",
+    "options": [
+      {"id":"anniversary","label":"CheckBillingAnniversary"},
+      {"id":"rent","label":"CheckRentGeneration"}
+    ]
+  }
+}
+```
+
 ## 6. Worked example A — parallel fetch + synthesis
 
 User instruction: *"Validate an order: fetch the order and its container, then summarize

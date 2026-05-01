@@ -19,7 +19,7 @@ import {
   normalizeQuestionMetadata,
 } from "@/components/chat";
 import { cn } from "@/lib/utils";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Maximize2, Minimize2 } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { modelRefKey, parseModelRefKey } from "@/types";
 
@@ -194,7 +194,12 @@ export default function ToolChainDesignerPage() {
   const routeToolChainId = id ?? "";
   const [toolChainId, setToolChainId] = useState<string>(routeToolChainId);
   const [versionsOpen, setVersionsOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Version switcher: null = show the live editing draft (active session's graph,
+  // or the latest version when no session is active). A number switches the board
+  // to a read-only view of that version's graph.
+  const [viewedVersionNumber, setViewedVersionNumber] = useState<number | null>(null);
+  // Whole-page fullscreen was removed in favour of the board-only fullscreen icon
+  // on the React Flow surface — kept boardOnlyFullscreen below as the single mode.
   const [nodes, setNodes] = useNodesState(starterGraph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(starterGraph.edges);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -229,6 +234,12 @@ export default function ToolChainDesignerPage() {
   const streamedAssistantIdRef = useRef<string | null>(null);
   const seenQuestionRequestIdsRef = useRef<Set<string>>(new Set());
   const chatResizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  // AbortController for the in-flight SSE stream — captured so the Stop button
+  // in the composer can abort the fetch and call the backend cancel endpoint.
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
+  // Keep track of the session id that the current stream is registered against
+  // so cancelStream knows which sessionId to send to /stop.
+  const streamSessionIdRef = useRef<string | null>(null);
   const hasHydratedWidthRef = useRef(false);
 
   useEffect(() => {
@@ -270,6 +281,10 @@ export default function ToolChainDesignerPage() {
   }, [currentToolChain]);
 
   const latest = useMemo(() => (Array.isArray(versions) && versions.length > 0 ? versions[0] : null), [versions]);
+  const hasUnpublishedDraft = useMemo(
+    () => Array.isArray(versions) && versions.some((v: any) => v?.published === false),
+    [versions]
+  );
 
   useEffect(() => {
     if (activeSessionId) return;
@@ -286,13 +301,31 @@ export default function ToolChainDesignerPage() {
     }
   }, [latest, setEdges, setNodes, activeSessionId]);
 
+  // Version switcher: when the user picks a specific version from the dropdown,
+  // load that version's graphJson into the board. Selecting "Current draft"
+  // (null) reverts to the active-session / latest behaviour above.
   useEffect(() => {
-    if (!isFullscreen && !boardOnlyFullscreen) return;
-    const onEsc = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (boardOnlyFullscreen) setBoardOnlyFullscreen(false);
-        else if (isFullscreen) setIsFullscreen(false);
+    if (viewedVersionNumber == null) return;
+    const target = (Array.isArray(versions) ? versions : []).find(
+      (v: any) => v.version === viewedVersionNumber
+    );
+    if (!target?.graphJson) return;
+    try {
+      const parsed = JSON.parse(target.graphJson);
+      if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
+        setNodes(rfNodes);
+        setEdges(rfEdges);
       }
+    } catch {
+      // no-op
+    }
+  }, [viewedVersionNumber, versions, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!boardOnlyFullscreen) return;
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBoardOnlyFullscreen(false);
     };
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onEsc);
@@ -300,7 +333,7 @@ export default function ToolChainDesignerPage() {
       document.body.style.overflow = "";
       window.removeEventListener("keydown", onEsc);
     };
-  }, [isFullscreen, boardOnlyFullscreen]);
+  }, [boardOnlyFullscreen]);
 
   const clampChatPanelWidth = useCallback((candidateWidth: number) => {
     return clampChatPanelWidthValue(candidateWidth);
@@ -699,6 +732,12 @@ export default function ToolChainDesignerPage() {
       const url = isRequirementFirst
         ? api.toolchains.configChatGlobalStreamUrl()
         : api.toolchains.configChatStreamUrl(toolChainId);
+      // Fresh AbortController for this stream — the composer's Stop button calls
+      // streamAbortControllerRef.current?.abort() to cancel the fetch, plus a POST
+      // to the backend stop endpoint so the worker thread also unwinds.
+      const controller = new AbortController();
+      streamAbortControllerRef.current = controller;
+      streamSessionIdRef.current = payload.sessionId || null;
       const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -711,6 +750,7 @@ export default function ToolChainDesignerPage() {
           createIfMissing: isRequirementFirst || payload.createIfMissing === true,
           toolChainName: payload.toolChainName || userText || "AI Generated ToolChain",
         }),
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const reader = response.body?.getReader();
@@ -725,7 +765,10 @@ export default function ToolChainDesignerPage() {
           const ev = JSON.parse(dataLine);
           switch (ev.type) {
             case "connected":
-              if (ev.sessionId) setActiveSessionId(ev.sessionId);
+              if (ev.sessionId) {
+                setActiveSessionId(ev.sessionId);
+                streamSessionIdRef.current = ev.sessionId;
+              }
               setSessionBootstrapPending(false);
               break;
             case "toolchain.bound":
@@ -952,7 +995,12 @@ export default function ToolChainDesignerPage() {
       }
     } catch (e: any) {
       clarificationPending = false;
-      toast.error(e.message || "Failed to stream ToolChain config");
+      // User-initiated abort flows through here as DOMException("AbortError").
+      // Don't surface it as a toast — the user clicked Stop, that's expected.
+      const isAbort = e?.name === "AbortError" || /aborted/i.test(String(e?.message || ""));
+      if (!isAbort) {
+        toast.error(e.message || "Failed to stream ToolChain config");
+      }
     } finally {
       // When the AI turn ended on a clarification request, keep the streaming
       // indicator on so the user perceives one continuous turn — the next stream
@@ -962,11 +1010,28 @@ export default function ToolChainDesignerPage() {
       }
       setSessionBootstrapPending(false);
       streamedAssistantIdRef.current = null;
+      streamAbortControllerRef.current = null;
+      streamSessionIdRef.current = null;
       setChatMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
     }
   };
 
+  const cancelConfigStream = useCallback(() => {
+    const sid = streamSessionIdRef.current;
+    streamAbortControllerRef.current?.abort();
+    if (sid && toolChainId) {
+      // Best-effort backend cancel — the worker thread releases any pending
+      // HITL futures and stops emitting. Failures are silent because the
+      // abort already closed the local stream.
+      api.toolchains.cancelConfigStream(toolChainId, sid).catch(() => {});
+    }
+  }, [toolChainId]);
+
   const startNewConfigSession = () => {
+    // UI-only reset — match how the regular AI chat handles "+ New Chat".
+    // The backend session row is created lazily on the first user message
+    // (sendConfigChatStream's createIfMissing path), so clicking + must NOT
+    // open an SSE stream with an empty payload.
     setPendingQuestion(null);
     setPendingInteractions([]);
     setInteractionDrafts({});
@@ -976,27 +1041,9 @@ export default function ToolChainDesignerPage() {
     setNodes(starterGraph.nodes);
     setEdges(starterGraph.edges);
     setActiveSessionId(null);
-    setSessionBootstrapPending(true);
-    void sendConfigChatStream({
-      sessionId: null,
-      createIfMissing: !toolChainId,
-      toolChainName: "AI Generated ToolChain",
-      toolChainDescription: "Generated from requirements via AI configuration chat",
-    });
+    setSessionBootstrapPending(false);
     setShowSessionsMenu(false);
   };
-
-  const compileMutation = useMutation({
-    mutationFn: () => api.toolchains.compileSession(toolChainId, activeSessionId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["toolchain-versions", toolChainId] });
-      queryClient.invalidateQueries({ queryKey: ["toolchain-config-session-detail", toolChainId, activeSessionId] });
-      setSessionStatus("compiled");
-      toast.success("Draft compiled successfully");
-    },
-    onError: (e: any) => toast.error(e.message || "Failed to compile version"),
-    retry: 0,
-  });
 
   const answerPendingInteraction = async (
     requestId: string,
@@ -1021,8 +1068,21 @@ export default function ToolChainDesignerPage() {
     });
   };
 
+  // Single-click Publish Draft: validates the artifact server-side (compile)
+  // then publishes immediately. Compile alone never created a version row —
+  // upsertDraftVersion already does that on every architect edit — so the
+  // user only needs one button.
   const publishDraftMutation = useMutation({
-    mutationFn: () => api.toolchains.publishSession(toolChainId, activeSessionId),
+    mutationFn: async () => {
+      try {
+        await api.toolchains.compileSession(toolChainId, activeSessionId);
+      } catch (e: any) {
+        // Compile is a validation pass; if the artifact is malformed surface
+        // the message and stop. publishSession would fail with the same.
+        throw new Error(e?.message || "Validation failed before publish");
+      }
+      return api.toolchains.publishSession(toolChainId, activeSessionId);
+    },
     onSuccess: (result: any) => {
       queryClient.invalidateQueries({ queryKey: ["toolchain-versions", toolChainId] });
       queryClient.invalidateQueries({ queryKey: ["toolchains"] });
@@ -1064,7 +1124,6 @@ export default function ToolChainDesignerPage() {
     <div
       className={cn(
         "space-y-4",
-        isFullscreen && !boardOnlyFullscreen ? "fixed inset-0 z-[90] bg-[#f5f5f5] p-4" : "",
         boardOnlyFullscreen ? "fixed inset-0 z-[100] bg-white" : ""
       )}
     >
@@ -1083,67 +1142,38 @@ export default function ToolChainDesignerPage() {
         </div>
         <div className="relative flex min-w-[560px] flex-col items-end gap-2">
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 bg-white px-3 text-xs"
-              onClick={() => setShowSessionsMenu((v) => !v)}
-            >
-              Sessions
-            </Button>
-            <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={() => setIsFullscreen((v) => !v)}>
-              {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 px-3 text-xs"
-              onClick={() => setBoardOnlyFullscreen(true)}
-              title="Show only the flow board, hide the chat panel and header"
-            >
-              Board Fullscreen
-            </Button>
+            {Array.isArray(versions) && versions.length > 0 ? (
+              <SearchableSelect
+                options={[
+                  { value: "__current__", label: "Current draft", sublabel: "live editing graph" },
+                  ...versions.map((v: any) => ({
+                    value: String(v.version),
+                    label: `v${v.version}${v.published ? " (published)" : ""}`,
+                    sublabel: `responseMode: ${v.responseMode || "hybrid"}`,
+                  })),
+                ]}
+                value={viewedVersionNumber == null ? "__current__" : String(viewedVersionNumber)}
+                onValueChange={(value) => {
+                  if (value === "__current__") setViewedVersionNumber(null);
+                  else setViewedVersionNumber(Number(value));
+                }}
+                placeholder="Version"
+                searchPlaceholder="Search versions…"
+                className="w-44"
+                triggerTitle="Switch the board to a different version of this ToolChain"
+                triggerAriaLabel="Switch viewed version"
+              />
+            ) : null}
             <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={() => setVersionsOpen(true)}>Versions</Button>
             <Button
               size="sm"
               className="h-8 px-3 text-xs"
               onClick={() => publishDraftMutation.mutate()}
-              disabled={!toolChainId || !activeSessionId || sessionStatus !== "compiled" || publishDraftMutation.isPending}
+              disabled={!toolChainId || !hasUnpublishedDraft || publishDraftMutation.isPending}
             >
               {publishDraftMutation.isPending ? "Publishing..." : "Publish Draft"}
             </Button>
           </div>
-          {showSessionsMenu ? (
-            <div className="absolute right-0 top-9 z-40 w-[280px]">
-              <ToolChainSessionList
-                sessions={sessions}
-                activeSessionId={activeSessionId}
-                onSelect={(sessionId) => {
-                  setActiveSessionId(sessionId);
-                  setShowSessionsMenu(false);
-                }}
-                onNewSession={() => {
-                  startNewConfigSession();
-                }}
-                onRenameSession={(sessionId, title) => {
-                  updateSessionMutation.mutate({ sessionId, payload: { title } });
-                  setShowSessionsMenu(false);
-                }}
-                onArchiveSession={(sessionId) => {
-                  updateSessionMutation.mutate({ sessionId, payload: { archived: true } });
-                  setShowSessionsMenu(false);
-                }}
-                onRestoreSession={(sessionId) => {
-                  updateSessionMutation.mutate({ sessionId, payload: { archived: false } });
-                  setShowSessionsMenu(false);
-                }}
-                onDeleteSession={(sessionId) => {
-                  deleteSessionMutation.mutate(sessionId);
-                  setShowSessionsMenu(false);
-                }}
-              />
-            </div>
-          ) : null}
           <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 py-2 shadow-sm">
             <SearchableSelect
               options={[
@@ -1202,25 +1232,20 @@ export default function ToolChainDesignerPage() {
       <div
         className={cn("rounded-lg border bg-white p-2", boardOnlyFullscreen && "h-full rounded-none border-0 p-0")}
         style={{
-          height: boardOnlyFullscreen
-            ? "100vh"
-            : isFullscreen
-              ? "calc(100vh - 120px)"
-              : "calc(100vh - 220px)",
+          height: boardOnlyFullscreen ? "100vh" : "calc(100vh - 220px)",
         }}
       >
-        <div className="relative flex h-full">
-          {boardOnlyFullscreen ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="absolute right-3 top-3 z-50 h-8 bg-white px-3 text-xs shadow"
-              onClick={() => setBoardOnlyFullscreen(false)}
+        <div className="flex h-full">
+          <div className="relative min-w-0 flex-1 rounded-md border border-slate-200 bg-white">
+            <button
+              type="button"
+              aria-label={boardOnlyFullscreen ? "Exit board fullscreen" : "Board fullscreen"}
+              title={boardOnlyFullscreen ? "Exit board fullscreen (Esc)" : "Show only the flow board"}
+              className="absolute right-3 top-3 z-20 inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+              onClick={() => setBoardOnlyFullscreen((v) => !v)}
             >
-              Exit Board Fullscreen
-            </Button>
-          ) : null}
-          <div className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white">
+              {boardOnlyFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -1260,9 +1285,40 @@ export default function ToolChainDesignerPage() {
           />
 
           <div
-            className={cn("h-full shrink-0", boardOnlyFullscreen && "hidden")}
+            className={cn("relative h-full shrink-0", boardOnlyFullscreen && "hidden")}
             style={{ width: chatPanelWidth, maxWidth: "55vw", minWidth: 320 }}
           >
+            {showSessionsMenu ? (
+              <div className="absolute right-2 top-12 z-40 w-[280px]">
+                <ToolChainSessionList
+                  sessions={sessions}
+                  activeSessionId={activeSessionId}
+                  onSelect={(sessionId) => {
+                    setActiveSessionId(sessionId);
+                    setShowSessionsMenu(false);
+                  }}
+                  onNewSession={() => {
+                    startNewConfigSession();
+                  }}
+                  onRenameSession={(sessionId, title) => {
+                    updateSessionMutation.mutate({ sessionId, payload: { title } });
+                    setShowSessionsMenu(false);
+                  }}
+                  onArchiveSession={(sessionId) => {
+                    updateSessionMutation.mutate({ sessionId, payload: { archived: true } });
+                    setShowSessionsMenu(false);
+                  }}
+                  onRestoreSession={(sessionId) => {
+                    updateSessionMutation.mutate({ sessionId, payload: { archived: false } });
+                    setShowSessionsMenu(false);
+                  }}
+                  onDeleteSession={(sessionId) => {
+                    deleteSessionMutation.mutate(sessionId);
+                    setShowSessionsMenu(false);
+                  }}
+                />
+              </div>
+            ) : null}
             <ToolChainConfigChatPanel
               messages={chatMessages}
               pendingQuestion={pendingQuestion}
@@ -1298,18 +1354,36 @@ export default function ToolChainDesignerPage() {
               onNewSession={() => {
                 startNewConfigSession();
               }}
-              onCompile={() => compileMutation.mutate()}
-              canCompile={
-                !!toolChainId &&
-                !!activeSessionId &&
-                (sessionStatus === "ready_to_compile" ||
-                  sessionStatus === "awaiting_acceptance" ||
-                  sessionStatus === "compiled")
-              }
-              isCompiling={compileMutation.isPending}
-              compileLabel="Compile Draft"
+              onShowHistory={() => setShowSessionsMenu((v) => !v)}
+              onCancelStream={cancelConfigStream}
               className="h-full"
-              onResendMessage={(content) =>
+              onResendMessage={async (content, messageId) => {
+                // Match ChatPage's edit-and-resend semantics: rewind the conversation by
+                // deleting every message in this session at or after the edited message,
+                // then re-send the (possibly edited) content. The backend persists the new
+                // user turn and the architect responds against the truncated history.
+                if (toolChainId && activeSessionId && messageId) {
+                  // Find the dbId — chatMessages keeps the local id; the persisted row's
+                  // dbId is set on hydration. Fall back to the local id if dbId is unset.
+                  const target = chatMessages.find((m) => m.id === messageId);
+                  const truncateId = target?.dbId || messageId;
+                  try {
+                    await api.toolchains.truncateConfigSession(toolChainId, activeSessionId, truncateId);
+                  } catch (err: any) {
+                    // Non-fatal — proceed with the resend even if truncate failed (e.g. the
+                    // message was never persisted server-side because the prior turn errored).
+                    console.warn("[Designer] truncate failed:", err?.message || err);
+                  }
+                }
+                // Slice the local chat to drop the edited message and everything after it,
+                // matching the backend truncate. The next stream's persisted user message +
+                // refetch will rebuild the transcript with the new turn at the end.
+                setChatMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.id === messageId);
+                  return idx >= 0 ? prev.slice(0, idx) : prev;
+                });
+                setPendingQuestion(null);
+                setPendingInteractions([]);
                 void sendConfigChatStream({
                   sessionId: activeSessionId,
                   toolChainId: toolChainId || undefined,
@@ -1319,8 +1393,8 @@ export default function ToolChainDesignerPage() {
                   message: content,
                   modelSelectionMode,
                   modelRef: selectedModel ? parseModelRefKey(selectedModel) : null,
-                })
-              }
+                });
+              }}
             />
           </div>
         </div>

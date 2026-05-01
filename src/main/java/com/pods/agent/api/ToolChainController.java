@@ -47,7 +47,27 @@ public class ToolChainController {
     @GetMapping("/toolchains")
     @Operation(summary = "List all ToolChains")
     public ResponseEntity<?> listToolChains() {
-        return ResponseEntity.ok(toolChainService.listAll());
+        var rows = toolChainService.listAll().stream().map(chain -> {
+            java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("id", chain.getId());
+            row.put("name", chain.getName());
+            row.put("description", chain.getDescription());
+            row.put("status", chain.getStatus());
+            row.put("enabled", chain.isEnabled());
+            row.put("currentVersion", chain.getCurrentVersion());
+            row.put("metadataJson", chain.getMetadataJson());
+            row.put("createdBy", chain.getCreatedBy());
+            row.put("createdAt", chain.getCreatedAt());
+            row.put("updatedAt", chain.getUpdatedAt());
+            // publishedVersion is computed separately so the listing can show
+            // "Published v1" even when currentVersion has advanced to a draft v2.
+            row.put("publishedVersion", toolChainService.resolveVersion(chain.getId(), null)
+                    .filter(ToolChainVersion::isPublished)
+                    .map(ToolChainVersion::getVersion)
+                    .orElse(null));
+            return row;
+        }).toList();
+        return ResponseEntity.ok(rows);
     }
 
     @PostMapping("/toolchains")
@@ -144,6 +164,13 @@ public class ToolChainController {
         return emitter;
     }
 
+    @PostMapping("/toolchains/{id}/config-chat/stream/{sessionId}/stop")
+    @Operation(summary = "Cancel an in-flight ToolChain config chat stream")
+    public ResponseEntity<?> cancelConfigStream(@PathVariable String id, @PathVariable String sessionId) {
+        boolean cancelled = toolChainConfigChatService.cancelStream(sessionId);
+        return ResponseEntity.ok(java.util.Map.of("cancelled", cancelled, "sessionId", sessionId));
+    }
+
     @PostMapping("/toolchains/{id}/config-sessions/{sessionId}/reply")
     @Operation(summary = "Reply to pending ToolChain config stream question")
     public ResponseEntity<?> replyConfigStream(@PathVariable String id,
@@ -233,6 +260,19 @@ public class ToolChainController {
             );
         } catch (IllegalArgumentException e) {
             return ResponseEntityFactory.notFound(e.getMessage());
+        }
+    }
+
+    @PostMapping("/toolchains/{id}/config-sessions/{sessionId}/truncate")
+    @Operation(summary = "Truncate config-session messages from the given message id onward (used by edit & resend)")
+    public ResponseEntity<?> truncateConfigSession(@PathVariable String id,
+                                                    @PathVariable String sessionId,
+                                                    @RequestBody Map<String, Object> body) {
+        try {
+            String messageId = body == null ? null : String.valueOf(body.get("messageId"));
+            return ResponseEntity.ok(toolChainConfigChatService.truncateFromMessage(id, sessionId, messageId));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntityFactory.badRequest(e.getMessage());
         }
     }
 

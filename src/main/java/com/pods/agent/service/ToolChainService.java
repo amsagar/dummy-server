@@ -57,6 +57,18 @@ public class ToolChainService {
         return toolChainRepository.update(existing);
     }
 
+    /**
+     * Refresh just the chain's display metadata. Called after the architect's "AI Create"
+     * publishes a new version so the listing shows a meaningful Name and Description
+     * derived from the actual graph instead of the user's first prompt echoed twice.
+     */
+    public ToolChain updateMetadata(String id, String name, String description) {
+        ToolChain existing = getRequired(id);
+        if (name != null && !name.isBlank()) existing.setName(name.trim());
+        if (description != null && !description.isBlank()) existing.setDescription(description.trim());
+        return toolChainRepository.update(existing);
+    }
+
     public List<ToolChain> listAll() {
         return toolChainRepository.findAll();
     }
@@ -96,6 +108,38 @@ public class ToolChainService {
         chain.setCurrentVersion(version);
         toolChainRepository.update(chain);
         return created;
+    }
+
+    /**
+     * Materialise the architect's most recent edit as a versioned draft. If a draft
+     * row already exists for this chain (is_published=false), update it in place;
+     * otherwise create a new row with the next version number. Either way the
+     * chain's currentVersion is bumped to the draft's version (matching createVersion's
+     * existing semantics — currentVersion reflects "latest version row created", not
+     * "latest published"). The returned version is always unpublished.
+     */
+    public ToolChainVersion upsertDraftVersion(String toolChainId,
+                                               ToolChainDtos.ToolChainVersionRequest request,
+                                               String createdBy) {
+        ToolChain chain = getRequired(toolChainId);
+        Optional<ToolChainVersion> existingDraft = toolChainVersionRepository.findLatestDraft(toolChainId);
+        if (existingDraft.isPresent()) {
+            ToolChainVersion draft = existingDraft.get();
+            draft.setGraphJson(request.getGraphJson());
+            draft.setInputSchema(request.getInputSchema());
+            draft.setOutputSchema(request.getOutputSchema());
+            draft.setResponseMode(request.getResponseMode() == null ? "hybrid" : request.getResponseMode());
+            draft.setSynthesisPrompt(request.getSynthesisPrompt());
+            draft.setIntentsJson(toJson(request.getIntents() == null ? List.of() : request.getIntents()));
+            draft.setRagConfigJson(toJson(request.getRagConfig() == null ? Map.of() : request.getRagConfig()));
+            toolChainVersionRepository.updateDraft(draft);
+            if (chain.getCurrentVersion() == null || chain.getCurrentVersion() < draft.getVersion()) {
+                chain.setCurrentVersion(draft.getVersion());
+                toolChainRepository.update(chain);
+            }
+            return draft;
+        }
+        return createVersion(toolChainId, request, createdBy);
     }
 
     public ToolChainVersion publishVersion(String toolChainId, int version) {

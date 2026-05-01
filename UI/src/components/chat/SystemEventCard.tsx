@@ -36,6 +36,50 @@ const SystemEventCard: FC<Props> = ({
     pending?.metadata || normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload);
   const mode = metadata?.responseMode || "text";
 
+  if (m.eventType === "toolchain.run.bound") {
+    const runId = String(m.eventPayload?.runId || "");
+    const version = m.eventPayload?.version;
+    const status = m.eventPayload?.status;
+    const href = runId ? `/toolchains/runs/${runId}` : null;
+    return (
+      <div className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] text-blue-700">▶ ToolChain run</span>
+          <span className="min-w-0 flex-1 truncate text-slate-700">
+            #{runId.slice(0, 8)}
+            {version ? ` (v${version})` : ""}
+            {status ? ` — ${status}` : ""}
+          </span>
+          {href ? (
+            <a
+              href={href}
+              className="shrink-0 rounded px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
+            >
+              Open run
+            </a>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  if (m.eventType === "task.started" || m.eventType === "task.done") {
+    const taskName = m.eventPayload?.taskName || m.eventPayload?.taskId || "node";
+    const status = m.eventPayload?.status;
+    const isStarted = m.eventType === "task.started";
+    return (
+      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] text-slate-500">{isStarted ? "▶ node" : "✓ node"}</span>
+          <span className="min-w-0 flex-1 truncate text-slate-700">
+            {taskName}
+            {status ? ` — ${status}` : ""}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   const isToolEvent =
     m.eventType === "tool.call" ||
     m.eventType === "tool.done" ||

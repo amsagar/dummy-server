@@ -44,6 +44,8 @@ public class AgentToolCallback implements ToolCallback {
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
     private final SkillExecutionGate skillExecutionGate;
+    private final java.nio.file.Path workspace;
+    private final boolean bypassApprovalGate;
 
     public AgentToolCallback(AgentTool tool,
                              ToolExecutionService toolExecutionService,
@@ -57,6 +59,25 @@ public class AgentToolCallback implements ToolCallback {
                              ObjectMapper objectMapper,
                              RuntimeEventRepository runtimeEventRepository,
                              SkillExecutionGate skillExecutionGate) {
+        this(tool, toolExecutionService, policyEngine, pendingInteractionService, sender,
+                sessionId, turnId, userId, approvalTimeoutMs, objectMapper,
+                runtimeEventRepository, skillExecutionGate, null, false);
+    }
+
+    public AgentToolCallback(AgentTool tool,
+                             ToolExecutionService toolExecutionService,
+                             GuardrailPolicyEngine policyEngine,
+                             PendingInteractionService pendingInteractionService,
+                             SseEventSender sender,
+                             String sessionId,
+                             String turnId,
+                             String userId,
+                             long approvalTimeoutMs,
+                             ObjectMapper objectMapper,
+                             RuntimeEventRepository runtimeEventRepository,
+                             SkillExecutionGate skillExecutionGate,
+                             java.nio.file.Path workspace,
+                             boolean bypassApprovalGate) {
         this.tool = tool;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -69,6 +90,8 @@ public class AgentToolCallback implements ToolCallback {
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
         this.skillExecutionGate = skillExecutionGate;
+        this.workspace = workspace;
+        this.bypassApprovalGate = bypassApprovalGate;
     }
 
     @Override
@@ -101,6 +124,13 @@ public class AgentToolCallback implements ToolCallback {
         }
 
         GuardrailPolicyEngine.Decision decision = policyEngine.evaluateTool(tool);
+        // ToolChain designer turns operate inside the per-session workspace sandbox
+        // (read/edit/apply_patch are bounded by safePath). Approval prompts on every
+        // edit would block the architect's silent VFS edits; allow the runtime to opt
+        // out via bypassApprovalGate.
+        if (bypassApprovalGate && "ask".equalsIgnoreCase(decision.decision())) {
+            decision = new GuardrailPolicyEngine.Decision("allow", "designer-bypass");
+        }
         if ("deny".equalsIgnoreCase(decision.decision())) {
             String denied = "Denied by policy: " + decision.reason();
             sender.sendToolCall(sessionId, callId, tool.getName(), payload);
@@ -141,7 +171,13 @@ public class AgentToolCallback implements ToolCallback {
 
         ToolExecutionService.ExecutionResult execution;
         try {
-            execution = UserContextHolder.withUser(userId, () -> toolExecutionService.execute(tool, payload));
+            // Bind the per-session workspace path so filesystem tools (read/edit/apply_patch
+            // /write) resolve relative paths against it. Spring AI runs tool callbacks on a
+            // separate scheduler thread, so the WorkspaceContextHolder ThreadLocal set by
+            // the parent runTurn doesn't propagate here — we re-bind explicitly per tool call.
+            execution = com.pods.agent.service.workspace.WorkspaceContextHolder.withWorkspace(
+                    workspace,
+                    () -> UserContextHolder.withUser(userId, () -> toolExecutionService.execute(tool, payload)));
         } catch (Exception e) {
             String err = "Tool execution exception: " + e.getMessage();
             sender.sendToolResult(sessionId, callId, tool.getName(), err, "error");

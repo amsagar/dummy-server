@@ -18,14 +18,30 @@ public class SseEventSender {
 
     private final SseEmitter emitter;
     private final ObjectMapper objectMapper;
+    private java.util.function.BooleanSupplier cancelledPredicate;
 
     public SseEventSender(SseEmitter emitter, ObjectMapper objectMapper) {
         this.emitter = emitter;
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * Install a "should I stop emitting?" predicate. When the predicate returns true
+     * every send becomes a no-op. The toolchain config service uses this together with
+     * its activeStreams map so a POST .../stop endpoint can flip a flag and silence
+     * the running worker thread without restructuring the loop's reactive subscription.
+     */
+    public void setCancelledPredicate(java.util.function.BooleanSupplier predicate) {
+        this.cancelledPredicate = predicate;
+    }
+
+    public boolean isCancelled() {
+        return cancelledPredicate != null && cancelledPredicate.getAsBoolean();
+    }
+
     public void send(Map<String, Object> payload) {
         if (emitter == null) return;
+        if (isCancelled()) return;
         try {
             var envelope = new LinkedHashMap<String, Object>(payload);
             envelope.putIfAbsent("schemaVersion", "v2");
@@ -40,6 +56,17 @@ public class SseEventSender {
 
     public void sendConnected(String sessionId) {
         send(Map.of("type", "connected", "sessionId", sessionId));
+    }
+
+    /**
+     * Emit an arbitrary event type. Used for first-class events not yet covered by a
+     * typed helper (e.g. toolchain.run.bound which links a chat session to a run id).
+     */
+    public void sendCustom(String type, Map<String, Object> payload) {
+        var envelope = new LinkedHashMap<String, Object>();
+        envelope.put("type", type);
+        if (payload != null) envelope.putAll(payload);
+        send(envelope);
     }
 
     public void sendTextDelta(String content) {

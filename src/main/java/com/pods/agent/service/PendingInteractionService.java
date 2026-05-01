@@ -87,6 +87,26 @@ public class PendingInteractionService {
         }
     }
 
+    /**
+     * Wake every pending awaitReply future for the given session by completing
+     * each with a null reply. Used by the toolchain config "stop stream" path so
+     * a worker thread blocked inside awaitReply unwinds and can finalise.
+     * Returns the number of futures that were woken.
+     */
+    public int cancelBySession(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return 0;
+        int woken = 0;
+        for (HitlInteraction i : hitlRepository.findBySessionId(sessionId)) {
+            if (!"pending".equalsIgnoreCase(i.getStatus())) continue;
+            CompletableFuture<InteractionReply> future = pendingFutures.remove(i.getId());
+            if (future != null) {
+                future.complete(null);
+                woken++;
+            }
+        }
+        return woken;
+    }
+
     public Interaction get(String requestId) {
         return hitlRepository.findById(requestId)
                 .map(i -> {

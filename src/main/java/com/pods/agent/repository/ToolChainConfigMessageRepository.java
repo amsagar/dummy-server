@@ -7,6 +7,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -61,5 +62,29 @@ public class ToolChainConfigMessageRepository {
                 .addValue("requestId", requestId)
                 .addValue("hitlStatus", hitlStatus)
                 .addValue("hitlResponse", hitlResponse));
+    }
+
+    public Optional<ToolChainConfigMessage> findById(String id) {
+        List<ToolChainConfigMessage> rows = jdbc.query(sql.getQuery("TOOL_CHAIN_CONFIG_MESSAGE.FIND_BY_ID"), (rs, n) -> ToolChainConfigMessage.builder()
+                .id(rs.getString("id"))
+                .sessionId(rs.getString("session_id"))
+                .role(rs.getString("role"))
+                .content(rs.getString("content"))
+                .metadataJson(rs.getString("metadata_json"))
+                .createdAt(rs.getLong("created_at"))
+                .eventType(rs.getString("event_type"))
+                .eventPayload(rs.getString("event_payload"))
+                .requestId(rs.getString("request_id"))
+                .hitlStatus(rs.getString("hitl_status"))
+                .hitlResponse(rs.getString("hitl_response"))
+                .build(), id);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    /** Delete every message in this session with createdAt &gt;= the given timestamp. Used by truncate-and-resend. */
+    public int deleteFromTime(String sessionId, long createdAt) {
+        return namedJdbc.update(sql.getQuery("TOOL_CHAIN_CONFIG_MESSAGE.DELETE_FROM_TIME"), new MapSqlParameterSource()
+                .addValue("sessionId", sessionId)
+                .addValue("createdAt", createdAt));
     }
 }

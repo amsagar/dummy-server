@@ -148,12 +148,20 @@ export const api = {
     configSessionDetail: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { headers: getHeaders() }).then(handleResponse),
     configChat: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-chat`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     configChatStreamUrl: (id: string) => `${BASE_URL}/toolchains/${id}/config-chat/stream`,
+    cancelConfigStream: (id: string, sessionId: string) =>
+      fetch(`${BASE_URL}/toolchains/${id}/config-chat/stream/${sessionId}/stop`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
     configSessionReply: (id: string, sessionId: string, payload: any) =>
       fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/reply`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
     configChatGlobal: (payload: any) => fetch(`${BASE_URL}/toolchains/config-chat`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     configChatGlobalStreamUrl: () => `${BASE_URL}/toolchains/config-chat/stream`,
     configSessionReplyGlobal: (sessionId: string, payload: any) =>
       fetch(`${BASE_URL}/toolchains/config-sessions/${sessionId}/reply`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
+    truncateConfigSession: (id: string, sessionId: string, messageId: string) =>
+      fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/truncate`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ messageId }),
+      }).then(handleResponse),
     compileSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/compile`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
     publishSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/publish`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
     updateConfigSession: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),

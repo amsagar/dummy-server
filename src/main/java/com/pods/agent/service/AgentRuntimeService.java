@@ -149,18 +149,45 @@ public class AgentRuntimeService {
                         UserContextHolder.currentUserId(),
                         Map.of("message", normalizedUserText, "sessionId", session.getSessionId()),
                         Map.of("async", false),
-                        sender
+                        sender,
+                        session.getSessionId()
                 );
+                // Anchor the run to the chat transcript so the UI can render a
+                // "View run" chip linking to the run detail page on refresh.
+                Map<String, Object> bound = new LinkedHashMap<>();
+                bound.put("sessionId", session.getSessionId());
+                bound.put("toolChainId", state.getToolChainId());
+                bound.put("runId", run.getId());
+                bound.put("version", run.getVersion());
+                bound.put("status", run.getStatus());
+                sender.sendCustom("toolchain.run.bound", bound);
+                runtimeEventRepository.save(RuntimeEvent.builder()
+                        .sessionId(session.getSessionId())
+                        .turnId(turnId)
+                        .eventType("toolchain.run.bound")
+                        .payload(toJsonSafe(bound))
+                        .build());
                 String result = run.getOutputSnapshot() == null ? "{\"runId\":\"" + run.getId() + "\",\"status\":\"" + run.getStatus() + "\"}" : run.getOutputSnapshot();
                 session.getMessages().add(new AssistantMessage(result));
                 transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-execution-done");
                 return result;
             } catch (Exception e) {
                 log.warn("[AgentRuntime] ToolChain execution failed, falling back to dynamic flow: {}", e.getMessage());
-                if ("strict".equalsIgnoreCase(runtimeMode)) {
+                // Fail loud when the user explicitly chose this chain — they asked for
+                // a deterministic run, not a "best effort". Strict mode also fails loud
+                // even for inferred matches.
+                if (state.isToolChainSelectedByUser() || "strict".equalsIgnoreCase(runtimeMode)) {
                     String error = "ToolChain execution failed: " + e.getMessage();
+                    sender.sendError(error);
+                    runtimeEventRepository.save(RuntimeEvent.builder()
+                            .sessionId(session.getSessionId())
+                            .turnId(turnId)
+                            .eventType("task.done")
+                            .payload("{\"task\":\"toolchain_failed\",\"status\":\"failed\",\"error\":" + jsonString(e.getMessage()) + "}")
+                            .build());
                     session.getMessages().add(new AssistantMessage(error));
-                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-failed-strict");
+                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE,
+                            state.isToolChainSelectedByUser() ? "toolchain-failed-user-selected" : "toolchain-failed-strict");
                     return error;
                 }
             }
@@ -263,6 +290,7 @@ public class AgentRuntimeService {
         }
         state.setToolChainId(selectedToolChainId);
         state.setToolChainVersion(selectedVersion);
+        state.setToolChainSelectedByUser(true);
     }
 
     private String askToolChainQuestion(AgentSession session,
@@ -384,11 +412,22 @@ public class AgentRuntimeService {
         ModelRef embeddingModelRef = embeddingAutoRouterService.pickEmbeddingModel(state);
 
         List<AgentTool> tools = selectTurnTools(userText, baseTools, baseIds, memorySignals, embeddingModelRef, session.getSessionId());
-        boolean enforceSkillFirst = shouldEnforceSkillFirst(userText, session.getSessionId());
+        // Skip the skill-first gate in toolchain_designer mode — the architect skill is already
+        // injected as the system prompt, and the gate would otherwise block read/edit/apply_patch
+        // calls that VFS-edit mode depends on, returning a "call skill first" string instead of
+        // the actual file contents.
+        boolean designerMode = isToolChainDesignerMode(state.getRuntimeMode());
+        boolean enforceSkillFirst = !designerMode
+                && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
 
+        // In designer mode, bind the per-session workspace and bypass the approval prompt
+        // for FS tools. The architect's read/edit/apply_patch are sandboxed to the workspace
+        // by safePath in ToolExecutionService, so no human approval is meaningful here.
+        java.nio.file.Path designerWorkspace = designerMode ? session.getWorkspacePath() : null;
         List<ToolCallback> toolCallbacks = agentToolCallbackFactory.buildForTurn(
-                session.getSessionId(), turnId, sender, tools, skillExecutionGate);
+                session.getSessionId(), turnId, sender, tools, skillExecutionGate,
+                designerWorkspace, designerMode);
         // Keep skill guidance in base system prompt and load full skill content only when
         // model explicitly calls the native `skill` tool.
         String stepContext = buildStepContext(userText, "", mcpContext, runtimeMode, session, "");
@@ -1293,6 +1332,14 @@ You are in ToolChain designer creation mode.
     private String jsonString(String value) {
         if (value == null) return "null";
         return "\"" + sanitize(value) + "\"";
+    }
+
+    private String toJsonSafe(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return "{}";
+        }
     }
 
     @SuppressWarnings("unused")

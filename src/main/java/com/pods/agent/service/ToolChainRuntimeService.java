@@ -88,6 +88,23 @@ public class ToolChainRuntimeService {
                                 Map<String, Object> input,
                                 Map<String, Object> options,
                                 SseEventSender sender) {
+        return execute(toolChainId, requestedVersion, triggerSource, initiatedBy, input, options, sender, null);
+    }
+
+    /**
+     * @param chatSessionId  if non-null, every SSE event the run emits is tagged with this
+     *                       sessionId instead of the run's id, so events flow into the
+     *                       caller's chat session and the chat UI's session filter accepts
+     *                       them. The runId stays in event payloads for run-detail correlation.
+     */
+    public ToolChainRun execute(String toolChainId,
+                                Integer requestedVersion,
+                                String triggerSource,
+                                String initiatedBy,
+                                Map<String, Object> input,
+                                Map<String, Object> options,
+                                SseEventSender sender,
+                                String chatSessionId) {
         ToolChainVersion version = toolChainService.resolveVersion(toolChainId, requestedVersion)
                 .orElseThrow(() -> new IllegalArgumentException("No ToolChain version is available for " + toolChainId));
         Map<String, Object> normalizedInput = input == null ? new LinkedHashMap<>() : new LinkedHashMap<>(input);
@@ -103,12 +120,13 @@ public class ToolChainRuntimeService {
                 .build());
         boolean async = options != null && Boolean.TRUE.equals(options.get("async"));
         Map<String, Object> safeOptions = options == null ? Map.of() : options;
+        String effectiveSessionId = chatSessionId != null && !chatSessionId.isBlank() ? chatSessionId : run.getId();
         if (async) {
-            runExecutor.submit(() -> executeInternal(run.getId(), version, new LinkedHashMap<>(normalizedInput), safeOptions, sender));
+            runExecutor.submit(() -> executeInternal(run.getId(), version, new LinkedHashMap<>(normalizedInput), safeOptions, sender, effectiveSessionId));
             run.setStatus("running");
             return run;
         }
-        return executeInternal(run.getId(), version, new LinkedHashMap<>(normalizedInput), safeOptions, sender);
+        return executeInternal(run.getId(), version, new LinkedHashMap<>(normalizedInput), safeOptions, sender, effectiveSessionId);
     }
 
     public Optional<ToolChainRun> getRun(String runId) {
@@ -156,14 +174,15 @@ public class ToolChainRuntimeService {
         ToolChainRun original = runRepository.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("Run not found: " + runId));
         Map<String, Object> input = fromJsonMap(original.getInputSnapshot());
-        return execute(original.getToolChainId(), original.getVersion(), "rerun", initiatedBy, input, Map.of("async", true), null);
+        return execute(original.getToolChainId(), original.getVersion(), "rerun", initiatedBy, input, Map.of("async", true), null, null);
     }
 
     private ToolChainRun executeInternal(String runId,
                                          ToolChainVersion version,
                                          Map<String, Object> input,
                                          Map<String, Object> options,
-                                         SseEventSender sender) {
+                                         SseEventSender sender,
+                                         String effectiveSessionId) {
         ToolChainRun run = runRepository.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("Run not found: " + runId));
         runRepository.updateStatus(runId, "running", null, null);
@@ -182,7 +201,7 @@ public class ToolChainRuntimeService {
             List<String> batch = new ArrayList<>();
             while (!ready.isEmpty()) batch.add(ready.poll());
             List<CompletableFuture<StepResult>> futures = batch.stream()
-                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender), branchExecutor))
+                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender, effectiveSessionId), branchExecutor))
                     .toList();
             for (int i = 0; i < batch.size(); i++) {
                 String nodeId = batch.get(i);
@@ -205,12 +224,12 @@ public class ToolChainRuntimeService {
             }
         }
 
-        String output = finalizeResponse(run.getToolChainId(), version, context, runId, options, sender);
+        String output = finalizeResponse(run.getToolChainId(), version, context, runId, options, sender, effectiveSessionId);
         completeRun(runId, "success", Map.of("result", output, "context", context), null);
         return runRepository.findById(runId).orElse(run);
     }
 
-    private StepResult executeNode(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender) {
+    private StepResult executeNode(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender, String effectiveSessionId) {
         if (node == null) return StepResult.failed("Missing node");
         ToolChainRunStep step = runStepRepository.save(ToolChainRunStep.builder()
                 .runId(runId)
@@ -229,11 +248,11 @@ public class ToolChainRuntimeService {
                 "toolRef", node.toolRef() == null ? "" : node.toolRef(),
                 "input", context
         )));
-        if (sender != null) sender.sendTaskStarted(runId, node.id(), node.label());
+        if (sender != null) sender.sendTaskStarted(effectiveSessionId, node.id(), node.label());
 
         try {
             if (requiresApproval(node)) {
-                StepResult approval = handleApproval(runId, node, step, sender);
+                StepResult approval = handleApproval(runId, node, step, sender, effectiveSessionId);
                 if (!approval.success()) {
                     return approval;
                 }
@@ -243,7 +262,7 @@ public class ToolChainRuntimeService {
                 case "start", "end" -> StepResult.success(Map.of(node.id(), "ok"), null);
                 case "decision" -> executeDecision(node, context);
                 case "tool", "mcp_tool" -> executeToolNode(node, context);
-                case "synthesis" -> executeSynthesisNode(node, context, runId, sender);
+                case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
                 case "skill" -> StepResult.failed("Skill nodes are no longer supported as graph steps; use synthesisPrompt to invoke skills in the final LLM stage.");
                 default -> StepResult.success(Map.of(node.id(), "skipped"), null);
             };
@@ -260,7 +279,7 @@ public class ToolChainRuntimeService {
                     "output", result.outputs() == null ? Map.of() : result.outputs(),
                     "error", step.getErrorMessage() == null ? "" : step.getErrorMessage()
             )));
-            if (sender != null) sender.sendTaskDone(runId, node.id(), step.getStatus());
+            if (sender != null) sender.sendTaskDone(effectiveSessionId, node.id(), step.getStatus());
             return result;
         } catch (Exception e) {
             step.setStatus("failed");
@@ -277,7 +296,7 @@ public class ToolChainRuntimeService {
         }
     }
 
-    private StepResult handleApproval(String runId, NodeModel node, ToolChainRunStep step, SseEventSender sender) {
+    private StepResult handleApproval(String runId, NodeModel node, ToolChainRunStep step, SseEventSender sender, String effectiveSessionId) {
         String requestId = UUID.randomUUID().toString();
         approvalRepository.save(ToolChainApproval.builder()
                 .runId(runId)
@@ -293,7 +312,7 @@ public class ToolChainRuntimeService {
         step.setStatus("waiting_for_approval");
         step.setEndedAt(System.currentTimeMillis());
         runStepRepository.update(step);
-        if (sender != null) sender.sendApprovalRequired(runId, requestId, node.label());
+        if (sender != null) sender.sendApprovalRequired(effectiveSessionId, requestId, node.label());
         saveRuntimeEvent(runId, "toolchain.approval.required", Map.of("nodeId", node.id(), "requestId", requestId));
 
         CompletableFuture<ApprovalDecision> future = new CompletableFuture<>();
@@ -351,7 +370,8 @@ public class ToolChainRuntimeService {
     private StepResult executeSynthesisNode(NodeModel node,
                                             Map<String, Object> context,
                                             String runId,
-                                            SseEventSender sender) {
+                                            SseEventSender sender,
+                                            String effectiveSessionId) {
         // Prefer the version-level synthesisPrompt — that's where the architect skill writes the
         // actual synthesis instructions. The node-level config.prompt is rarely set and was
         // previously forced to the generic "Summarize the workflow output" default, which (a)
@@ -369,7 +389,7 @@ public class ToolChainRuntimeService {
         if (modelRef == null) {
             return StepResult.failed("Synthesis node requires a configured model");
         }
-        String summary = callSynthesisLlm(prompt, context, runId, modelRef, sender);
+        String summary = callSynthesisLlm(prompt, context, runId, modelRef, sender, effectiveSessionId);
         return StepResult.success(Map.of(node.id(), Map.of("summary", summary)), null);
     }
 
@@ -485,7 +505,8 @@ public class ToolChainRuntimeService {
     private String finalizeResponse(String toolChainId,
                                     ToolChainVersion version,
                                     Map<String, Object> context,
-                                    String runId, Map<String, Object> options, SseEventSender sender) {
+                                    String runId, Map<String, Object> options, SseEventSender sender,
+                                    String effectiveSessionId) {
         String mode = version.getResponseMode() == null ? "hybrid" : version.getResponseMode();
 
         if ("raw_graph_output".equalsIgnoreCase(mode)) {
@@ -505,7 +526,7 @@ public class ToolChainRuntimeService {
         if (synthesisText == null) {
             String synthesisPrompt = version.getSynthesisPrompt();
             if (synthesisPrompt != null && !synthesisPrompt.isBlank() && modelRef != null) {
-                synthesisText = callSynthesisLlm(synthesisPrompt, context, runId, modelRef, sender);
+                synthesisText = callSynthesisLlm(synthesisPrompt, context, runId, modelRef, sender, effectiveSessionId);
             } else if (modelRef == null) {
                 synthesisText = "Synthesis failed: no runtime/default model configured.";
             } else {
@@ -569,7 +590,8 @@ public class ToolChainRuntimeService {
     }
 
     private String callSynthesisLlm(String synthesisPrompt, Map<String, Object> context,
-                                    String runId, ModelRef modelRef, SseEventSender sender) {
+                                    String runId, ModelRef modelRef, SseEventSender sender,
+                                    String effectiveSessionId) {
         SseEventSender effectiveSender = sender != null ? sender : new SseEventSender(null, objectMapper);
         SkillExecutionGate gate = new SkillExecutionGate(false);
         ToolCallback skillTool = new SkillToolCallback(

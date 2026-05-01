@@ -1,7 +1,6 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Bot, Paperclip, X } from "lucide-react";
+import { Bot, History, Paperclip, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SPINNER_VERBS } from "@/lib/spinnerVerbs";
 import {
@@ -45,13 +44,15 @@ type Props = {
     attachments?: ChatAttachment[];
   }) => void;
   onNewSession: () => void;
+  /** Toggle the session-history popover (rendered by the parent so the popover
+   *  can be anchored relative to the chat panel layout). */
+  onShowHistory?: () => void;
+  /** Cancel an in-flight stream. When provided AND isSending is true, the Send
+   *  button slot in the composer renders a Stop button instead. */
+  onCancelStream?: () => void;
   className?: string;
   isSending?: boolean;
-  onCompile?: () => void;
-  canCompile?: boolean;
-  isCompiling?: boolean;
-  compileLabel?: string;
-  onResendMessage?: (content: string) => void;
+  onResendMessage?: (content: string, messageId: string) => void;
 };
 
 const ALLOWED_EXTENSIONS = new Set([
@@ -73,12 +74,10 @@ export default function ToolChainConfigChatPanel({
   answerPending,
   onSend,
   onNewSession,
+  onShowHistory,
+  onCancelStream,
   className,
   isSending,
-  onCompile,
-  canCompile,
-  isCompiling,
-  compileLabel,
   onResendMessage,
 }: Props) {
   const [input, setInput] = useState("");
@@ -92,25 +91,41 @@ export default function ToolChainConfigChatPanel({
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Auto-grow the textarea up to a 7-line cap. Beyond that, content scrolls
+  // inside the textarea instead of pushing the composer / Send button down.
+  // The cap (~140px) plays nicely with the chat-panel layout.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(el.scrollHeight, 140);
+    el.style.height = `${next}px`;
+  }, [input]);
   const currentSpinnerVerb = SPINNER_VERBS[spinnerVerbIndex % SPINNER_VERBS.length] || "Thinking";
 
   useEffect(() => {
     if (!isSending) return;
     const intervalId = window.setInterval(() => {
-      setSpinnerVerbIndex((prev) => (prev + 1) % SPINNER_VERBS.length);
+      setSpinnerVerbIndex((prev) => {
+        if (SPINNER_VERBS.length <= 1) return 0;
+        // Pick a random index that's NOT the current one so the verb visibly changes
+        // instead of cycling sequentially through the list.
+        let next = Math.floor(Math.random() * SPINNER_VERBS.length);
+        if (next === prev) next = (next + 1) % SPINNER_VERBS.length;
+        return next;
+      });
     }, 1250);
     return () => window.clearInterval(intervalId);
   }, [isSending]);
 
-  const hasAnyAssistantContent = useMemo(
-    () =>
-      messages.some(
-        (m) => m.type === "assistant" && (Boolean(String(m.content || "").trim()) || Boolean(m.isStreaming))
-      ),
-    [messages]
-  );
   const hasPendingInteraction = pendingInteractions.length > 0 || Boolean(pendingQuestion);
-  const showThinkingHint = Boolean(isSending) && !hasPendingInteraction && !hasAnyAssistantContent;
+  // Show the cycling spinner whenever a turn is in flight, regardless of past
+  // assistant messages. Prior failed/successful turns shouldn't suppress the
+  // current turn's "thinking" indicator (e.g. during a long read/apply_patch
+  // window where no new assistant text has streamed yet).
+  const showThinkingHint = Boolean(isSending) && !hasPendingInteraction;
 
   const renderItems = useMemo(() => buildRenderItems(messages), [messages]);
   const isStreamingAny = messages.some((m) => m.isStreaming);
@@ -185,7 +200,7 @@ export default function ToolChainConfigChatPanel({
         onMouseEnter={() => setHoveredMsgId(m.id)}
         onMouseLeave={() => setHoveredMsgId(null)}
         onCopy={() => copyMessage(m.id, m.content)}
-        onResend={() => onResendMessage?.(m.content)}
+        onResend={() => onResendMessage?.(m.content, m.id)}
         onStartEdit={() => {
           setEditingMessageId(m.id);
           setEditDraft(m.content);
@@ -194,7 +209,7 @@ export default function ToolChainConfigChatPanel({
         onChangeEditDraft={setEditDraft}
         onSubmitEdit={() => {
           if (!editDraft.trim()) return;
-          onResendMessage?.(editDraft.trim());
+          onResendMessage?.(editDraft.trim(), m.id);
           setEditingMessageId(null);
         }}
       />
@@ -253,18 +268,27 @@ export default function ToolChainConfigChatPanel({
           <Bot size={14} className="text-[#123262]" />
           <h3 className="truncate text-sm font-semibold text-[#123262]">AI Configuration Chat</h3>
         </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={onNewSession}>
-            New Session
-          </Button>
-          <Button
-            size="sm"
-            className="h-8 bg-[#7FADE2] px-3 text-xs text-white hover:bg-[#6A9BD7]"
-            onClick={onCompile}
-            disabled={!canCompile || isCompiling}
+        <div className="flex items-center gap-1">
+          {onShowHistory ? (
+            <button
+              type="button"
+              aria-label="Session history"
+              title="Session history"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              onClick={onShowHistory}
+            >
+              <History size={14} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="New session"
+            title="New session"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            onClick={onNewSession}
           >
-            {isCompiling ? "Compiling..." : (compileLabel || "Compile Version")}
-          </Button>
+            <Plus size={14} />
+          </button>
         </div>
       </div>
 
@@ -301,28 +325,55 @@ export default function ToolChainConfigChatPanel({
             ))}
           </div>
         ) : null}
-        <div className="flex items-center gap-2">
+        <div className="flex items-end gap-2">
           <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onSelectAttachments} />
-          <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" onClick={() => fileInputRef.current?.click()}>
-            <Paperclip size={12} className="mr-1" />
-            Attach
-          </Button>
-          <Input
+          <button
+            type="button"
+            aria-label="Attach files"
+            title="Attach files"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Paperclip size={14} />
+          </button>
+          <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask AI to build or refine this ToolChain..."
-            className="h-8 text-xs"
+            rows={1}
+            className="min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-slate-200 bg-transparent px-3 py-1.5 text-xs leading-5 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-300"
+            style={{ minHeight: "32px", maxHeight: "140px" }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") submitMessage();
+              // Enter sends; Shift+Enter inserts a newline.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitMessage();
+              }
             }}
           />
-          <Button
-            className="bg-[#7FADE2] px-5 text-white hover:bg-[#6A9BD7]"
-            onClick={submitMessage}
-            disabled={isSending || isStreamingAny || (!input.trim() && attachments.length === 0)}
-          >
-            Send
-          </Button>
+          {onCancelStream && isSending ? (
+            <button
+              type="button"
+              aria-label="Stop streaming"
+              title="Stop streaming"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-300 bg-red-50 text-red-600 hover:bg-red-100"
+              onClick={onCancelStream}
+            >
+              <Square size={12} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              aria-label="Send"
+              title="Send"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#7FADE2] text-white hover:bg-[#6A9BD7] disabled:opacity-50"
+              onClick={submitMessage}
+              disabled={isSending || isStreamingAny || (!input.trim() && attachments.length === 0)}
+            >
+              <SendHorizontal size={14} />
+            </button>
+          )}
         </div>
       </div>
     </div>

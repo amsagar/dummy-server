@@ -86,7 +86,9 @@ export default function ChatPage() {
   const [editingMsgIdx, setEditingMsgIdx] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [spinnerVerbIndex, setSpinnerVerbIndex] = useState(0);
+  const [spinnerVerbIndex, setSpinnerVerbIndex] = useState(() =>
+    Math.floor(Math.random() * SPINNER_VERBS.length)
+  );
   const isStreamingRef = useRef(false);
   const assistantAddedRef = useRef(false);
   const skipNextHydrationRef = useRef(false);
@@ -141,7 +143,12 @@ export default function ChatPage() {
   useEffect(() => {
     if (!isStreaming) return;
     const intervalId = window.setInterval(() => {
-      setSpinnerVerbIndex((prev) => (prev + 1) % SPINNER_VERBS.length);
+      setSpinnerVerbIndex((prev) => {
+        if (SPINNER_VERBS.length <= 1) return 0;
+        let next = Math.floor(Math.random() * SPINNER_VERBS.length);
+        if (next === prev) next = (next + 1) % SPINNER_VERBS.length;
+        return next;
+      });
     }, 1250);
     return () => window.clearInterval(intervalId);
   }, [isStreaming]);
@@ -390,6 +397,8 @@ export default function ChatPage() {
           content = payload.question || payload.prompt || questionFromNested || '';
         } else if (e.eventType === 'approval_required') {
           content = payload.reason || '';
+        } else if (e.eventType === 'toolchain.run.bound') {
+          content = `ToolChain run #${String(payload.runId || '').slice(0, 8)}`;
         } else {
           return null as any;
         }
@@ -766,8 +775,34 @@ export default function ChatPage() {
           case 'plan.created':
             break;
           case 'task.started':
+            // ToolChain runtime emits one task.started per node. Render as a system
+            // chip so the user sees the chain's nodes execute live in the chat.
+            if (ev.taskName || ev.taskId) {
+              appendSystemMessage('task.started', `Running node: ${ev.taskName || ev.taskId}`, undefined, {
+                taskId: ev.taskId,
+                taskName: ev.taskName,
+              });
+            }
             break;
           case 'task.done':
+            if (ev.taskName || ev.taskId) {
+              appendSystemMessage('task.done', `Node completed: ${ev.taskName || ev.taskId}`, undefined, {
+                taskId: ev.taskId,
+                taskName: ev.taskName,
+                status: ev.result,
+              });
+            }
+            break;
+          case 'toolchain.run.bound':
+            appendSystemMessage('toolchain.run.bound',
+              `ToolChain run #${String(ev.runId || '').slice(0, 8)}`,
+              undefined,
+              {
+                toolChainId: ev.toolChainId,
+                runId: ev.runId,
+                version: ev.version,
+                status: ev.status,
+              });
             break;
           case 'step.started':
           case 'step.finished':

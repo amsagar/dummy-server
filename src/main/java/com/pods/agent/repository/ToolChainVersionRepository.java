@@ -67,6 +67,29 @@ public class ToolChainVersionRepository {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
+    public Optional<ToolChainVersion> findLatestDraft(String toolChainId) {
+        var rows = namedJdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_LATEST_DRAFT"),
+                new MapSqlParameterSource().addValue("toolChainId", toolChainId),
+                (rs, n) -> map(rs));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    /**
+     * Update an unpublished version row in place. No-op if the row is published —
+     * the WHERE clause guards against accidental mutation of immutable releases.
+     */
+    public void updateDraft(ToolChainVersion version) {
+        namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.UPDATE_DRAFT"), new MapSqlParameterSource()
+                .addValue("id", version.getId())
+                .addValue("graphJson", version.getGraphJson())
+                .addValue("inputSchema", version.getInputSchema())
+                .addValue("outputSchema", version.getOutputSchema())
+                .addValue("responseMode", version.getResponseMode())
+                .addValue("synthesisPrompt", version.getSynthesisPrompt())
+                .addValue("intentsJson", version.getIntentsJson())
+                .addValue("ragConfigJson", version.getRagConfigJson()));
+    }
+
     public void publish(String versionId, String toolChainId) {
         namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.UNPUBLISH_CHAIN"),
                 new MapSqlParameterSource().addValue("toolChainId", toolChainId));

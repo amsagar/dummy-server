@@ -187,7 +187,17 @@ export default function ToolChainsPage() {
               onClick={() => navigate(`/toolchains/${row.id}/designer`)}
             >
               <TableCell className="font-medium">{row.name}</TableCell>
-              <TableCell>{toTitleCase(String(row.status || "—"))}</TableCell>
+              <TableCell>
+                {row.publishedVersion ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                    Published v{row.publishedVersion}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-600">
+                    {toTitleCase(String(row.status || "Draft"))}
+                  </span>
+                )}
+              </TableCell>
               <TableCell>{row.currentVersion || "—"}</TableCell>
               <TableCell>{toTitleCase(responseModeByToolChainId.get(row.id) || "—")}</TableCell>
               <TableCell className="max-w-[420px] truncate">{row.description || "—"}</TableCell>

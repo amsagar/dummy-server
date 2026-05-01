@@ -38,6 +38,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
@@ -356,8 +358,8 @@ public class ToolChainConfigChatService {
         }
 
         session.setLatestArtifactJson(toJson(artifact));
-        if (session.getTitle() == null || session.getTitle().isBlank()) {
-            session.setTitle(deriveTitle(artifact));
+        if (shouldAutoUpdateTitle(session)) {
+            session.setTitle(deriveTitle(session, artifact));
         }
         sessionRepository.update(session);
         return getSessionDetail(resolvedToolChainId, session.getId());
@@ -369,12 +371,24 @@ public class ToolChainConfigChatService {
                                     String userId) {
         CompletableFuture.runAsync(() -> {
             SseEventSender sender = new SseEventSender(emitter, objectMapper);
+            String registeredSessionId = null;
             try {
                 String resolvedToolChainId = resolveToolChainId(toolChainId, request, userId);
                 ToolChainConfigSession session = resolveSession(resolvedToolChainId, request, userId);
                 persistIncomingUserMessage(session, request);
 
                 String sessionId = session.getId();
+                // Register this stream so a later POST /stream/{sessionId}/stop can complete
+                // the emitter and unblock any pending HITL futures. Removed in the finally
+                // block below so a clean completion doesn't leak a map entry.
+                StreamHandle handle = new StreamHandle(emitter, new java.util.concurrent.atomic.AtomicBoolean(false));
+                activeStreams.put(sessionId, handle);
+                registeredSessionId = sessionId;
+                final String finalSessionId = sessionId;
+                emitter.onCompletion(() -> activeStreams.remove(finalSessionId, handle));
+                emitter.onTimeout(() -> activeStreams.remove(finalSessionId, handle));
+                emitter.onError(t -> activeStreams.remove(finalSessionId, handle));
+                sender.setCancelledPredicate(handle.cancelled()::get);
                 String emittedToolChainId = resolvedToolChainId;
                 sender.sendConnected(session.getId());
                 sender.send(new LinkedHashMap<>(Map.of(
@@ -613,9 +627,42 @@ public class ToolChainConfigChatService {
             } catch (Exception e) {
                 sender.sendError(e.getMessage() == null ? "ToolChain config stream failed" : e.getMessage());
                 sender.complete();
+            } finally {
+                if (registeredSessionId != null) {
+                    activeStreams.remove(registeredSessionId);
+                }
             }
         });
     }
+
+    /**
+     * Cancel an in-flight stream for the given config session. Sets the cancellation
+     * flag so SseEventSender stops emitting, completes the emitter to drop the HTTP
+     * connection, and resolves any blocking HITL futures so the worker can unwind.
+     * Returns true if a stream was found and cancelled.
+     */
+    public boolean cancelStream(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return false;
+        StreamHandle handle = activeStreams.remove(sessionId);
+        if (handle == null) return false;
+        handle.cancelled().set(true);
+        // Wake any awaitReply() futures so the worker thread unwinds.
+        try {
+            pendingInteractionService.cancelBySession("toolchain-config-" + sessionId);
+        } catch (Exception ignored) {
+        }
+        try {
+            handle.emitter().complete();
+        } catch (Exception ignored) {
+        }
+        log.info("[ToolChainConfigChatService] Cancelled stream for session {}", sessionId);
+        return true;
+    }
+
+    private record StreamHandle(SseEmitter emitter, java.util.concurrent.atomic.AtomicBoolean cancelled) {}
+
+    private final java.util.concurrent.ConcurrentMap<String, StreamHandle> activeStreams =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public Map<String, Object> replyToPendingStream(String toolChainId,
                                                     String sessionId,
@@ -851,6 +898,32 @@ public class ToolChainConfigChatService {
                 .build());
     }
 
+    /**
+     * Read the architect-edited graph file back from the per-session workspace. Returns the
+     * raw JSON text (validated as parseable) or null if the file is absent / unreadable /
+     * contains invalid JSON. The caller treats null as "no VFS edit happened, fall back to
+     * the model's JSON response".
+     */
+    private String readGraphJsonFromWorkspace(ToolChainConfigSession session) {
+        if (session == null) return null;
+        try {
+            String runtimeSessionId = "toolchain-config-" + session.getId();
+            Path workspace = sessionWorkspaceService.get(runtimeSessionId);
+            if (workspace == null) return null;
+            Path file = workspace.resolve(".pods-agent/toolchain.json").normalize();
+            if (!file.startsWith(workspace) || !Files.exists(file)) return null;
+            String raw = Files.readString(file).trim();
+            if (raw.isBlank()) return null;
+            // Guard against half-applied / malformed edits — only accept parseable JSON.
+            Map<String, Object> parsed = readMap(raw);
+            if (parsed.isEmpty()) return null;
+            return raw;
+        } catch (Exception e) {
+            log.warn("[ToolChainConfigChatService] Failed reading edited graph file: {}", e.getMessage());
+            return null;
+        }
+    }
+
     private String buildDesignerRuntimeInput(String toolChainId,
                                              ToolChainConfigSession session,
                                              ToolChainDtos.ToolChainConfigChatRequest request) {
@@ -866,6 +939,105 @@ public class ToolChainConfigChatService {
         if (userInput == null || userInput.isBlank()) {
             userInput = "Continue designing the ToolChain draft.";
         }
+
+        // VFS-edit mode: when an existing graph is present, seed the workspace with the graph
+        // file and tell the architect to mutate it via read/edit/apply_patch instead of
+        // re-emitting the entire JSON. Cuts output tokens ~95% on small edits and preserves
+        // node ids (which the flow board uses to keep manual layout positions).
+        // A *new* session on a published chain has an empty session.latestArtifactJson, so we
+        // also fall back to the chain's currently-published version's graphJson — otherwise
+        // every fresh session on an existing chain would re-create the graph from scratch.
+        String currentGraphJson = stringValue(artifact.get("graphJson"));
+        if (currentGraphJson.isBlank() && toolChainId != null && !toolChainId.isBlank()) {
+            try {
+                ToolChain chain = toolChainService.getRequired(toolChainId);
+                Integer activeVersion = chain.getCurrentVersion();
+                if (activeVersion != null) {
+                    String publishedGraph = toolChainService
+                            .resolveVersion(toolChainId, activeVersion)
+                            .map(ToolChainVersion::getGraphJson)
+                            .orElse(null);
+                    if (publishedGraph != null && !publishedGraph.isBlank()) {
+                        currentGraphJson = publishedGraph;
+                        // Seed the session's artifact too so subsequent turns and refetches
+                        // see the working graph; otherwise the runtime would think the session
+                        // is empty and miss the graph in the response payload.
+                        artifact.put("graphJson", publishedGraph);
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[ToolChainConfigChatService] Could not load published graph for edit-mode seeding: {}",
+                        e.getMessage());
+            }
+        }
+        boolean editMode = !currentGraphJson.isBlank();
+        if (editMode) {
+            String runtimeSessionId = "toolchain-config-" + session.getId();
+            Path workspace = sessionWorkspaceService.get(runtimeSessionId);
+            if (workspace == null) {
+                workspace = sessionWorkspaceService.getOrCreate(runtimeSessionId);
+            }
+            try {
+                Map<String, Object> graphObj = readMap(currentGraphJson);
+                String pretty = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(graphObj);
+                sessionWorkspaceService.writeText(workspace, ".pods-agent/toolchain.json", pretty);
+            } catch (Exception e) {
+                log.warn("[ToolChainConfigChatService] Failed seeding edit-mode workspace file: {}", e.getMessage());
+            }
+            return """
+ToolChain designer EDIT request.
+The current ToolChain graph is on disk at `.pods-agent/toolchain.json` (pretty-printed JSON).
+
+Use the `read`, `edit`, and `apply_patch` tools to modify the graph SURGICALLY.
+- ALWAYS `read` the file first to see the current state — every turn, even if you
+  read it last turn. The file may have been changed since.
+- For a single string replacement (rename one label, change one argMappings entry),
+  call `edit` with `path`, `old_text`, `new_text`. `old_text` must match the file
+  byte-for-byte (including indentation) and must be unique.
+- For multi-spot edits (add a node + its edges, change several labels in one shot),
+  call `apply_patch` with one or more hunks in this format inside `content`:
+
+      <<<<<<< ORIGINAL
+      <exact existing text>
+      =======
+      <replacement text>
+      >>>>>>> UPDATED
+
+  ORIGINAL must match the file exactly. Mismatched hunks reject the whole patch.
+- PRESERVE every existing node id — only rename if the user explicitly asks. Node ids
+  are how the flow board keeps user-dragged positions; a renamed id loses that layout.
+- PRESERVE labels, descriptions, and config of nodes the user did not ask to change.
+- When ADDING a node, append to the `nodes` array AND add the matching edges
+  (start → newNode and newNode → synthesis are typical for parallel-fetch chains).
+- When REMOVING a node, remove from `nodes` AND delete every edge that references it.
+- Do NOT `write` the entire file unless the user explicitly asked for a ground-up rewrite.
+
+After your file edits, return ONLY this JSON in your assistant text — do NOT include
+`artifactPatch.graphJson`. The runtime reads the graph back from the file you edited:
+
+{
+  "assistantMessage": "1-2 sentences naming what changed (e.g. 'Renamed Get POET Timestamps label to POET Timestamps').",
+  "nextQuestion": null,
+  "responseMode": "<keep current unless the user asked otherwise>",
+  "synthesisPrompt": "<keep current unless the user asked otherwise>",
+  "intents": ["..."],
+  "inputSchema": {"type":"object"},
+  "outputSchema": {"type":"object"},
+  "ragConfig": {}
+}
+
+If the user's request is ambiguous, do NOT edit the file — emit `nextQuestion` only and
+the runtime will ask the user. Your file edits commit immediately, so be sure first.
+
+ToolChain context:
+%s
+
+Designer instruction:
+%s
+""".formatted(toJson(contextBundle), userInput.trim());
+        }
+
+        // Creation mode (initial draft, no existing graph) — full-JSON contract is fine here.
         return """
 ToolChain designer request payload.
 You must either return a reviewable English plan or a clarification question.
@@ -921,10 +1093,48 @@ Designer instruction:
         Map<String, Object> parsed = readMap(parsedJson);
         Map<String, Object> patch = readMap(parsed.get("artifactPatch"));
 
+        // VFS-edit round-trip: if the architect just edited the on-disk graph file via the
+        // read/edit/apply_patch tools, prefer that over any artifactPatch.graphJson in the
+        // response. In edit mode the response also carries side fields at the top level
+        // (responseMode, synthesisPrompt, schemas, intents, ragConfig) — promote them into
+        // the patch so applyArtifactPatch handles them uniformly.
+        String graphFromFile = readGraphJsonFromWorkspace(session);
+        boolean appliedFromFile = false;
+        if (graphFromFile != null && !graphFromFile.isBlank()) {
+            if (patch == null || patch.isEmpty()) {
+                patch = new LinkedHashMap<>();
+            } else {
+                patch = new LinkedHashMap<>(patch);
+            }
+            patch.put("graphJson", graphFromFile);
+            for (String key : List.of("responseMode", "synthesisPrompt", "intents",
+                                       "inputSchema", "outputSchema", "ragConfig")) {
+                if (parsed.containsKey(key) && !patch.containsKey(key)) {
+                    patch.put(key, parsed.get(key));
+                }
+            }
+            appliedFromFile = true;
+        }
+
+        // Edit-mode direct commit: when this is an edit on an already-published chain
+        // (currentVersion != null), the user typed a clear edit instruction ("rename X
+        // to Y") and we round-tripped through the file — there is nothing to "approve"
+        // a second time. Apply graphJson straight to the artifact and skip the
+        // proposalDecision gate so the flow board updates the moment the stream ends.
+        boolean editModeDirectCommit = false;
+        if (appliedFromFile && toolChainId != null && !toolChainId.isBlank()) {
+            try {
+                ToolChain chain = toolChainService.getRequired(toolChainId);
+                editModeDirectCommit = chain.getCurrentVersion() != null;
+            } catch (Exception ignored) {
+                editModeDirectCommit = false;
+            }
+        }
+
         String assistantText = firstNonBlank(
                 stringValue(parsed.get("assistantMessage")),
                 stringValue(parsed.get("plan")),
-                rawResponse
+                appliedFromFile ? "ToolChain updated." : rawResponse
         );
         if (assistantText == null) assistantText = "";
         boolean persistAssistantBubble = true;
@@ -952,6 +1162,28 @@ Designer instruction:
                 );
             }
             artifact.remove("pendingArtifactPatch");
+        } else if (editModeDirectCommit && !patch.isEmpty()) {
+            // Edits to an existing published chain: commit immediately. No approval card.
+            applyArtifactPatch(artifact, patch);
+            artifact.remove("pendingArtifactPatch");
+            artifact.put("phase", "clarifying");
+            artifact.put("requirementsComplete", true);
+            // Marker for refreshRequirementFlags so the flag survives recomputation in a
+            // fresh edit session that lacks the creation-ladder dimensions.
+            artifact.put("editCommitted", true);
+            session.setPendingQuestionJson("{}");
+            session.setStatus("draft");
+            // Materialise the edit as a versioned draft row so the Versions panel
+            // shows the in-flight changes and the user has an audit trail to publish
+            // or roll back to. Reuses any existing unpublished draft head — only
+            // creates a new version row on the FIRST edit after a publish.
+            try {
+                String userId = UserContextHolder.currentUserId();
+                ToolChainDtos.ToolChainVersionRequest req = buildVersionRequestFromArtifact(artifact);
+                toolChainService.upsertDraftVersion(toolChainId, req, userId);
+            } catch (Exception e) {
+                log.warn("[ToolChainConfigChatService] Failed to upsert draft version after edit: {}", e.getMessage());
+            }
         } else {
             if (!patch.isEmpty()) {
                 Map<String, Object> clarificationGateQuestion = buildClarificationGateQuestion(session);
@@ -1014,8 +1246,8 @@ Designer instruction:
 
         artifact.remove("contextBundle");
         session.setLatestArtifactJson(toJson(artifact));
-        if (session.getTitle() == null || session.getTitle().isBlank()) {
-            session.setTitle(deriveTitle(artifact));
+        if (shouldAutoUpdateTitle(session)) {
+            session.setTitle(deriveTitle(session, artifact));
         }
         sessionRepository.update(session);
         return getSessionDetail(toolChainId, session.getId());
@@ -1479,11 +1711,41 @@ Designer instruction:
                 .metadataJson("{}")
                 .build());
         session.setLatestArtifactJson(toJson(artifact));
-        if (session.getTitle() == null || session.getTitle().isBlank()) {
-            session.setTitle(deriveTitle(artifact));
+        if (shouldAutoUpdateTitle(session)) {
+            session.setTitle(deriveTitle(session, artifact));
         }
         sessionRepository.update(session);
         return getSessionDetail(toolChainId, session.getId());
+    }
+
+    /**
+     * Truncate-and-resend support: delete the target message AND every message in the session
+     * with a createdAt &gt;= the target's. Used by the frontend's "edit & resend" UI to rewind
+     * the conversation back to the user's edit point.
+     */
+    public Map<String, Object> truncateFromMessage(String toolChainId, String sessionId, String messageId) {
+        if (messageId == null || messageId.isBlank()) {
+            throw new IllegalArgumentException("messageId is required");
+        }
+        ToolChainConfigSession session = requireSession(toolChainId, sessionId);
+        ToolChainConfigMessage target = messageRepository.findById(messageId)
+                .orElseThrow(() -> new IllegalArgumentException("Message not found: " + messageId));
+        if (!sessionId.equals(target.getSessionId())) {
+            throw new IllegalArgumentException("Message does not belong to this session");
+        }
+        int removed = messageRepository.deleteFromTime(sessionId, target.getCreatedAt());
+        // Truncating the conversation invalidates any in-flight clarification — clear it.
+        session.setPendingQuestionJson("{}");
+        if ("clarification_required".equalsIgnoreCase(session.getStatus())) {
+            session.setStatus("draft");
+        }
+        sessionRepository.update(session);
+        return Map.of(
+                "sessionId", sessionId,
+                "toolChainId", toolChainId,
+                "removed", removed,
+                "fromCreatedAt", target.getCreatedAt()
+        );
     }
 
     public Map<String, Object> compileToVersion(String toolChainId, String sessionId, String userId) {
@@ -1562,6 +1824,16 @@ Designer instruction:
         ToolChainDtos.ToolChainVersionRequest req = buildVersionRequestFromArtifact(normalized);
         var version = toolChainService.createVersion(toolChainId, req, userId);
         toolChainService.publishVersion(toolChainId, version.getVersion());
+        // After publish, refresh the chain row's display Name + Description from the
+        // artifact the architect just compiled — otherwise the listing keeps echoing
+        // the user's first prompt twice.
+        try {
+            String chainName = deriveChainName(toolChainId, normalized);
+            String chainDescription = deriveChainDescription(normalized);
+            toolChainService.updateMetadata(toolChainId, chainName, chainDescription);
+        } catch (Exception e) {
+            log.warn("[ToolChainConfigChatService] Failed to update chain metadata after publish: {}", e.getMessage());
+        }
         normalized.put("phase", "completed");
         normalized.put("proposalAccepted", true);
         normalized.put("acceptedAt", System.currentTimeMillis());
@@ -1738,9 +2010,11 @@ Designer instruction:
         }
         Map<String, Object> bootstrapArtifact = defaultArtifact();
         bootstrapArtifact.put("contextBundle", loadContextBundle(toolChainId, bootstrapArtifact));
+        // Title intentionally left null — deriveTitle fills it from the first user
+        // message on the next turn. The frontend renders an "Untitled draft"
+        // placeholder for the brief window before that first message arrives.
         ToolChainConfigSession created = ToolChainConfigSession.builder()
                 .toolChainId(toolChainId)
-                .title("New ToolChain Session")
                 .status("draft")
                 .latestArtifactJson(toJson(bootstrapArtifact))
                 .pendingQuestionJson("{}")
@@ -2697,12 +2971,142 @@ Designer instruction:
         }
     }
 
-    private String deriveTitle(Map<String, Object> artifact) {
+    private String deriveTitle(ToolChainConfigSession session, Map<String, Object> artifact) {
         Object titleHint = artifact.get("titleHint");
-        if (titleHint != null && !String.valueOf(titleHint).isBlank()) return String.valueOf(titleHint);
+        if (titleHint != null && !String.valueOf(titleHint).isBlank()) {
+            return truncateTitle(String.valueOf(titleHint));
+        }
+        // First user message — strongest signal that fires on turn 1, before the
+        // architect has produced any intents.
+        if (session != null && session.getId() != null) {
+            try {
+                List<ToolChainConfigMessage> rows = messageRepository.findBySessionId(session.getId());
+                for (ToolChainConfigMessage m : rows) {
+                    if (!"user".equalsIgnoreCase(m.getRole())) continue;
+                    String c = m.getContent();
+                    if (c == null || c.isBlank()) continue;
+                    return toTitleCase(truncateTitle(c.trim()));
+                }
+            } catch (Exception ignored) {
+            }
+        }
         List<String> intents = readStringList(artifact.get("intents"));
-        if (!intents.isEmpty()) return "Session: " + intents.get(0);
-        return "ToolChain config session";
+        if (!intents.isEmpty()) return toTitleCase(truncateTitle(intents.get(0)));
+        return "Untitled draft";
+    }
+
+    private static String truncateTitle(String raw) {
+        String collapsed = raw.replaceAll("\\s+", " ").trim();
+        if (collapsed.length() <= 60) return collapsed;
+        return collapsed.substring(0, 60).trim() + "…";
+    }
+
+    private static String toTitleCase(String raw) {
+        if (raw == null || raw.isBlank()) return raw;
+        String[] words = raw.trim().split("\\s+");
+        StringBuilder sb = new StringBuilder();
+        for (String w : words) {
+            if (w.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(Character.toUpperCase(w.charAt(0)));
+            if (w.length() > 1) sb.append(w.substring(1));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Whether deriveTitle should overwrite this session's title. We respect
+     * any user-set title (rename API), so we only refresh when the field is
+     * empty or still carries a known auto-generated placeholder.
+     */
+    private boolean shouldAutoUpdateTitle(ToolChainConfigSession session) {
+        if (session == null) return false;
+        String t = session.getTitle();
+        if (t == null || t.isBlank()) return true;
+        String trimmed = t.trim();
+        return "New ToolChain Session".equalsIgnoreCase(trimmed)
+                || "Untitled session".equalsIgnoreCase(trimmed)
+                || "Untitled draft".equalsIgnoreCase(trimmed)
+                || "ToolChain config session".equalsIgnoreCase(trimmed);
+    }
+
+    /**
+     * Pick a human-readable Name for a published ToolChain row from the artifact
+     * the architect just produced. Used by publishFromArtifact so the row in the
+     * ToolChains list reads like "Order Validation Pipeline" instead of echoing
+     * the user's first prompt twice.
+     */
+    private String deriveChainName(String toolChainId, Map<String, Object> artifact) {
+        Object titleHint = artifact.get("titleHint");
+        if (titleHint != null && !String.valueOf(titleHint).isBlank()) {
+            return truncateTitle(String.valueOf(titleHint));
+        }
+        List<String> intents = readStringList(artifact.get("intents"));
+        if (!intents.isEmpty()) {
+            return toTitleCase(truncateTitle(intents.get(0))) + " " + structuralSuffix(artifact);
+        }
+        if (toolChainId != null && !toolChainId.isBlank()) {
+            try {
+                String existing = toolChainService.getRequired(toolChainId).getName();
+                if (existing != null && !existing.isBlank()) {
+                    return toTitleCase(truncateTitle(existing));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return "Untitled ToolChain";
+    }
+
+    /**
+     * Pick a one-line Description for a published ToolChain row. Prefers the
+     * architect's own graphJson.description; falls back to proposalSummary
+     * (the architect's assistantMessage on the approval card) and finally to
+     * a structural sentence derived from the graph + responseMode.
+     */
+    private String deriveChainDescription(Map<String, Object> artifact) {
+        Map<String, Object> graph = readMap(artifact.get("graphJson"));
+        Object graphDesc = graph.get("description");
+        if (graphDesc != null && !String.valueOf(graphDesc).isBlank()) {
+            return truncateDescription(String.valueOf(graphDesc));
+        }
+        Object proposalSummary = artifact.get("proposalSummary");
+        if (proposalSummary != null && !String.valueOf(proposalSummary).isBlank()) {
+            return truncateDescription(String.valueOf(proposalSummary));
+        }
+        int toolNodes = 0;
+        boolean hasSynthesis = false;
+        for (Map<String, Object> node : readMapList(graph.get("nodes"))) {
+            String type = stringValue(node.get("type")).toLowerCase(Locale.ROOT);
+            if ("tool".equals(type) || "mcp_tool".equals(type)) toolNodes++;
+            if ("synthesis".equals(type)) hasSynthesis = true;
+        }
+        String mode = stringValue(artifact.getOrDefault("responseMode", "hybrid"));
+        if (toolNodes == 0) return "ToolChain (responseMode=" + mode + ").";
+        return (toolNodes > 1 ? "Parallel" : "Single-tool")
+                + " fetch of " + toolNodes + " tool" + (toolNodes == 1 ? "" : "s")
+                + (hasSynthesis ? " followed by synthesis" : "")
+                + " (responseMode=" + mode + ").";
+    }
+
+    private String structuralSuffix(Map<String, Object> artifact) {
+        Map<String, Object> graph = readMap(artifact.get("graphJson"));
+        int toolNodes = 0;
+        boolean hasSynthesis = false;
+        for (Map<String, Object> node : readMapList(graph.get("nodes"))) {
+            String type = stringValue(node.get("type")).toLowerCase(Locale.ROOT);
+            if ("tool".equals(type) || "mcp_tool".equals(type)) toolNodes++;
+            if ("synthesis".equals(type)) hasSynthesis = true;
+        }
+        if (toolNodes >= 2 && hasSynthesis) return "Pipeline";
+        if (toolNodes >= 2) return "Workflow";
+        if (toolNodes == 1) return "Lookup";
+        return "ToolChain";
+    }
+
+    private static String truncateDescription(String raw) {
+        String collapsed = raw.replaceAll("\\s+", " ").trim();
+        if (collapsed.length() <= 280) return collapsed;
+        return collapsed.substring(0, 280).trim() + "…";
     }
 
     private String latestAssistantMessage(Map<String, Object> detail) {
@@ -2917,6 +3321,14 @@ Designer instruction:
             String phase = stringValue(artifact.get("phase"));
             boolean hasGraph = !stringValue(artifact.get("graphJson")).isBlank();
             if (hasGraph && Set.of("awaiting_approval", "proposal_ready", "completed").contains(phase)) {
+                requirementsComplete = true;
+            }
+            // Edit-mode on a published chain: a fresh config session won't have any of the
+            // creation-ladder fields (workflowIntent / responseModeAsked / approvalPolicy)
+            // because the user didn't go through the creation flow — they're just editing.
+            // The graph itself is the proof of completeness, so keep the flag true once a
+            // direct edit-commit has set it.
+            if (!requirementsComplete && hasGraph && Boolean.TRUE.equals(artifact.get("editCommitted"))) {
                 requirementsComplete = true;
             }
         }

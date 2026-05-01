@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -178,7 +179,8 @@ public class ToolExecutionService {
                 case "glob" -> fsGlob(args);
                 case "grep" -> fsGrep(args);
                 case "write" -> fsWrite(args, false);
-                case "edit", "apply_patch" -> fsWrite(args, true);
+                case "edit" -> fsEdit(args);
+                case "apply_patch" -> fsApplyPatch(args);
                 default -> new ExecutionResult(false, null, "Unsupported filesystem tool: " + tool.getName());
             };
         } catch (Exception e) {
@@ -435,7 +437,10 @@ public class ToolExecutionService {
         Path path = safePath(stringArg(args, "path", null));
         if (!Files.exists(path)) return new ExecutionResult(false, null, "File not found");
         String content = Files.readString(path);
-        return new ExecutionResult(true, truncate(content, 4000), null);
+        // 64KB budget — apply_patch needs the full file so the model can produce
+        // exact-match ORIGINAL blocks. Truncating at 4KB silently breaks edit cycles
+        // for any non-trivial JSON document.
+        return new ExecutionResult(true, truncate(content, 65536), null);
     }
 
     private ExecutionResult fsGlob(Map<String, Object> args) throws IOException {
@@ -493,6 +498,119 @@ public class ToolExecutionService {
         if (path.getParent() != null) Files.createDirectories(path.getParent());
         Files.writeString(path, content, StandardCharsets.UTF_8);
         return new ExecutionResult(true, "ok", null);
+    }
+
+    /**
+     * Surgical string-replacement edit on an existing file.
+     * - With (old_text, new_text): replaces a single occurrence of old_text. Refuses if
+     *   old_text appears 0 times (nothing to edit) or >1 times (ambiguous).
+     * - With (content) only: full-file rewrite, kept for backwards-compat with callers
+     *   that always pass the entire new file body.
+     */
+    private ExecutionResult fsEdit(Map<String, Object> args) throws IOException {
+        Path path = safePath(stringArg(args, "path", null));
+        if (!Files.exists(path)) {
+            return new ExecutionResult(false, null, "Target file does not exist for edit");
+        }
+        String oldText = firstNonNull(stringArg(args, "old_text", null), stringArg(args, "old_string", null));
+        String newText = firstNonNull(stringArg(args, "new_text", null), stringArg(args, "new_string", null));
+        if (oldText != null) {
+            if (newText == null) newText = "";
+            String body = Files.readString(path, StandardCharsets.UTF_8);
+            int first = body.indexOf(oldText);
+            if (first < 0) {
+                return new ExecutionResult(false, null,
+                        "edit: old_text not found in file. Did you `read` the file first to copy the exact bytes (including indentation)?");
+            }
+            int second = body.indexOf(oldText, first + 1);
+            if (second >= 0) {
+                return new ExecutionResult(false, null,
+                        "edit: old_text matches multiple locations. Include enough surrounding context to make the match unique.");
+            }
+            String patched = body.substring(0, first) + newText + body.substring(first + oldText.length());
+            Files.writeString(path, patched, StandardCharsets.UTF_8);
+            return new ExecutionResult(true, "ok", null);
+        }
+        String content = stringArg(args, "content", null);
+        if (content == null) {
+            return new ExecutionResult(false, null, "edit: provide either (old_text, new_text) or content");
+        }
+        Files.writeString(path, content, StandardCharsets.UTF_8);
+        return new ExecutionResult(true, "ok", null);
+    }
+
+    /**
+     * Apply a multi-hunk diff to an existing file. Each hunk has the shape:
+     *
+     *     <<<<<<< ORIGINAL
+     *     ...exact existing text...
+     *     =======
+     *     ...replacement text...
+     *     >>>>>>> UPDATED
+     *
+     * Hunks are applied in order against the current file contents. ORIGINAL must match
+     * the file byte-for-byte (including indentation) and unambiguously — multiple matches
+     * fail the entire patch so the model is forced to include enough context.
+     */
+    private ExecutionResult fsApplyPatch(Map<String, Object> args) throws IOException {
+        Path path = safePath(stringArg(args, "path", null));
+        if (!Files.exists(path)) {
+            return new ExecutionResult(false, null, "Target file does not exist for apply_patch");
+        }
+        String content = stringArg(args, "content", null);
+        if (content == null || content.isBlank()) {
+            return new ExecutionResult(false, null, "content is required");
+        }
+        // Trim a Codex-style envelope if present so the model can reuse that habit.
+        content = content.replaceAll("(?m)^\\*\\*\\* Begin Patch\\s*$", "")
+                .replaceAll("(?m)^\\*\\*\\* End Patch\\s*$", "")
+                .replaceAll("(?m)^\\*\\*\\* (?:Update|Add|Delete) File:.*$", "")
+                .trim();
+
+        List<String[]> hunks = parsePatchHunks(content);
+        if (hunks.isEmpty()) {
+            return new ExecutionResult(false, null,
+                    "apply_patch: no hunks found. Use blocks of <<<<<<< ORIGINAL / ======= / >>>>>>> UPDATED.");
+        }
+        String body = Files.readString(path, StandardCharsets.UTF_8);
+        int applied = 0;
+        for (String[] hunk : hunks) {
+            String original = hunk[0];
+            String updated = hunk[1];
+            int first = body.indexOf(original);
+            if (first < 0) {
+                return new ExecutionResult(false, null,
+                        "apply_patch: hunk #" + (applied + 1) + " ORIGINAL block not found in file. "
+                                + "ORIGINAL must match the current file exactly, including indentation. "
+                                + "Re-`read` the file and try again.");
+            }
+            int second = body.indexOf(original, first + 1);
+            if (second >= 0) {
+                return new ExecutionResult(false, null,
+                        "apply_patch: hunk #" + (applied + 1) + " ORIGINAL block matches multiple locations. "
+                                + "Include more surrounding context so the match is unique.");
+            }
+            body = body.substring(0, first) + updated + body.substring(first + original.length());
+            applied++;
+        }
+        Files.writeString(path, body, StandardCharsets.UTF_8);
+        return new ExecutionResult(true, "ok (" + applied + " hunk" + (applied == 1 ? "" : "s") + " applied)", null);
+    }
+
+    private static final Pattern PATCH_HUNK = Pattern.compile(
+            "(?s)<{3,}\\s*ORIGINAL\\s*\\r?\\n(.*?)\\r?\\n={3,}\\s*\\r?\\n(.*?)\\r?\\n>{3,}\\s*UPDATED");
+
+    private List<String[]> parsePatchHunks(String content) {
+        List<String[]> hunks = new ArrayList<>();
+        Matcher m = PATCH_HUNK.matcher(content);
+        while (m.find()) {
+            hunks.add(new String[] { m.group(1), m.group(2) });
+        }
+        return hunks;
+    }
+
+    private static String firstNonNull(String a, String b) {
+        return a != null ? a : b;
     }
 
     private Path safePath(String input) {

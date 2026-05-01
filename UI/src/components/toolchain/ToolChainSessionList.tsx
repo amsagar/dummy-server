@@ -103,7 +103,9 @@ export default function ToolChainSessionList({
               </div>
             ) : (
               <>
-                <p className="truncate text-xs font-medium text-slate-800">{session.title || "Untitled session"}</p>
+                <p className={`truncate text-xs font-medium ${session.title ? "text-slate-800" : "italic text-slate-400"}`}>
+                  {session.title || "Untitled draft"}
+                </p>
                 <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                   <span>{session.status || "draft"}</span>
                   <span className="truncate">{formatTs(session.updatedAt)}</span>
@@ -150,7 +152,9 @@ export default function ToolChainSessionList({
                     key={session.id}
                     className="mt-1 flex items-center justify-between rounded border border-slate-200 px-2 py-1"
                   >
-                    <p className="truncate text-xs text-slate-600">{session.title || "Untitled session"}</p>
+                    <p className={`truncate text-xs ${session.title ? "text-slate-600" : "italic text-slate-400"}`}>
+                      {session.title || "Untitled draft"}
+                    </p>
                     <button
                       className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                       onClick={() => onRestoreSession(session.id)}

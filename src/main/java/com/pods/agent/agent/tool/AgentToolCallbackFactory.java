@@ -69,6 +69,16 @@ public class AgentToolCallbackFactory {
                                            SseEventSender sender,
                                            List<AgentTool> selectedTools,
                                            SkillExecutionGate skillExecutionGate) {
+        return buildForTurn(sessionId, turnId, sender, selectedTools, skillExecutionGate, null, false);
+    }
+
+    public List<ToolCallback> buildForTurn(String sessionId,
+                                           String turnId,
+                                           SseEventSender sender,
+                                           List<AgentTool> selectedTools,
+                                           SkillExecutionGate skillExecutionGate,
+                                           java.nio.file.Path workspace,
+                                           boolean bypassApprovalGate) {
         long timeoutMs = runtimeTuningProperties.getHitlReplyTimeoutMs();
         String userId = UserContextHolder.currentUserId();
         List<AgentTool> tools = (selectedTools == null || selectedTools.isEmpty())
@@ -89,7 +99,9 @@ public class AgentToolCallbackFactory {
                         timeoutMs,
                         objectMapper,
                         runtimeEventRepository,
-                        skillExecutionGate))
+                        skillExecutionGate,
+                        workspace,
+                        bypassApprovalGate))
                 .collect(Collectors.toList());
 
         callbacks.add(new SkillToolCallback(
