@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import ToolChainSessionList from "@/components/toolchain/ToolChainSessionList";
 import ToolChainConfigChatPanel from "@/components/toolchain/ToolChainConfigChatPanel";
-import NodeInspectorPanel from "@/components/toolchain/NodeInspectorPanel";
+import NodeBottomInspectorPanel from "@/components/toolchain/NodeBottomInspectorPanel";
 import NodeEditorDialog from "@/components/toolchain/NodeEditorDialog";
 import {
   type ChatMessage,
@@ -19,7 +19,7 @@ import {
   normalizeQuestionMetadata,
 } from "@/components/chat";
 import { cn } from "@/lib/utils";
-import { ArrowLeft, Maximize2, Minimize2 } from "lucide-react";
+import { ArrowLeft, Maximize2, Minimize2, PanelRight } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { modelRefKey, parseModelRefKey } from "@/types";
 
@@ -40,8 +40,14 @@ function genId() {
 }
 
 const CHAT_PANEL_WIDTH_STORAGE_KEY = "toolchain-designer.chat-panel-width";
+const CHAT_PANEL_COLLAPSED_STORAGE_KEY = "toolchain-designer.chat-panel-collapsed";
 const CHAT_PANEL_WIDTH_MIN = 320;
 const CHAT_PANEL_WIDTH_DEFAULT = 380;
+
+function readInitialChatPanelCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(CHAT_PANEL_COLLAPSED_STORAGE_KEY) === "1";
+}
 
 function clampChatPanelWidthValue(candidateWidth: number): number {
   const width = Number.isFinite(candidateWidth) ? candidateWidth : CHAT_PANEL_WIDTH_DEFAULT;
@@ -74,6 +80,29 @@ function parseMetadata(raw: any): Record<string, any> {
     return parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : {};
   } catch {
     return {};
+  }
+}
+
+function parseSchemaObject(raw: any): { type?: string; properties?: Record<string, any>; required?: string[] } | null {
+  if (!raw) return null;
+  if (typeof raw === "object") {
+    return {
+      type: String((raw as any).type || "object"),
+      properties: typeof (raw as any).properties === "object" && (raw as any).properties ? (raw as any).properties : {},
+      required: Array.isArray((raw as any).required) ? (raw as any).required.map((v: any) => String(v)) : [],
+    };
+  }
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      type: String((parsed as any).type || "object"),
+      properties: typeof (parsed as any).properties === "object" && (parsed as any).properties ? (parsed as any).properties : {},
+      required: Array.isArray((parsed as any).required) ? (parsed as any).required.map((v: any) => String(v)) : [],
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -223,6 +252,12 @@ export default function ToolChainDesignerPage() {
   );
   const [chatPanelWidth, setChatPanelWidth] = useState<number>(() => readInitialChatPanelWidth());
   const [isResizingChatPanel, setIsResizingChatPanel] = useState(false);
+  const [chatPanelCollapsed, setChatPanelCollapsed] = useState<boolean>(() => readInitialChatPanelCollapsed());
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CHAT_PANEL_COLLAPSED_STORAGE_KEY, chatPanelCollapsed ? "1" : "0");
+  }, [chatPanelCollapsed]);
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [boardOnlyFullscreen, setBoardOnlyFullscreen] = useState(false);
@@ -515,6 +550,15 @@ export default function ToolChainDesignerPage() {
     if (Array.isArray(fromBundle)) return fromBundle;
     return [];
   }, [sessionDetail?.contextBundle?.mcpCatalog]);
+  const workflowInputSchema = useMemo(() => {
+    if (viewedVersionNumber != null) {
+      const target = (Array.isArray(versions) ? versions : []).find((v: any) => v.version === viewedVersionNumber);
+      return parseSchemaObject(target?.inputSchema);
+    }
+    const fromContext = parseSchemaObject(sessionDetail?.contextBundle?.latestInputSchema);
+    if (fromContext) return fromContext;
+    return parseSchemaObject(latest?.inputSchema);
+  }, [viewedVersionNumber, versions, sessionDetail?.contextBundle?.latestInputSchema, latest?.inputSchema]);
 
   useEffect(() => {
     return () => {
@@ -1236,36 +1280,63 @@ export default function ToolChainDesignerPage() {
         }}
       >
         <div className="flex h-full">
-          <div className="relative min-w-0 flex-1 rounded-md border border-slate-200 bg-white">
-            <button
-              type="button"
-              aria-label={boardOnlyFullscreen ? "Exit board fullscreen" : "Board fullscreen"}
-              title={boardOnlyFullscreen ? "Exit board fullscreen (Esc)" : "Show only the flow board"}
-              className="absolute right-3 top-3 z-20 inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
-              onClick={() => setBoardOnlyFullscreen((v) => !v)}
-            >
-              {boardOnlyFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </button>
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              onNodesChange={handleNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={(params) => setEdges((eds) => addEdge({ ...params, id: `e-${params.source}-${params.target}-${Date.now()}` }, eds))}
-              onNodeClick={(_, n) => setInspectedNodeId(String(n.id))}
-              onNodeDoubleClick={(_, n) => {
-                setInspectedNodeId(String(n.id));
-                setEditingNodeId(String(n.id));
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="relative min-h-0 flex-1 rounded-md border border-slate-200 bg-white">
+              <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label={boardOnlyFullscreen ? "Exit board fullscreen" : "Board fullscreen"}
+                  title={boardOnlyFullscreen ? "Exit board fullscreen (Esc)" : "Show only the flow board"}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+                  onClick={() => setBoardOnlyFullscreen((v) => !v)}
+                >
+                  {boardOnlyFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </button>
+                {chatPanelCollapsed && !boardOnlyFullscreen ? (
+                  <button
+                    type="button"
+                    aria-label="Open AI chat"
+                    title="Open AI chat"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+                    onClick={() => setChatPanelCollapsed(false)}
+                  >
+                    <PanelRight size={14} />
+                  </button>
+                ) : null}
+              </div>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                onNodesChange={handleNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={(params) => setEdges((eds) => addEdge({ ...params, id: `e-${params.source}-${params.target}-${Date.now()}` }, eds))}
+                onNodeClick={(_, n) => setInspectedNodeId(String(n.id))}
+                onNodeDoubleClick={(_, n) => {
+                  setInspectedNodeId(String(n.id));
+                  setEditingNodeId(String(n.id));
+                }}
+                onPaneClick={() => setInspectedNodeId(null)}
+                fitView
+                proOptions={{ hideAttribution: true }}
+                style={{ width: "100%", height: "100%" }}
+              >
+                <Background />
+                <Controls />
+                <MiniMap />
+              </ReactFlow>
+            </div>
+            <NodeBottomInspectorPanel
+              open={inspectedNode !== null}
+              onOpenChange={(o) => {
+                if (!o) setInspectedNodeId(null);
               }}
-              onPaneClick={() => setInspectedNodeId(null)}
-              fitView
-              proOptions={{ hideAttribution: true }}
-              style={{ width: "100%", height: "100%" }}
-            >
-              <Background />
-              <Controls />
-              <MiniMap />
-            </ReactFlow>
+              node={inspectedNode}
+              graph={parsedGraph}
+              inputSchema={workflowInputSchema}
+              toolsCatalog={catalogTools}
+              mcpCatalog={catalogMcp}
+              onEdit={(id) => setEditingNodeId(id)}
+            />
           </div>
 
           <div
@@ -1275,7 +1346,7 @@ export default function ToolChainDesignerPage() {
             className={cn(
               "mx-1 h-full w-1.5 shrink-0 cursor-col-resize rounded bg-transparent transition-colors hover:bg-slate-200",
               isResizingChatPanel ? "bg-slate-300" : "",
-              boardOnlyFullscreen && "hidden"
+              (boardOnlyFullscreen || chatPanelCollapsed) && "hidden"
             )}
             onMouseDown={(event) => {
               event.preventDefault();
@@ -1285,7 +1356,7 @@ export default function ToolChainDesignerPage() {
           />
 
           <div
-            className={cn("relative h-full shrink-0", boardOnlyFullscreen && "hidden")}
+            className={cn("relative h-full shrink-0", (boardOnlyFullscreen || chatPanelCollapsed) && "hidden")}
             style={{ width: chatPanelWidth, maxWidth: "55vw", minWidth: 320 }}
           >
             {showSessionsMenu ? (
@@ -1356,6 +1427,7 @@ export default function ToolChainDesignerPage() {
               }}
               onShowHistory={() => setShowSessionsMenu((v) => !v)}
               onCancelStream={cancelConfigStream}
+              onCollapse={() => setChatPanelCollapsed(true)}
               className="h-full"
               onResendMessage={async (content, messageId) => {
                 // Match ChatPage's edit-and-resend semantics: rewind the conversation by
@@ -1483,17 +1555,6 @@ export default function ToolChainDesignerPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <NodeInspectorPanel
-        open={inspectedNode !== null}
-        onOpenChange={(o) => {
-          if (!o) setInspectedNodeId(null);
-        }}
-        node={inspectedNode}
-        graph={parsedGraph}
-        toolsCatalog={catalogTools}
-        mcpCatalog={catalogMcp}
-        onEdit={(id) => setEditingNodeId(id)}
-      />
       <NodeEditorDialog
         open={editingNode !== null}
         onOpenChange={(o) => {

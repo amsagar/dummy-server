@@ -1,6 +1,6 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Bot, History, Paperclip, Plus, SendHorizontal, Square, X } from "lucide-react";
+import { Bot, History, PanelRight, Paperclip, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SPINNER_VERBS } from "@/lib/spinnerVerbs";
 import {
@@ -50,6 +50,9 @@ type Props = {
   /** Cancel an in-flight stream. When provided AND isSending is true, the Send
    *  button slot in the composer renders a Stop button instead. */
   onCancelStream?: () => void;
+  /** Collapse the chat panel away. The parent renders an "open" affordance
+   *  next to the board so the user can re-expand. */
+  onCollapse?: () => void;
   className?: string;
   isSending?: boolean;
   onResendMessage?: (content: string, messageId: string) => void;
@@ -76,6 +79,7 @@ export default function ToolChainConfigChatPanel({
   onNewSession,
   onShowHistory,
   onCancelStream,
+  onCollapse,
   className,
   isSending,
   onResendMessage,
@@ -289,6 +293,17 @@ export default function ToolChainConfigChatPanel({
           >
             <Plus size={14} />
           </button>
+          {onCollapse ? (
+            <button
+              type="button"
+              aria-label="Collapse chat"
+              title="Collapse chat"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              onClick={onCollapse}
+            >
+              <PanelRight size={14} />
+            </button>
+          ) : null}
         </div>
       </div>
 
