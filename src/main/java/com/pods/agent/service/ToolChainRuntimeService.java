@@ -502,8 +502,16 @@ public class ToolChainRuntimeService {
     }
 
     private void saveRuntimeEvent(String runId, String eventType, Map<String, Object> payload, String effectiveSessionId) {
+        // runtime_events.session_id has an FK to chat_sessions. For non-chat runs,
+        // effectiveSessionId falls back to runId (so SSE payloads have a value), but
+        // that runId is NOT a chat session — persisting it would trip the FK and abort
+        // the run after task.started. Null is permitted by the FK and is the right
+        // value when there's no originating chat session.
+        String dbSessionId = (effectiveSessionId == null || effectiveSessionId.equals(runId))
+                ? null
+                : effectiveSessionId;
         runtimeEventRepository.save(RuntimeEvent.builder()
-                .sessionId(effectiveSessionId)
+                .sessionId(dbSessionId)
                 .turnId(runId)
                 .eventType(eventType)
                 .payload(toJson(payload))
@@ -606,11 +614,18 @@ public class ToolChainRuntimeService {
                                     String effectiveSessionId) {
         SseEventSender effectiveSender = sender != null ? sender : new SseEventSender(null, objectMapper);
         SkillExecutionGate gate = new SkillExecutionGate(false);
+        // Same FK reasoning as saveRuntimeEvent: when there's no chat session backing
+        // this run, effectiveSessionId == runId (a non-chat-session id), so persisting
+        // skill tool.call/tool.done events under it would violate the FK. Pass null in
+        // that case; SkillToolCallback's saveRuntimeEvent lets the column be null.
+        String skillSessionId = effectiveSessionId == null || effectiveSessionId.equals(runId)
+                ? null
+                : effectiveSessionId;
         ToolCallback skillTool = new SkillToolCallback(
                 skillRegistryService,
                 runtimeTuningProperties,
                 effectiveSender,
-                effectiveSessionId,
+                skillSessionId,
                 runId,
                 objectMapper,
                 runtimeEventRepository,

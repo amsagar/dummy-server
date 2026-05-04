@@ -257,6 +257,11 @@ export default function ToolChainRunDetailPage() {
       const { bg, border } = statusStyles(status);
       const rawX = toFiniteNumber(node?.position?.x);
       const rawY = toFiniteNumber(node?.position?.y);
+      const config = node.config || {};
+      const approvalMode = String(config?.approvalMode || "").toLowerCase();
+      const needsApproval =
+        node.type === "approval" || approvalMode === "required" || approvalMode === "required_if_sensitive";
+      const baseLabel = node.label || id;
       return {
         id,
         type: node.type === "start" ? "input" : node.type === "end" ? "output" : "default",
@@ -265,11 +270,11 @@ export default function ToolChainRunDetailPage() {
             ? { x: rawX, y: rawY }
             : fallbackPositions[id] || { x: 80 + idx * 220, y: 100 },
         data: {
-          label: `${node.label || id}${step?.status ? ` (${step.status})` : ""}`,
+          label: `${needsApproval ? "🔒 " : ""}${baseLabel}${step?.status ? ` (${step.status})` : ""}`,
         },
         style: {
           backgroundColor: bg,
-          border: `2px solid ${border}`,
+          border: `2px solid ${needsApproval ? "#7c3aed" : border}`,
           borderRadius: 10,
           minWidth: 160,
           fontSize: 12,

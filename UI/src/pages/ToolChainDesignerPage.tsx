@@ -181,15 +181,17 @@ function graphToFlow(parsed: any, layoutPositions: Record<string, { x: number; y
     const approvalMode = String(config?.approvalMode || "").toLowerCase();
     const needsApproval =
       node.type === "approval" || approvalMode === "required" || approvalMode === "required_if_sensitive";
+    const baseLabel = node.label || node.id;
     return {
       id,
       type: node.type === "start" ? "input" : node.type === "end" ? "output" : "default",
-      data: { label: node.label || node.id, config },
+      data: { label: needsApproval ? `🔒 ${baseLabel}` : baseLabel, config },
       style: needsApproval
         ? {
-            background: "#f3e8ff",
-            border: "1px solid #8b5cf6",
+            background: "#ede9fe",
+            border: "2px solid #7c3aed",
             color: "#4c1d95",
+            fontWeight: 500,
           }
         : undefined,
       position:

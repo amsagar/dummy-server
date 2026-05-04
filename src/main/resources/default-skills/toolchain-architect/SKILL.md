@@ -98,6 +98,43 @@ You satisfy this in one of three ways, in order of preference:
 If none is possible, do NOT emit that node. Return an empty graph and explain in
 `assistantMessage`.
 
+## 4a. Per-node approval gate (optional)
+
+To make a `tool` / `mcp_tool` node pause and require human approval before it runs,
+set `config.approvalMode` on that node:
+
+```json
+{ "id": "delete_invoice", "type": "tool", "label": "Delete Invoice",
+  "config": {
+    "toolName": "DeleteInvoice",
+    "approvalMode": "required",
+    "argMappings": { "id": "invoiceId" }
+  }
+}
+```
+
+| `config.approvalMode` value | Meaning |
+|-----------------------------|---------|
+| `"required"`                | Always pause for human approval before running this node. |
+| `"required_if_sensitive"`  | Pause only when the chain-level policy is set to `sensitive_only`. |
+| absent / `"none"`           | No approval gate (default). |
+
+The runtime reads ONLY `config.approvalMode`. **Do not invent other shapes**:
+
+- ❌ `node.approval = { "required": true }` — ignored by the runtime.
+- ❌ `node.approvalRequired = true` — ignored.
+- ❌ `config.requireApproval = true` — ignored.
+- ❌ `config.approval = "required"` — ignored.
+- ✅ `config.approvalMode = "required"` — the only shape the runtime gates on.
+
+Optional sibling fields under `config` that the runtime also reads when present:
+`approvalGroup` (string), `approvalPrompt` (string shown to the approver),
+`approvalTimeoutMs` (long, defaults to 5 minutes).
+
+When the user asks "add approval to X" / "make Y require approval" / "gate Z behind
+approval", the only edit required is setting `config.approvalMode = "required"` on
+the named node. Do not add a top-level `approval` object.
+
 ## 5. The synthesis prompt — what to write
 
 `synthesisPrompt` is REQUIRED unless `responseMode == "raw_graph_output"`. It's a
@@ -343,6 +380,10 @@ Return ONLY this JSON object. No prose, no markdown fences:
 - `type: "skill"` — there is no skill node. Reasoning over skills happens in synthesis.
 - `config.inputMappings`, `config.inputDefaults`, `config.inputs`, `config.parameters` —
   none are read by the runtime.
+- A top-level `approval` object on the node (`{"approval": {"required": true}}`),
+  or `approvalRequired`/`requireApproval` on the node or under `config`. The runtime
+  reads ONLY `config.approvalMode` (see Section 4a). Any other shape is silently
+  ignored — the gate will not fire and the node will appear un-flagged in the UI.
 - `argMappings` referencing `"start.something"` to fetch user input. User input is at
   the root of context. Use the bare key (`"orderId"`, not `"start.orderId"`).
 - Path-param key shape mismatches: `argMappings: { "orderId": "orderId" }` when the
