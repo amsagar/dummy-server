@@ -12,6 +12,8 @@ import com.pods.agent.config.RuntimeTuningProperties;
 import com.pods.agent.domain.AgentTool;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
+import com.pods.agent.domain.ToolChainRun;
+import com.pods.agent.domain.ToolChainVersion;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.RuntimeTraceRepository;
 import com.pods.agent.service.mcp.McpRuntimeAdapter;
@@ -142,12 +144,17 @@ public class AgentRuntimeService {
         if (shouldExecuteToolChain(state)) {
             transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "toolchain-execution");
             try {
+                Map<String, Object> tcInput = new LinkedHashMap<>();
+                tcInput.put("message", normalizedUserText);
+                tcInput.put("sessionId", session.getSessionId());
+                toolChainService.resolveVersion(state.getToolChainId(), state.getToolChainVersion())
+                        .ifPresent(v -> tcInput.putAll(extractToolChainParams(normalizedUserText, v, state)));
                 var run = toolChainRuntimeService.execute(
                         state.getToolChainId(),
                         state.getToolChainVersion(),
                         "chat",
                         UserContextHolder.currentUserId(),
-                        Map.of("message", normalizedUserText, "sessionId", session.getSessionId()),
+                        tcInput,
                         Map.of("async", false),
                         sender,
                         session.getSessionId()
@@ -167,7 +174,7 @@ public class AgentRuntimeService {
                         .eventType("toolchain.run.bound")
                         .payload(toJsonSafe(bound))
                         .build());
-                String result = run.getOutputSnapshot() == null ? "{\"runId\":\"" + run.getId() + "\",\"status\":\"" + run.getStatus() + "\"}" : run.getOutputSnapshot();
+                String result = renderToolChainAssistantMessage(run);
                 session.getMessages().add(new AssistantMessage(result));
                 transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-execution-done");
                 return result;
@@ -1275,6 +1282,120 @@ You are in ToolChain designer creation mode.
             return text.substring(firstBrace, lastBrace + 1);
         }
         return text;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractToolChainParams(String userText, ToolChainVersion version, ChatState state) {
+        String rawSchema = version == null ? null : version.getInputSchema();
+        if (rawSchema == null || rawSchema.isBlank()) return Map.of();
+        Map<String, Object> schema;
+        try {
+            schema = objectMapper.readValue(rawSchema, Map.class);
+        } catch (Exception e) {
+            log.warn("[AgentRuntime] bad inputSchema JSON: {}", e.getMessage());
+            return Map.of();
+        }
+        Object propsObj = schema.get("properties");
+        if (!(propsObj instanceof Map<?, ?> propsMap) || propsMap.isEmpty()) return Map.of();
+
+        try {
+            Map<String, Object> schemaForPrompt = Map.of(
+                    "properties", propsMap,
+                    "required", schema.getOrDefault("required", List.of()));
+            String prompt = "User message:\n" + userText + "\n\nJSON schema:\n"
+                    + objectMapper.writeValueAsString(schemaForPrompt)
+                    + "\n\nReturn ONLY a JSON object with the extracted fields. Omit fields you cannot extract confidently.";
+            // disableThinking=true: structured-JSON output (mirrors ToolChainConfigChatService).
+            ModelProviderRouter.Spec spec = modelProviderRouter.resolve(state != null ? state.getModel() : null, true);
+            String raw = spec.client().prompt()
+                    .system("Extract parameters from the user message that match the given JSON schema. Output JSON only.")
+                    .user(prompt)
+                    .call()
+                    .content();
+            if (raw == null || raw.isBlank()) return Map.of();
+            Map<String, Object> parsed = objectMapper.readValue(extractJsonObject(raw), Map.class);
+            return coerceToSchema(parsed, propsMap);
+        } catch (Exception e) {
+            log.warn("[AgentRuntime] param extraction failed: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private String renderToolChainAssistantMessage(ToolChainRun run) {
+        if (run == null) return "";
+        String snapshot = run.getOutputSnapshot();
+        if (snapshot == null || snapshot.isBlank()) {
+            return "{\"runId\":\"" + (run.getId() == null ? "" : run.getId())
+                    + "\",\"status\":\"" + (run.getStatus() == null ? "" : run.getStatus()) + "\"}";
+        }
+        try {
+            Map<String, Object> outer = objectMapper.readValue(snapshot, Map.class);
+            Object resultField = outer.get("result");
+            String summary = findSummary(resultField);
+            if (summary != null && !summary.isBlank()) return summary;
+            if (resultField instanceof String s && !s.isBlank()) {
+                String trimmed = s.trim();
+                // synthesized_text mode returns the synthesis text directly (not JSON-shaped)
+                if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return s;
+            }
+            String topSummary = findSummary(outer);
+            if (topSummary != null && !topSummary.isBlank()) return topSummary;
+        } catch (Exception e) {
+            log.warn("[AgentRuntime] could not parse toolchain outputSnapshot for assistant render: {}", e.getMessage());
+        }
+        return snapshot;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String findSummary(Object node) {
+        if (node == null) return null;
+        if (node instanceof String s) {
+            String trimmed = s.trim();
+            if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+            try {
+                Object parsed = objectMapper.readValue(trimmed, Object.class);
+                return findSummary(parsed);
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+        if (node instanceof Map<?, ?> map) {
+            Object summary = map.get("summary");
+            if (summary instanceof String s && !s.isBlank()) return s;
+            for (Object value : map.values()) {
+                String nested = findSummary(value);
+                if (nested != null) return nested;
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> coerceToSchema(Map<String, Object> parsed, Map<?, ?> propsMap) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : parsed.entrySet()) {
+            Object v = e.getValue();
+            if (v == null) continue;
+            Object propDef = propsMap.get(e.getKey());
+            String type = (propDef instanceof Map<?, ?> pm && pm.get("type") != null)
+                    ? String.valueOf(pm.get("type"))
+                    : "";
+            try {
+                switch (type) {
+                    case "integer" -> out.put(e.getKey(),
+                            v instanceof Number n ? n.longValue() : Long.parseLong(String.valueOf(v).trim()));
+                    case "number" -> out.put(e.getKey(),
+                            v instanceof Number n ? n.doubleValue() : Double.parseDouble(String.valueOf(v).trim()));
+                    case "boolean" -> out.put(e.getKey(),
+                            v instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(v).trim()));
+                    case "string" -> out.put(e.getKey(), v instanceof String s ? s : String.valueOf(v));
+                    default -> out.put(e.getKey(), v);
+                }
+            } catch (NumberFormatException nfe) {
+                // drop bad coercion; the existing validator will surface "Missing required input fields"
+            }
+        }
+        return out;
     }
 
     private PendingInteractionService.QuestionMetadata textQuestionMetadata() {

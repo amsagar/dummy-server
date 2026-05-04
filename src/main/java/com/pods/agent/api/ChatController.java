@@ -40,7 +40,9 @@ public class ChatController {
     private static final Set<String> SESSION_EVENT_TYPES = Set.of(
             "tool.match", "tool.call", "tool.done", "tool.result",
             "question", "approval_required",
-            "reasoning"
+            "reasoning",
+            "task.started", "task.done",
+            "toolchain.run.bound"
     );
 
     private final ChatService chatService;

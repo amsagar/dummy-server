@@ -373,6 +373,30 @@ export default function ChatPage() {
           content = `Tool completed: ${toolName}`;
         } else if (e.eventType === 'step.started' || e.eventType === 'step.finished') {
           return null as any;
+        } else if (e.eventType === 'task.started') {
+          payload = {
+            ...payload,
+            taskId: payload.taskId,
+            taskName: payload.taskName,
+            type: payload.type,
+            toolRef: payload.toolRef,
+            input: payload.input,
+          };
+          const label = payload.taskName || payload.taskId || '';
+          if (!label) return null as any;
+          content = `Running node: ${label}`;
+        } else if (e.eventType === 'task.done') {
+          payload = {
+            ...payload,
+            taskId: payload.taskId,
+            taskName: payload.taskName,
+            status: payload.result,
+            output: payload.output,
+            error: payload.error,
+          };
+          const label = payload.taskName || payload.taskId || '';
+          if (!label) return null as any;
+          content = `Node completed: ${label}`;
         } else if (e.eventType === 'tool.match') {
           const needsClarification = payload.needsClarification === true || payload.decision === "clarify";
           const candidates = Array.isArray(payload.candidates)
@@ -781,6 +805,9 @@ export default function ChatPage() {
               appendSystemMessage('task.started', `Running node: ${ev.taskName || ev.taskId}`, undefined, {
                 taskId: ev.taskId,
                 taskName: ev.taskName,
+                type: ev.type,
+                toolRef: ev.toolRef,
+                input: ev.input,
               });
             }
             break;
@@ -790,6 +817,8 @@ export default function ChatPage() {
                 taskId: ev.taskId,
                 taskName: ev.taskName,
                 status: ev.result,
+                output: ev.output,
+                error: ev.error,
               });
             }
             break;

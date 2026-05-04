@@ -65,18 +65,38 @@ const SystemEventCard: FC<Props> = ({
 
   if (m.eventType === "task.started" || m.eventType === "task.done") {
     const taskName = m.eventPayload?.taskName || m.eventPayload?.taskId || "node";
-    const status = m.eventPayload?.status;
+    const status = m.eventPayload?.status || m.eventPayload?.result;
     const isStarted = m.eventType === "task.started";
+    const detailsPayload = isStarted
+      ? {
+          taskId: m.eventPayload?.taskId,
+          type: m.eventPayload?.type,
+          toolRef: m.eventPayload?.toolRef,
+          input: m.eventPayload?.input,
+        }
+      : {
+          taskId: m.eventPayload?.taskId,
+          status,
+          output: m.eventPayload?.output,
+          error: m.eventPayload?.error,
+        };
+    const payloadText = formatPayload(detailsPayload);
     return (
-      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
-        <div className="flex items-center gap-2">
+      <details className="group/item rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+        <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+          <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
           <span className="font-mono text-[10px] text-slate-500">{isStarted ? "▶ node" : "✓ node"}</span>
           <span className="min-w-0 flex-1 truncate text-slate-700">
             {taskName}
             {status ? ` — ${status}` : ""}
           </span>
-        </div>
-      </div>
+        </summary>
+        {payloadText ? (
+          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-white p-2 text-[10px] text-slate-800">
+            {payloadText}
+          </pre>
+        ) : null}
+      </details>
     );
   }
 

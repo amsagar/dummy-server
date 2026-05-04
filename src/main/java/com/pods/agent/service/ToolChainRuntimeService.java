@@ -208,7 +208,7 @@ public class ToolChainRuntimeService {
                 StepResult result = futures.get(i).join();
                 if (!result.success()) {
                     finalStatus = result.rejected() ? "rejected" : "failed";
-                    completeRun(runId, finalStatus, context, result.error());
+                    completeRun(runId, finalStatus, context, result.error(), effectiveSessionId);
                     return runRepository.findById(runId).orElse(run);
                 }
                 if (result.outputs() != null) context.putAll(result.outputs());
@@ -225,7 +225,7 @@ public class ToolChainRuntimeService {
         }
 
         String output = finalizeResponse(run.getToolChainId(), version, context, runId, options, sender, effectiveSessionId);
-        completeRun(runId, "success", Map.of("result", output, "context", context), null);
+        completeRun(runId, "success", Map.of("result", output, "context", context), null, effectiveSessionId);
         return runRepository.findById(runId).orElse(run);
     }
 
@@ -240,15 +240,17 @@ public class ToolChainRuntimeService {
                 .inputPayload(toJson(context))
                 .startedAt(System.currentTimeMillis())
                 .build());
-        saveRuntimeEvent(runId, "toolchain.step.started", new LinkedHashMap<>(Map.of(
+        Map<String, Object> startedPayload = new LinkedHashMap<>(Map.of(
+                "sessionId", effectiveSessionId,
                 "stepId", step.getId(),
-                "nodeId", node.id(),
-                "label", node.label(),
+                "taskId", node.id(),
+                "taskName", node.label() == null ? node.id() : node.label(),
                 "type", node.type(),
                 "toolRef", node.toolRef() == null ? "" : node.toolRef(),
                 "input", context
-        )));
-        if (sender != null) sender.sendTaskStarted(effectiveSessionId, node.id(), node.label());
+        ));
+        saveRuntimeEvent(runId, "task.started", startedPayload, effectiveSessionId);
+        if (sender != null) sender.sendCustom("task.started", startedPayload);
 
         try {
             if (requiresApproval(node)) {
@@ -271,27 +273,33 @@ public class ToolChainRuntimeService {
             step.setErrorMessage(result.error());
             step.setEndedAt(System.currentTimeMillis());
             runStepRepository.update(step);
-            saveRuntimeEvent(runId, "toolchain.step.finished", new LinkedHashMap<>(Map.of(
+            Map<String, Object> donePayload = new LinkedHashMap<>(Map.of(
+                    "sessionId", effectiveSessionId,
                     "stepId", step.getId(),
-                    "nodeId", node.id(),
-                    "label", node.label(),
-                    "status", step.getStatus(),
+                    "taskId", node.id(),
+                    "taskName", node.label() == null ? node.id() : node.label(),
+                    "result", step.getStatus(),
                     "output", result.outputs() == null ? Map.of() : result.outputs(),
                     "error", step.getErrorMessage() == null ? "" : step.getErrorMessage()
-            )));
-            if (sender != null) sender.sendTaskDone(effectiveSessionId, node.id(), step.getStatus());
+            ));
+            saveRuntimeEvent(runId, "task.done", donePayload, effectiveSessionId);
+            if (sender != null) sender.sendCustom("task.done", donePayload);
             return result;
         } catch (Exception e) {
             step.setStatus("failed");
             step.setErrorMessage(e.getMessage());
             step.setEndedAt(System.currentTimeMillis());
             runStepRepository.update(step);
-            saveRuntimeEvent(runId, "toolchain.step.failed", new LinkedHashMap<>(Map.of(
+            Map<String, Object> failPayload = new LinkedHashMap<>(Map.of(
+                    "sessionId", effectiveSessionId,
                     "stepId", step.getId(),
-                    "nodeId", node.id(),
-                    "label", node.label(),
+                    "taskId", node.id(),
+                    "taskName", node.label() == null ? node.id() : node.label(),
+                    "result", "failed",
                     "error", e.getMessage() == null ? "Step execution failed" : e.getMessage()
-            )));
+            ));
+            saveRuntimeEvent(runId, "task.done", failPayload, effectiveSessionId);
+            if (sender != null) sender.sendCustom("task.done", failPayload);
             return StepResult.failed(e.getMessage());
         }
     }
@@ -313,7 +321,7 @@ public class ToolChainRuntimeService {
         step.setEndedAt(System.currentTimeMillis());
         runStepRepository.update(step);
         if (sender != null) sender.sendApprovalRequired(effectiveSessionId, requestId, node.label());
-        saveRuntimeEvent(runId, "toolchain.approval.required", Map.of("nodeId", node.id(), "requestId", requestId));
+        saveRuntimeEvent(runId, "toolchain.approval.required", Map.of("nodeId", node.id(), "requestId", requestId), effectiveSessionId);
 
         CompletableFuture<ApprovalDecision> future = new CompletableFuture<>();
         pendingApprovals.put(requestId, future);
@@ -488,14 +496,14 @@ public class ToolChainRuntimeService {
         return current;
     }
 
-    private void completeRun(String runId, String status, Map<String, Object> output, String error) {
+    private void completeRun(String runId, String status, Map<String, Object> output, String error, String effectiveSessionId) {
         runRepository.updateStatus(runId, status, toJson(output), error);
-        saveRuntimeEvent(runId, "toolchain.run.completed", Map.of("status", status, "error", error == null ? "" : error));
+        saveRuntimeEvent(runId, "toolchain.run.completed", Map.of("status", status, "error", error == null ? "" : error), effectiveSessionId);
     }
 
-    private void saveRuntimeEvent(String runId, String eventType, Map<String, Object> payload) {
+    private void saveRuntimeEvent(String runId, String eventType, Map<String, Object> payload, String effectiveSessionId) {
         runtimeEventRepository.save(RuntimeEvent.builder()
-                .sessionId(null)
+                .sessionId(effectiveSessionId)
                 .turnId(runId)
                 .eventType(eventType)
                 .payload(toJson(payload))
@@ -523,6 +531,7 @@ public class ToolChainRuntimeService {
         // which would duplicate the work and re-load every skill.
         ModelRef modelRef = resolveModelRefForSynthesis(options, toolChainId);
         String synthesisText = extractGraphSynthesisOutput(version, context);
+        boolean synthesisFromGraph = synthesisText != null;
         if (synthesisText == null) {
             String synthesisPrompt = version.getSynthesisPrompt();
             if (synthesisPrompt != null && !synthesisPrompt.isBlank() && modelRef != null) {
@@ -534,7 +543,10 @@ public class ToolChainRuntimeService {
             }
         }
 
-        String shaped = shapeStructuredOutput(version, context, synthesisText, runId, modelRef, sender);
+        // Skip the JSON-shape LLM pass when the graph's synthesis node already produced
+        // (and streamed) the answer — re-shaping content the user has already seen is
+        // a wasted second LLM round-trip.
+        String shaped = synthesisFromGraph ? null : shapeStructuredOutput(version, context, synthesisText, runId, modelRef, sender);
         if (shaped != null && !shaped.isBlank()) {
             return shaped;
         }
@@ -598,7 +610,7 @@ public class ToolChainRuntimeService {
                 skillRegistryService,
                 runtimeTuningProperties,
                 effectiveSender,
-                null,
+                effectiveSessionId,
                 runId,
                 objectMapper,
                 runtimeEventRepository,
