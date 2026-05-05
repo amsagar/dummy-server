@@ -118,9 +118,9 @@ public class ToolExecutionService {
         }
         if ("GET".equals(method) || "DELETE".equals(method)) {
             endpoint = appendQueryParams(endpoint, extractQueryParams(args, consumedKeys));
-        } else if (shouldMirrorArgsToQuery(tool.getName())) {
-            // Some upstream APIs (notably PODS calendar/availability endpoints) accept
-            // request data via query params even on POST routes.
+        } else if (shouldMirrorArgsToQuery(tool)) {
+            // Opt-in only: selected tools may require mirroring request args into query
+            // params for non-GET methods.
             endpoint = appendQueryParams(endpoint, extractQueryParams(args, new HashSet<>(consumedKeys)));
         }
 
@@ -1027,9 +1027,24 @@ public class ToolExecutionService {
         return isServiceabilityTool(normalized) || isContainerAvailabilityTool(normalized);
     }
 
-    private boolean shouldMirrorArgsToQuery(String toolName) {
-        String normalized = normalizeToolName(toolName);
-        return isContainerAvailabilityTool(normalized);
+    private boolean shouldMirrorArgsToQuery(AgentTool tool) {
+        if (tool == null || tool.getRequestSchema() == null || tool.getRequestSchema().isBlank()) return false;
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(tool.getRequestSchema(), Map.class);
+            if (parsed == null || parsed.isEmpty()) return false;
+            Object direct = findArgIgnoreCase(parsed, "mirrorArgsToQuery");
+            if (direct instanceof Boolean b) return b;
+            Object legacy = findArgIgnoreCase(parsed, "queryParamMirror");
+            if (legacy instanceof Boolean b) return b;
+            Object transport = findArgIgnoreCase(parsed, "transport");
+            if (transport instanceof Map<?, ?> map) {
+                Object nested = findArgIgnoreCase((Map<String, Object>) map, "mirrorArgsToQuery");
+                if (nested instanceof Boolean b) return b;
+            }
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")
