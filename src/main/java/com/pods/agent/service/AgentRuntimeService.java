@@ -433,6 +433,13 @@ public class AgentRuntimeService {
             // a compact skill catalog so the model has deterministic routing guidance.
             selectedSkillContext = buildSkillCatalogContext(skillRegistryService.getEnabledSkills());
         }
+        List<String> preferredSkillNames = enforceSkillFirst
+                ? buildSkillShortlist(userText, session.getSessionId()).stream()
+                .map(snapshot -> snapshot == null || snapshot.skill() == null ? null : snapshot.skill().getName())
+                .filter(name -> name != null && !name.isBlank())
+                .limit(3)
+                .toList()
+                : List.of();
 
         // In designer mode, bind the per-session workspace and bypass the approval prompt
         // for FS tools. The architect's read/edit/apply_patch are sandboxed to the workspace
@@ -443,7 +450,8 @@ public class AgentRuntimeService {
                 designerWorkspace, designerMode);
         // Keep skill guidance in base system prompt and load full skill content only when
         // model explicitly calls the native `skill` tool.
-        String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "");
+        String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "",
+                enforceSkillFirst, preferredSkillNames);
 
         log.debug("[AgentRuntime] streamTurn start: sessionId={}, turnId={}, tools={}",
                 session.getSessionId(), turnId, toolCallbacks.size());
@@ -615,7 +623,9 @@ public class AgentRuntimeService {
                                     String mcpContext,
                                     String runtimeMode,
                                     AgentSession session,
-                                    String observationContext) {
+                                    String observationContext,
+                                    boolean enforceSkillFirst,
+                                    List<String> preferredSkillNames) {
         // Per-turn metadata leads (system-style annotations), then the user's actual request.
         // Conversation history is NOT duplicated here — it's already in the messages array passed
         // to ChatClient via .messages(history). The orchestrator trims the trailing UserMessage
@@ -624,6 +634,17 @@ public class AgentRuntimeService {
         StringBuilder context = new StringBuilder();
         if (selectedSkillContext != null && !selectedSkillContext.isBlank()) {
             context.append(selectedSkillContext).append("\n\n");
+        }
+        if (enforceSkillFirst) {
+            context.append("<skill_first_contract>\n")
+                    .append("- Before any non-`skill` tool call, load and apply relevant skill instructions.\n")
+                    .append("- Do not call domain tools with `{}` while mapping details from prior tool output.\n");
+            if (preferredSkillNames != null && !preferredSkillNames.isEmpty()) {
+                context.append("- Preferred skills for this request: ")
+                        .append(String.join(", ", preferredSkillNames))
+                        .append("\n");
+            }
+            context.append("</skill_first_contract>\n\n");
         }
         if (mcpContext != null && !mcpContext.isBlank()) {
             context.append(mcpContext).append("\n\n");
