@@ -942,6 +942,10 @@ public class ToolExecutionService {
             }
         }
         if (!payload.isEmpty()) {
+            String mergedWithTemplate = mergeWithSampleRequestTemplate(tool, payload);
+            if (mergedWithTemplate != null) {
+                return mergedWithTemplate;
+            }
             try {
                 return objectMapper.writeValueAsString(payload);
             } catch (Exception ignored) {
@@ -953,6 +957,44 @@ public class ToolExecutionService {
             return tool.getSampleRequest();
         }
         return "{\"query\":\"" + sanitize(userText) + "\"}";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String mergeWithSampleRequestTemplate(AgentTool tool, Map<String, Object> payload) {
+        if (tool == null || payload == null || payload.isEmpty()) return null;
+        String sample = tool.getSampleRequest();
+        if (sample == null || sample.isBlank()) return null;
+        try {
+            Map<String, Object> sampleMap = objectMapper.readValue(sample, Map.class);
+            if (sampleMap == null || sampleMap.isEmpty()) return null;
+            Map<String, Object> merged = new LinkedHashMap<>(sampleMap);
+            // Overlay model-provided arguments while keeping template defaults/required keys.
+            payload.forEach((k, v) -> {
+                merged.put(k, v);
+                if ("postalCode".equalsIgnoreCase(k)) {
+                    merged.put("Zip", v);
+                    merged.put("zip", v);
+                    merged.put("PostalCode", v);
+                }
+                if ("regionCode".equalsIgnoreCase(k)) {
+                    merged.put("RegionCode", v);
+                    merged.put("countryCode", v);
+                    merged.put("CountryCode", v);
+                }
+                if ("serviceDate".equalsIgnoreCase(k)) {
+                    merged.put("ServiceDate", v);
+                }
+                if ("serviceType".equalsIgnoreCase(k)) {
+                    merged.put("ServiceType", v);
+                }
+                if ("siteIdentity".equalsIgnoreCase(k)) {
+                    merged.put("SiteIdentity", v);
+                }
+            });
+            return objectMapper.writeValueAsString(merged);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private boolean requiresMappedPayload(String toolName) {

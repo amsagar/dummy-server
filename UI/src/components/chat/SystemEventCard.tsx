@@ -29,6 +29,11 @@ const SystemEventCard: FC<Props> = ({
   setInteractionSelections,
   answerPending,
 }) => {
+  const shorten = (text: string, max = 1800) => {
+    if (!text) return text;
+    return text.length > max ? `${text.slice(0, max)}\n\n...truncated for UI readability...` : text;
+  };
+
   const pending = m.requestId ? pendingInteractions.find((p) => p.requestId === m.requestId) : undefined;
   const draftValue = m.requestId ? (interactionDrafts[m.requestId] ?? "") : "";
   const selected = m.requestId ? (interactionSelections[m.requestId] ?? []) : [];
@@ -119,6 +124,11 @@ const SystemEventCard: FC<Props> = ({
             score: m.eventPayload?.score,
             candidates: m.eventPayload?.candidates,
           });
+    const summarizedPayloadText =
+      (m.eventType === "tool.done" || m.eventType === "tool.result") &&
+      (m.eventPayload?.toolName || "").toLowerCase() === "skill"
+        ? shorten(payloadText, 1200)
+        : shorten(payloadText);
     return (
       <details className="group/item rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs">
         <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
@@ -126,9 +136,9 @@ const SystemEventCard: FC<Props> = ({
           <span className="w-20 shrink-0 font-mono text-[10px] text-slate-500">{m.eventType}</span>
           <span className="min-w-0 flex-1 truncate text-slate-700">{m.content}</span>
         </summary>
-        {payloadText ? (
+        {summarizedPayloadText ? (
           <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-white p-2 text-[10px] text-slate-800">
-            {payloadText}
+            {summarizedPayloadText}
           </pre>
         ) : null}
       </details>

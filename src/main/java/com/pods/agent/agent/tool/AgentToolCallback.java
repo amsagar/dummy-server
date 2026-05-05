@@ -115,12 +115,12 @@ public class AgentToolCallback implements ToolCallback {
         boolean isSkillTool = tool.getName() != null && "skill".equalsIgnoreCase(tool.getName().trim());
 
         if (!isSkillTool && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
-            String blocked = "Skill-first gate active: call the `skill` tool first to load relevant instructions before invoking domain tools.";
-            sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-            saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
-            sender.sendToolResult(sessionId, callId, tool.getName(), blocked, "blocked");
-            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"blocked\",\"output\":" + json(blocked) + "}");
-            return blocked;
+            // Soft gate: don't block the first domain tool call. Hard-blocking causes
+            // noisy duplicate calls and stalls practical flows when the model has already
+            // enough context from system prompt/skill catalog.
+            log.info("[AgentToolCallback] soft-bypassing skill-first gate for tool={} sessionId={} turnId={}",
+                    tool.getName(), sessionId, turnId);
+            skillExecutionGate.markSkillLoaded();
         }
 
         GuardrailPolicyEngine.Decision decision = policyEngine.evaluateTool(tool);
