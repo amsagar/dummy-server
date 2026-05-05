@@ -193,13 +193,32 @@ If the tool returns `matched:false`, report sequence mismatch/data gap (not tabl
 
 ## Final response format
 
-Return plain text with this exact section structure:
+Return plain text in this simple table-style format:
 
-1. `Order: <orderId>`
-2. `Category 1 - Service Area: PASS|FAIL`
-3. `Category 2 - Calendar Availability: PASS|FAIL`
-4. `Category 3 - Service Leg Sequence: PASS|FAIL`
-5. `Errors:` (list ERROR-1/2/3 lines, or `None`)
-6. `Recommended Actions:` (bullet points)
+```
+Order: <orderId>
 
-Keep response concise, deterministic, and audit-friendly.
+| Category | Status | Notes |
+|---|---|---|
+| Category 1 - Service Area | PASS/FAIL | <short reason> |
+| Category 2 - Calendar Availability | PASS/FAIL | <short reason> |
+| Category 3 - Service Leg Sequence | PASS/FAIL | <short reason> |
+
+| Errors |
+|---|
+| <ERROR-1 line or None> |
+| <ERROR-2 line or None> |
+| <ERROR-3 line or None> |
+
+| Recommended Actions |
+|---|
+| <action 1> |
+| <action 2> |
+| <action 3> |
+```
+
+Rules:
+
+- Keep each row concise and deterministic.
+- Do not output free-form paragraphs outside these tables.
+- If there are no errors, include one row: `None`.

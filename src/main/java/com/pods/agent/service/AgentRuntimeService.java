@@ -1498,6 +1498,7 @@ You are in ToolChain designer creation mode.
         return text.substring(0, max - 3) + "...";
     }
 
+
     private void saveSessionEvent(String sessionId, String turnId, String eventType, String payload) {
         runtimeEventRepository.save(RuntimeEvent.builder()
                 .sessionId(sessionId)
