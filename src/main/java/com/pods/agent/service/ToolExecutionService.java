@@ -116,9 +116,13 @@ public class ToolExecutionService {
             endpoint = appendQueryParams(endpoint, extractQueryParams(args, consumedKeys));
         }
 
-        String body = tool.getSampleRequest() != null && !tool.getSampleRequest().isBlank()
-                ? tool.getSampleRequest()
-                : "{\"query\":\"" + sanitize(userText) + "\"}";
+        String body = buildRequestBody(tool, args, consumedKeys, userText, method);
+        if (!"GET".equals(method) && !"DELETE".equals(method)
+                && requiresMappedPayload(tool.getName())
+                && isLikelyEmptyJsonObject(body)) {
+            return new ExecutionResult(false, null,
+                    "Tool input payload is empty. Map order fields and pass required attributes (zip/country/service fields) before calling this tool.");
+        }
         Map<String, String> headers = parseHeaders(tool.getRequestSchema());
         if (httpToolAuthService != null) {
             try {
@@ -819,6 +823,71 @@ public class ToolExecutionService {
             }
         }
         return null;
+    }
+
+    private String buildRequestBody(AgentTool tool,
+                                    Map<String, Object> args,
+                                    Set<String> consumedKeys,
+                                    String userText,
+                                    String method) {
+        if ("GET".equals(method) || "DELETE".equals(method)) return null;
+
+        // Highest priority: explicit "body" argument from tool call input.
+        Object explicitBody = findArgIgnoreCase(args, "body");
+        if (explicitBody instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        if (explicitBody instanceof Map<?, ?> mapBody) {
+            try {
+                Map<String, Object> normalized = new LinkedHashMap<>();
+                mapBody.forEach((k, v) -> normalized.put(String.valueOf(k), v));
+                return objectMapper.writeValueAsString(normalized);
+            } catch (Exception ignored) {
+            }
+        }
+
+        // Next: use direct arguments as JSON payload (excluding query/path helper keys).
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (args != null && !args.isEmpty()) {
+            for (Map.Entry<String, Object> entry : args.entrySet()) {
+                String key = entry.getKey();
+                if (key == null || key.isBlank()) continue;
+                String normalized = key.toLowerCase();
+                if ("query".equals(normalized) || "body".equals(normalized) || consumedKeys.contains(normalized)) continue;
+                payload.put(key, entry.getValue());
+            }
+        }
+        if (!payload.isEmpty()) {
+            try {
+                return objectMapper.writeValueAsString(payload);
+            } catch (Exception ignored) {
+            }
+        }
+
+        // Fallback to sampleRequest for backwards compatibility with static tools.
+        if (tool.getSampleRequest() != null && !tool.getSampleRequest().isBlank()) {
+            return tool.getSampleRequest();
+        }
+        return "{\"query\":\"" + sanitize(userText) + "\"}";
+    }
+
+    private boolean requiresMappedPayload(String toolName) {
+        if (toolName == null) return false;
+        String normalized = toolName.trim().toLowerCase();
+        return "serviceability".equals(normalized) || "containeravailability".equals(normalized);
+    }
+
+    private boolean isLikelyEmptyJsonObject(String body) {
+        if (body == null) return true;
+        String trimmed = body.trim();
+        if (trimmed.isEmpty()) return true;
+        if ("{}".equals(trimmed)) return true;
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(trimmed, Map.class);
+            return parsed == null || parsed.isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private Map<String, String> parseHeaders(String requestSchema) {
