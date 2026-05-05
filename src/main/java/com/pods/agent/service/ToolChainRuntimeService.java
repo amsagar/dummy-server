@@ -201,7 +201,7 @@ public class ToolChainRuntimeService {
             List<String> batch = new ArrayList<>();
             while (!ready.isEmpty()) batch.add(ready.poll());
             List<CompletableFuture<StepResult>> futures = batch.stream()
-                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender, effectiveSessionId), branchExecutor))
+                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender, effectiveSessionId, options), branchExecutor))
                     .toList();
             for (int i = 0; i < batch.size(); i++) {
                 String nodeId = batch.get(i);
@@ -229,8 +229,51 @@ public class ToolChainRuntimeService {
         return runRepository.findById(runId).orElse(run);
     }
 
-    private StepResult executeNode(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender, String effectiveSessionId) {
+    private StepResult executeNode(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
         if (node == null) return StepResult.failed("Missing node");
+
+        int maxAttempts = retryAttempts(node);
+        long backoff = retryBackoffMs(node);
+        double multiplier = retryMultiplier(node);
+        long maxBackoff = retryMaxBackoffMs(node);
+
+        StepResult result = null;
+        int attempt = 0;
+        for (; attempt <= maxAttempts; attempt++) {
+            result = executeNodeAttempt(runId, node, context, sender, effectiveSessionId, attempt, maxAttempts, runOptions);
+            if (result.success() || result.rejected()) break;
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(Math.min(backoff, maxBackoff));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                backoff = (long) Math.min(backoff * multiplier, maxBackoff);
+            }
+        }
+
+        if (result != null && !result.success() && !result.rejected()) {
+            String onError = node.configString("onError");
+            boolean continueOnFail = Boolean.TRUE.equals(node.config().get("continueOnFail"));
+            if (onError != null && !onError.isBlank()) {
+                Map<String, Object> recovered = new LinkedHashMap<>();
+                recovered.put("error", result.error());
+                recovered.put("recovered", true);
+                recovered.put("attempts", attempt);
+                return StepResult.success(Map.of(node.id(), recovered), List.of(onError));
+            }
+            if (continueOnFail) {
+                Map<String, Object> errOut = new LinkedHashMap<>();
+                errOut.put("error", result.error());
+                errOut.put("attempts", attempt);
+                return StepResult.success(Map.of(node.id(), errOut), null);
+            }
+        }
+        return result;
+    }
+
+    private StepResult executeNodeAttempt(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender, String effectiveSessionId, int attempt, int maxAttempts, Map<String, Object> runOptions) {
         ToolChainRunStep step = runStepRepository.save(ToolChainRunStep.builder()
                 .runId(runId)
                 .nodeId(node.id())
@@ -240,15 +283,18 @@ public class ToolChainRuntimeService {
                 .inputPayload(toJson(context))
                 .startedAt(System.currentTimeMillis())
                 .build());
-        Map<String, Object> startedPayload = new LinkedHashMap<>(Map.of(
-                "sessionId", effectiveSessionId,
-                "stepId", step.getId(),
-                "taskId", node.id(),
-                "taskName", node.label() == null ? node.id() : node.label(),
-                "type", node.type(),
-                "toolRef", node.toolRef() == null ? "" : node.toolRef(),
-                "input", context
-        ));
+        Map<String, Object> startedPayload = new LinkedHashMap<>();
+        startedPayload.put("sessionId", effectiveSessionId);
+        startedPayload.put("stepId", step.getId());
+        startedPayload.put("taskId", node.id());
+        startedPayload.put("taskName", node.label() == null ? node.id() : node.label());
+        startedPayload.put("type", node.type());
+        startedPayload.put("toolRef", node.toolRef() == null ? "" : node.toolRef());
+        startedPayload.put("input", context);
+        if (maxAttempts > 0) {
+            startedPayload.put("attempt", attempt);
+            startedPayload.put("maxAttempts", maxAttempts);
+        }
         saveRuntimeEvent(runId, "task.started", startedPayload, effectiveSessionId);
         if (sender != null) sender.sendCustom("task.started", startedPayload);
 
@@ -263,6 +309,11 @@ public class ToolChainRuntimeService {
             StepResult result = switch (node.type().toLowerCase(Locale.ROOT)) {
                 case "start", "end" -> StepResult.success(Map.of(node.id(), "ok"), null);
                 case "decision" -> executeDecision(node, context);
+                case "switch" -> executeSwitch(node, context);
+                case "merge" -> executeMerge(node, context);
+                case "wait" -> executeWait(node);
+                case "subchain" -> executeSubchain(node, context, runId, sender, effectiveSessionId, runOptions);
+                case "iterator" -> executeIterator(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "tool", "mcp_tool" -> executeToolNode(node, context);
                 case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
                 case "skill" -> StepResult.failed("Skill nodes are no longer supported as graph steps; use synthesisPrompt to invoke skills in the final LLM stage.");
@@ -273,15 +324,18 @@ public class ToolChainRuntimeService {
             step.setErrorMessage(result.error());
             step.setEndedAt(System.currentTimeMillis());
             runStepRepository.update(step);
-            Map<String, Object> donePayload = new LinkedHashMap<>(Map.of(
-                    "sessionId", effectiveSessionId,
-                    "stepId", step.getId(),
-                    "taskId", node.id(),
-                    "taskName", node.label() == null ? node.id() : node.label(),
-                    "result", step.getStatus(),
-                    "output", result.outputs() == null ? Map.of() : result.outputs(),
-                    "error", step.getErrorMessage() == null ? "" : step.getErrorMessage()
-            ));
+            Map<String, Object> donePayload = new LinkedHashMap<>();
+            donePayload.put("sessionId", effectiveSessionId);
+            donePayload.put("stepId", step.getId());
+            donePayload.put("taskId", node.id());
+            donePayload.put("taskName", node.label() == null ? node.id() : node.label());
+            donePayload.put("result", step.getStatus());
+            donePayload.put("output", result.outputs() == null ? Map.of() : result.outputs());
+            donePayload.put("error", step.getErrorMessage() == null ? "" : step.getErrorMessage());
+            if (maxAttempts > 0) {
+                donePayload.put("attempt", attempt);
+                donePayload.put("maxAttempts", maxAttempts);
+            }
             saveRuntimeEvent(runId, "task.done", donePayload, effectiveSessionId);
             if (sender != null) sender.sendCustom("task.done", donePayload);
             return result;
@@ -290,18 +344,52 @@ public class ToolChainRuntimeService {
             step.setErrorMessage(e.getMessage());
             step.setEndedAt(System.currentTimeMillis());
             runStepRepository.update(step);
-            Map<String, Object> failPayload = new LinkedHashMap<>(Map.of(
-                    "sessionId", effectiveSessionId,
-                    "stepId", step.getId(),
-                    "taskId", node.id(),
-                    "taskName", node.label() == null ? node.id() : node.label(),
-                    "result", "failed",
-                    "error", e.getMessage() == null ? "Step execution failed" : e.getMessage()
-            ));
+            Map<String, Object> failPayload = new LinkedHashMap<>();
+            failPayload.put("sessionId", effectiveSessionId);
+            failPayload.put("stepId", step.getId());
+            failPayload.put("taskId", node.id());
+            failPayload.put("taskName", node.label() == null ? node.id() : node.label());
+            failPayload.put("result", "failed");
+            failPayload.put("error", e.getMessage() == null ? "Step execution failed" : e.getMessage());
+            if (maxAttempts > 0) {
+                failPayload.put("attempt", attempt);
+                failPayload.put("maxAttempts", maxAttempts);
+            }
             saveRuntimeEvent(runId, "task.done", failPayload, effectiveSessionId);
             if (sender != null) sender.sendCustom("task.done", failPayload);
             return StepResult.failed(e.getMessage());
         }
+    }
+
+    private int retryAttempts(NodeModel node) {
+        Map<String, Object> retry = node.configMap("retry");
+        Object attempts = retry.get("attempts");
+        if (attempts instanceof Number n) return Math.max(0, Math.min(n.intValue(), 10));
+        return 0;
+    }
+
+    private long retryBackoffMs(NodeModel node) {
+        Map<String, Object> retry = node.configMap("retry");
+        Object backoff = retry.get("backoffMs");
+        if (backoff instanceof Number n) return Math.max(0L, n.longValue());
+        return 1000L;
+    }
+
+    private double retryMultiplier(NodeModel node) {
+        Map<String, Object> retry = node.configMap("retry");
+        Object mult = retry.get("multiplier");
+        if (mult instanceof Number n) {
+            double v = n.doubleValue();
+            return v < 1.0 ? 1.0 : Math.min(v, 10.0);
+        }
+        return 1.0;
+    }
+
+    private long retryMaxBackoffMs(NodeModel node) {
+        Map<String, Object> retry = node.configMap("retry");
+        Object cap = retry.get("maxBackoffMs");
+        if (cap instanceof Number n) return Math.max(100L, n.longValue());
+        return 30_000L;
     }
 
     private StepResult handleApproval(String runId, NodeModel node, ToolChainRunStep step, SseEventSender sender, String effectiveSessionId) {
@@ -373,6 +461,305 @@ public class ToolChainRuntimeService {
                 : (falseBranch == null ? List.of() : List.of(falseBranch));
         Map<String, Object> out = Map.of(node.id(), matched ? "true" : "false");
         return StepResult.success(out, next);
+    }
+
+    @SuppressWarnings("unchecked")
+    private StepResult executeSwitch(NodeModel node, Map<String, Object> context) {
+        String sourceKey = node.configString("sourceKey");
+        if (sourceKey == null || sourceKey.isBlank()) {
+            return StepResult.failed("switch node missing 'sourceKey'");
+        }
+        Object actual = resolvePath(context, sourceKey);
+        String actualStr = actual == null ? "" : String.valueOf(actual);
+        Object casesObj = node.config().get("cases");
+        String matchedCase = null;
+        String target = null;
+        if (casesObj instanceof List<?> caseList) {
+            for (Object c : caseList) {
+                if (!(c instanceof Map<?, ?> caseMap)) continue;
+                Object when = caseMap.get("when");
+                if (when == null) continue;
+                if (String.valueOf(when).equalsIgnoreCase(actualStr)) {
+                    matchedCase = String.valueOf(when);
+                    Object to = caseMap.get("to");
+                    if (to != null) target = String.valueOf(to);
+                    break;
+                }
+            }
+        }
+        if (target == null) {
+            String defaultBranch = node.configString("default");
+            if (defaultBranch != null && !defaultBranch.isBlank()) {
+                target = defaultBranch;
+                matchedCase = "__default__";
+            }
+        }
+        if (target == null) {
+            // No match and no default — fall through to outgoing edges as-is.
+            return StepResult.success(Map.of(node.id(), Map.of("matched", "none")), null);
+        }
+        Map<String, Object> out = Map.of(node.id(), Map.of("matched", matchedCase, "branch", target));
+        return StepResult.success(out, List.of(target));
+    }
+
+    @SuppressWarnings("unchecked")
+    private StepResult executeMerge(NodeModel node, Map<String, Object> context) {
+        String strategy = node.configString("strategy");
+        if (strategy == null || strategy.isBlank()) strategy = "shallow_merge";
+        Object sourcesObj = node.config().get("sources");
+        if (!(sourcesObj instanceof List<?> sourcesList) || sourcesList.isEmpty()) {
+            return StepResult.failed("merge node missing 'sources' list");
+        }
+        List<Object> values = new ArrayList<>();
+        Map<String, Object> kvMap = new LinkedHashMap<>();
+        for (Object s : sourcesList) {
+            if (s == null) continue;
+            String src = String.valueOf(s);
+            Object value = resolvePath(context, src);
+            kvMap.put(src, value);
+            if (value != null) values.add(value);
+        }
+        Object combined;
+        switch (strategy.toLowerCase(Locale.ROOT)) {
+            case "concat" -> {
+                List<Object> flat = new ArrayList<>();
+                for (Object v : values) {
+                    if (v instanceof List<?> list) flat.addAll(list);
+                    else flat.add(v);
+                }
+                combined = flat;
+            }
+            case "first_non_null" -> {
+                combined = values.isEmpty() ? null : values.get(0);
+            }
+            case "pick_object" -> {
+                combined = kvMap;
+            }
+            case "shallow_merge" -> {
+                Map<String, Object> merged = new LinkedHashMap<>();
+                for (Object v : values) {
+                    if (v instanceof Map<?, ?> m) {
+                        for (Map.Entry<?, ?> e : m.entrySet()) {
+                            merged.put(String.valueOf(e.getKey()), e.getValue());
+                        }
+                    }
+                }
+                combined = merged;
+            }
+            default -> {
+                return StepResult.failed("merge node unknown strategy: " + strategy);
+            }
+        }
+        return StepResult.success(Map.of(node.id(), combined == null ? Map.of() : combined), null);
+    }
+
+    private StepResult executeWait(NodeModel node) {
+        Object delayObj = node.config().get("delayMs");
+        long delayMs = delayObj instanceof Number n ? n.longValue() : 0L;
+        if (delayMs <= 0) {
+            return StepResult.success(Map.of(node.id(), Map.of("waited", 0)), null);
+        }
+        long maxDelay = 10L * 60L * 1000L; // 10 minute hard cap
+        long actual = Math.min(delayMs, maxDelay);
+        try {
+            Thread.sleep(actual);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return StepResult.failed("wait interrupted");
+        }
+        return StepResult.success(Map.of(node.id(), Map.of("waited", actual)), null);
+    }
+
+    private static final int MAX_SUBCHAIN_DEPTH = 5;
+
+    @SuppressWarnings("unchecked")
+    private StepResult executeSubchain(NodeModel node, Map<String, Object> context, String parentRunId, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
+        String subChainId = node.configString("chainId");
+        if (subChainId == null || subChainId.isBlank()) {
+            return StepResult.failed("subchain node missing 'chainId'");
+        }
+        Integer subVersion = null;
+        Object versionObj = node.config().get("version");
+        if (versionObj instanceof Number n) subVersion = n.intValue();
+
+        int currentDepth = 0;
+        Object depthObj = runOptions == null ? null : runOptions.get("subchainDepth");
+        if (depthObj instanceof Number n) currentDepth = n.intValue();
+        if (currentDepth >= MAX_SUBCHAIN_DEPTH) {
+            return StepResult.failed("subchain depth limit reached (" + MAX_SUBCHAIN_DEPTH + ") — possible recursion");
+        }
+
+        Map<String, Object> resolvedInput = resolveSubchainInput(node, context);
+        boolean async = Boolean.TRUE.equals(node.config().get("async"));
+
+        Map<String, Object> childOptions = new LinkedHashMap<>();
+        if (runOptions != null) childOptions.putAll(runOptions);
+        childOptions.put("subchainDepth", currentDepth + 1);
+        childOptions.put("async", async);
+
+        String chatSessionId = childChatSessionId(effectiveSessionId, parentRunId);
+        String initiatedBy = inheritedInitiatedBy(parentRunId);
+
+        try {
+            ToolChainRun childRun = execute(subChainId, subVersion, "subchain", initiatedBy,
+                    resolvedInput, childOptions, sender, chatSessionId);
+            Map<String, Object> nodeOut = new LinkedHashMap<>();
+            nodeOut.put("subRunId", childRun.getId());
+            nodeOut.put("subVersion", childRun.getVersion());
+            nodeOut.put("status", childRun.getStatus());
+            if (!async) {
+                Object resultPayload = parseFlexibleBody(extractResultFromSnapshot(childRun.getOutputSnapshot()));
+                nodeOut.put("result", resultPayload);
+            }
+            return StepResult.success(Map.of(node.id(), nodeOut), null);
+        } catch (Exception e) {
+            return StepResult.failed("subchain '" + subChainId + "' failed: " + e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private StepResult executeIterator(NodeModel node, Map<String, Object> context, String parentRunId, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
+        String over = node.configString("over");
+        if (over == null || over.isBlank()) {
+            return StepResult.failed("iterator node missing 'over'");
+        }
+        String as = node.configString("as");
+        if (as == null || as.isBlank()) as = "item";
+        String subChainId = node.configString("subChainId");
+        if (subChainId == null || subChainId.isBlank()) {
+            return StepResult.failed("iterator node missing 'subChainId'");
+        }
+        Integer subVersion = null;
+        Object versionObj = node.config().get("subVersion");
+        if (versionObj instanceof Number n) subVersion = n.intValue();
+        boolean parallel = !Boolean.FALSE.equals(node.config().get("parallel"));
+        int maxConcurrency = 4;
+        Object concObj = node.config().get("maxConcurrency");
+        if (concObj instanceof Number n) maxConcurrency = Math.max(1, Math.min(n.intValue(), 16));
+
+        Object source = resolvePath(context, over);
+        if (!(source instanceof List<?> items)) {
+            // Allow empty/missing as no-op rather than failure — common for "iterate over results that may be empty".
+            return StepResult.success(Map.of(node.id(), List.of()), null);
+        }
+        if (items.isEmpty()) {
+            return StepResult.success(Map.of(node.id(), List.of()), null);
+        }
+
+        int currentDepth = 0;
+        Object depthObj = runOptions == null ? null : runOptions.get("subchainDepth");
+        if (depthObj instanceof Number n) currentDepth = n.intValue();
+        if (currentDepth >= MAX_SUBCHAIN_DEPTH) {
+            return StepResult.failed("iterator depth limit reached (" + MAX_SUBCHAIN_DEPTH + ") — possible recursion");
+        }
+
+        String chatSessionId = childChatSessionId(effectiveSessionId, parentRunId);
+        String initiatedBy = inheritedInitiatedBy(parentRunId);
+        boolean continueOnFail = Boolean.TRUE.equals(node.config().get("continueOnFail"));
+
+        Map<String, Object> baseChildOptions = new LinkedHashMap<>();
+        if (runOptions != null) baseChildOptions.putAll(runOptions);
+        baseChildOptions.put("subchainDepth", currentDepth + 1);
+        baseChildOptions.put("async", false);
+
+        final String asKey = as;
+        final String chainId = subChainId;
+        final Integer version = subVersion;
+
+        java.util.concurrent.Semaphore limiter = new java.util.concurrent.Semaphore(maxConcurrency);
+        List<CompletableFuture<Object>> futures = new ArrayList<>();
+        for (Object item : items) {
+            Map<String, Object> itemInput = new LinkedHashMap<>(context);
+            itemInput.put(asKey, item);
+            CompletableFuture<Object> fut;
+            if (parallel) {
+                fut = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        limiter.acquire();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return Map.of("error", "interrupted");
+                    }
+                    try {
+                        return runIteratorItem(chainId, version, initiatedBy, itemInput, baseChildOptions, sender, chatSessionId, continueOnFail);
+                    } finally {
+                        limiter.release();
+                    }
+                }, branchExecutor);
+            } else {
+                fut = CompletableFuture.completedFuture(
+                        runIteratorItem(chainId, version, initiatedBy, itemInput, baseChildOptions, sender, chatSessionId, continueOnFail));
+            }
+            futures.add(fut);
+        }
+
+        List<Object> results = new ArrayList<>();
+        for (CompletableFuture<Object> f : futures) {
+            try {
+                results.add(f.join());
+            } catch (Exception e) {
+                if (continueOnFail) {
+                    results.add(Map.of("error", e.getMessage() == null ? "iterator item failed" : e.getMessage()));
+                } else {
+                    return StepResult.failed("iterator item failed: " + e.getMessage());
+                }
+            }
+        }
+        return StepResult.success(Map.of(node.id(), results), null);
+    }
+
+    private Object runIteratorItem(String subChainId, Integer subVersion, String initiatedBy,
+                                   Map<String, Object> itemInput, Map<String, Object> baseChildOptions,
+                                   SseEventSender sender, String chatSessionId, boolean continueOnFail) {
+        try {
+            ToolChainRun childRun = execute(subChainId, subVersion, "iterator", initiatedBy,
+                    itemInput, baseChildOptions, sender, chatSessionId);
+            return parseFlexibleBody(extractResultFromSnapshot(childRun.getOutputSnapshot()));
+        } catch (Exception e) {
+            if (continueOnFail) {
+                return Map.of("error", e.getMessage() == null ? "iterator item failed" : e.getMessage());
+            }
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> resolveSubchainInput(NodeModel node, Map<String, Object> context) {
+        Map<String, Object> mappings = node.configMap("inputMappings");
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : mappings.entrySet()) {
+            String targetKey = entry.getKey();
+            if (targetKey == null || targetKey.isBlank()) continue;
+            Object source = entry.getValue();
+            Object value = source instanceof String
+                    ? resolvePath(context, String.valueOf(source))
+                    : source;
+            if (value != null) out.put(targetKey, value);
+        }
+        return out;
+    }
+
+    private String childChatSessionId(String effectiveSessionId, String parentRunId) {
+        // For chat-driven parents effectiveSessionId IS the chat session id; pass it on so child
+        // events flow to the same chat. For non-chat parents effectiveSessionId equals the parent
+        // runId, which is not a real chat session — pass null so the FK isn't violated.
+        if (effectiveSessionId == null) return null;
+        if (parentRunId != null && effectiveSessionId.equals(parentRunId)) return null;
+        return effectiveSessionId;
+    }
+
+    private String inheritedInitiatedBy(String parentRunId) {
+        if (parentRunId == null) return null;
+        return runRepository.findById(parentRunId).map(ToolChainRun::getInitiatedBy).orElse(null);
+    }
+
+    private String extractResultFromSnapshot(String outputSnapshot) {
+        if (outputSnapshot == null || outputSnapshot.isBlank()) return null;
+        Map<String, Object> outer = fromJsonMap(outputSnapshot);
+        Object result = outer.get("result");
+        if (result instanceof String s) return s;
+        if (result != null) return toJson(result);
+        return null;
     }
 
     private StepResult executeSynthesisNode(NodeModel node,

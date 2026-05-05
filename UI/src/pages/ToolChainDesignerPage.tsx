@@ -318,10 +318,15 @@ export default function ToolChainDesignerPage() {
   }, [currentToolChain]);
 
   const latest = useMemo(() => (Array.isArray(versions) && versions.length > 0 ? versions[0] : null), [versions]);
-  const hasUnpublishedDraft = useMemo(
-    () => Array.isArray(versions) && versions.some((v: any) => v?.published === false),
-    [versions]
+  const canPublishDraft = useMemo(
+    () => Boolean(toolChainId) && Boolean(activeSessionId),
+    [toolChainId, activeSessionId]
   );
+  const publishDraftDisabledReason = useMemo(() => {
+    if (!toolChainId) return "ToolChain is not yet bound to this designer session.";
+    if (!activeSessionId) return "No active config session selected.";
+    return "";
+  }, [toolChainId, activeSessionId]);
 
   useEffect(() => {
     if (activeSessionId) return;
@@ -1215,7 +1220,8 @@ export default function ToolChainDesignerPage() {
               size="sm"
               className="h-8 px-3 text-xs"
               onClick={() => publishDraftMutation.mutate()}
-              disabled={!toolChainId || !hasUnpublishedDraft || publishDraftMutation.isPending}
+              disabled={!canPublishDraft || publishDraftMutation.isPending}
+              title={!canPublishDraft ? publishDraftDisabledReason : undefined}
             >
               {publishDraftMutation.isPending ? "Publishing..." : "Publish Draft"}
             </Button>
@@ -1480,29 +1486,38 @@ export default function ToolChainDesignerPage() {
             <DialogTitle>ToolChain Versions</DialogTitle>
           </DialogHeader>
           <div className="max-h-[380px] space-y-2 overflow-auto">
-            {versions.map((v: any) => (
-              <div key={v.id} className="flex items-center justify-between rounded border p-2">
-                <div>
-                  <p className="text-sm font-medium">v{v.version} {v.published ? "(published)" : ""}</p>
-                  <p className="text-xs text-slate-500">responseMode: {v.responseMode || "hybrid"}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button size="sm" onClick={() => publish.mutate(v.version)} disabled={publish.isPending || v.published}>Publish</Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={v.published}
-                    onClick={() => {
-                      setRollbackVersion(v.version);
-                      setRollbackText("");
-                      setRollbackOpen(true);
-                    }}
-                  >
-                    Rollback
-                  </Button>
-                </div>
+            {versions.length === 0 ? (
+              <div className="rounded border border-dashed p-4">
+                <p className="text-sm font-medium text-slate-700">No versions found</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  This ToolChain has no saved versions yet. Use AI/chat edits and click Publish Draft to create/publish a version.
+                </p>
               </div>
-            ))}
+            ) : (
+              versions.map((v: any) => (
+                <div key={v.id} className="flex items-center justify-between rounded border p-2">
+                  <div>
+                    <p className="text-sm font-medium">v{v.version} {v.published ? "(published)" : ""}</p>
+                    <p className="text-xs text-slate-500">responseMode: {v.responseMode || "hybrid"}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={() => publish.mutate(v.version)} disabled={publish.isPending || v.published}>Publish</Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={v.published}
+                      onClick={() => {
+                        setRollbackVersion(v.version);
+                        setRollbackText("");
+                        setRollbackOpen(true);
+                      }}
+                    >
+                      Rollback
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setVersionsOpen(false)}>Close</Button>

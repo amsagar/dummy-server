@@ -192,9 +192,37 @@ function buildReadableFallbackPositions(nodes: any[], edges: any[]) {
 function statusStyles(status: string) {
   const normalized = String(status || "").toLowerCase();
   if (normalized === "success") return { bg: "#DCFCE7", border: "#16A34A" };
+  if (normalized === "recovered") return { bg: "#FEF9C3", border: "#CA8A04" };
   if (normalized === "failed" || normalized === "rejected") return { bg: "#FEE2E2", border: "#DC2626" };
   if (normalized === "running" || normalized === "waiting_for_approval") return { bg: "#FEF3C7", border: "#D97706" };
   return { bg: "#E2E8F0", border: "#64748B" };
+}
+
+function parseStepOutput(step: any): any {
+  if (!step?.outputPayload) return null;
+  try { return JSON.parse(step.outputPayload); } catch { return null; }
+}
+
+function stepDerivedStatus(step: any): string {
+  if (!step) return "queued";
+  const out = parseStepOutput(step);
+  if (out && typeof out === "object") {
+    for (const v of Object.values(out)) {
+      if (v && typeof v === "object" && (v as any).recovered === true) return "recovered";
+    }
+  }
+  return step.status || "queued";
+}
+
+function stepSubRunId(step: any): string | null {
+  const out = parseStepOutput(step);
+  if (!out || typeof out !== "object") return null;
+  for (const v of Object.values(out)) {
+    if (v && typeof v === "object" && typeof (v as any).subRunId === "string") {
+      return (v as any).subRunId;
+    }
+  }
+  return null;
 }
 
 function buildStepMap(steps: any[]) {
@@ -253,7 +281,7 @@ export default function ToolChainRunDetailPage() {
     const nodes = graphNodes.map((node: any, idx: number) => {
       const id = String(node.id);
       const step = stepMap.get(id);
-      const status = step?.status || "queued";
+      const status = step ? stepDerivedStatus(step) : "queued";
       const { bg, border } = statusStyles(status);
       const rawX = toFiniteNumber(node?.position?.x);
       const rawY = toFiniteNumber(node?.position?.y);
@@ -270,7 +298,7 @@ export default function ToolChainRunDetailPage() {
             ? { x: rawX, y: rawY }
             : fallbackPositions[id] || { x: 80 + idx * 220, y: 100 },
         data: {
-          label: `${needsApproval ? "🔒 " : ""}${baseLabel}${step?.status ? ` (${step.status})` : ""}`,
+          label: `${needsApproval ? "🔒 " : ""}${baseLabel}${step ? ` (${status})` : ""}`,
         },
         style: {
           backgroundColor: bg,
@@ -366,10 +394,21 @@ export default function ToolChainRunDetailPage() {
             <div className="space-y-2 text-sm">
               <div className="rounded border p-2">
                 <p><span className="font-medium">Node:</span> {selectedNodeId}</p>
-                <p><span className="font-medium">Status:</span> {selectedStep?.status || "not executed"}</p>
+                <p><span className="font-medium">Status:</span> {selectedStep ? stepDerivedStatus(selectedStep) : "not executed"}</p>
                 <p><span className="font-medium">Type:</span> {selectedStep?.nodeType || "—"}</p>
                 <p><span className="font-medium">Started:</span> {selectedStep?.startedAt ? new Date(selectedStep.startedAt).toLocaleString() : "—"}</p>
                 <p><span className="font-medium">Ended:</span> {selectedStep?.endedAt ? new Date(selectedStep.endedAt).toLocaleString() : "—"}</p>
+                {selectedStep && stepSubRunId(selectedStep) ? (
+                  <p>
+                    <span className="font-medium">Child run:</span>{" "}
+                    <a
+                      href={`/toolchains/runs/${stepSubRunId(selectedStep)}`}
+                      className="text-[#005CB9] underline hover:text-[#123262]"
+                    >
+                      #{String(stepSubRunId(selectedStep)).slice(0, 8)}
+                    </a>
+                  </p>
+                ) : null}
               </div>
               <div>
                 <p className="mb-1 text-xs font-medium text-slate-600">Input</p>

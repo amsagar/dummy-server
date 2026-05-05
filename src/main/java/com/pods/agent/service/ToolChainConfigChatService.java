@@ -1771,6 +1771,13 @@ Designer instruction:
         ToolChainDtos.ToolChainVersionRequest req = buildVersionRequestFromArtifact(artifact);
         var version = toolChainService.createVersion(toolChainId, req, userId);
         toolChainService.publishVersion(toolChainId, version.getVersion());
+        try {
+            String chainName = deriveChainName(toolChainId, session, artifact);
+            String chainDescription = deriveChainDescription(artifact);
+            toolChainService.updateMetadata(toolChainId, chainName, chainDescription);
+        } catch (Exception e) {
+            log.warn("[ToolChainConfigChatService] Failed to update chain metadata after publishFromSession: {}", e.getMessage());
+        }
         artifact.put("phase", "completed");
         artifact.put("proposalAccepted", true);
         artifact.put("acceptedAt", System.currentTimeMillis());
@@ -1828,7 +1835,7 @@ Designer instruction:
         // artifact the architect just compiled — otherwise the listing keeps echoing
         // the user's first prompt twice.
         try {
-            String chainName = deriveChainName(toolChainId, normalized);
+            String chainName = deriveChainName(toolChainId, session, normalized);
             String chainDescription = deriveChainDescription(normalized);
             toolChainService.updateMetadata(toolChainId, chainName, chainDescription);
         } catch (Exception e) {
@@ -1985,8 +1992,9 @@ Designer instruction:
 
     private String deriveToolChainName(String source) {
         if (source == null || source.isBlank()) return "AI Generated ToolChain";
-        String normalized = source.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
-        if (normalized.length() > 64) normalized = normalized.substring(0, 64).trim();
+        String normalized = cleanNameCandidate(source);
+        if (normalized.isBlank()) normalized = source.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
+        normalized = toTitleCase(truncateTitle(normalized));
         if (normalized.isBlank()) return "AI Generated ToolChain";
         return normalized;
     }
@@ -3036,25 +3044,113 @@ Designer instruction:
      * ToolChains list reads like "Order Validation Pipeline" instead of echoing
      * the user's first prompt twice.
      */
-    private String deriveChainName(String toolChainId, Map<String, Object> artifact) {
+    private String deriveChainName(String toolChainId, ToolChainConfigSession session, Map<String, Object> artifact) {
+        String aiName = generateAiToolChainName(toolChainId, session, artifact);
+        if (!aiName.isBlank()) {
+            return appendStructuralSuffixIfMissing(toTitleCase(truncateTitle(aiName)), artifact);
+        }
         Object titleHint = artifact.get("titleHint");
         if (titleHint != null && !String.valueOf(titleHint).isBlank()) {
-            return truncateTitle(String.valueOf(titleHint));
+            String cleaned = cleanNameCandidate(String.valueOf(titleHint));
+            if (!cleaned.isBlank()) {
+                return appendStructuralSuffixIfMissing(toTitleCase(truncateTitle(cleaned)), artifact);
+            }
         }
         List<String> intents = readStringList(artifact.get("intents"));
         if (!intents.isEmpty()) {
-            return toTitleCase(truncateTitle(intents.get(0))) + " " + structuralSuffix(artifact);
+            String cleaned = cleanNameCandidate(intents.get(0));
+            if (!cleaned.isBlank()) {
+                return appendStructuralSuffixIfMissing(toTitleCase(truncateTitle(cleaned)), artifact);
+            }
+        }
+        String fromGraph = deriveNameFromGraph(artifact);
+        if (!fromGraph.isBlank()) {
+            return appendStructuralSuffixIfMissing(toTitleCase(truncateTitle(fromGraph)), artifact);
         }
         if (toolChainId != null && !toolChainId.isBlank()) {
             try {
                 String existing = toolChainService.getRequired(toolChainId).getName();
                 if (existing != null && !existing.isBlank()) {
-                    return toTitleCase(truncateTitle(existing));
+                    String cleaned = cleanNameCandidate(existing);
+                    if (!cleaned.isBlank() && !looksPromptLike(cleaned)) {
+                        return appendStructuralSuffixIfMissing(toTitleCase(truncateTitle(cleaned)), artifact);
+                    }
                 }
             } catch (Exception ignored) {
             }
         }
-        return "Untitled ToolChain";
+        return "Untitled " + structuralSuffix(artifact);
+    }
+
+    private String generateAiToolChainName(String toolChainId, ToolChainConfigSession session, Map<String, Object> artifact) {
+        ModelRef modelRef = resolveNameGenerationModelRef(toolChainId, session);
+        if (modelRef == null) return "";
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("workflowIntent", stringValue(artifact.get("workflowIntent")));
+        payload.put("intents", readStringList(artifact.get("intents")));
+        payload.put("responseMode", stringValue(artifact.getOrDefault("responseMode", "hybrid")));
+        payload.put("proposalSummary", stringValue(artifact.get("proposalSummary")));
+        payload.put("graphJson", readMap(artifact.get("graphJson")));
+        String systemPrompt = """
+                You name AI workflow toolchains.
+                Return ONLY JSON: {"name":"..."}.
+                Rules:
+                - 2 to 6 words, concise and professional.
+                - Must describe business purpose, not implementation details.
+                - Do not start with verbs like Build/Create/Make/Generate/Design.
+                - Do not include quotes, punctuation suffixes, or emojis.
+                - Prefer title case.
+                """;
+        try {
+            String raw = modelProviderRouter.resolve(modelRef, true)
+                    .client()
+                    .prompt()
+                    .system(systemPrompt)
+                    .user(toJson(payload))
+                    .call()
+                    .content();
+            Map<String, Object> parsed = readMap(extractJsonObject(raw));
+            String candidate = cleanNameCandidate(stringValue(parsed.get("name")));
+            if (candidate.isBlank()) return "";
+            if (looksPromptLike(candidate)) return "";
+            return candidate;
+        } catch (Exception e) {
+            log.warn("[ToolChainConfigChatService] AI name generation failed for {}: {}", toolChainId, e.getMessage());
+            return "";
+        }
+    }
+
+    private ModelRef resolveNameGenerationModelRef(String toolChainId, ToolChainConfigSession session) {
+        if (session != null && session.getId() != null) {
+            try {
+                List<ToolChainConfigMessage> rows = messageRepository.findBySessionId(session.getId());
+                for (int i = rows.size() - 1; i >= 0; i--) {
+                    ToolChainConfigMessage row = rows.get(i);
+                    Map<String, Object> metadata = readMap(row.getMetadataJson());
+                    Map<String, Object> modelRef = readMap(metadata.get("modelRef"));
+                    String providerId = stringValue(modelRef.get("providerID"));
+                    String modelId = stringValue(modelRef.get("modelID"));
+                    if (!providerId.isBlank() && !modelId.isBlank()) {
+                        return new ModelRef(providerId, modelId);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (toolChainId != null && !toolChainId.isBlank()) {
+            try {
+                ToolChain chain = toolChainService.getRequired(toolChainId);
+                Map<String, Object> metadata = readMap(chain.getMetadataJson());
+                Map<String, Object> modelRef = readMap(metadata.get("defaultModelRef"));
+                String providerId = stringValue(modelRef.get("providerID"));
+                String modelId = stringValue(modelRef.get("modelID"));
+                if (!providerId.isBlank() && !modelId.isBlank()) {
+                    return new ModelRef(providerId, modelId);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
     }
 
     /**
@@ -3101,6 +3197,72 @@ Designer instruction:
         if (toolNodes >= 2) return "Workflow";
         if (toolNodes == 1) return "Lookup";
         return "ToolChain";
+    }
+
+    private String appendStructuralSuffixIfMissing(String base, Map<String, Object> artifact) {
+        String normalizedBase = truncateTitle(base == null ? "" : base);
+        if (normalizedBase.isBlank()) return "Untitled " + structuralSuffix(artifact);
+        String suffix = structuralSuffix(artifact);
+        String lower = normalizedBase.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(" pipeline")
+                || lower.endsWith(" workflow")
+                || lower.endsWith(" lookup")
+                || lower.endsWith(" toolchain")) {
+            return normalizedBase;
+        }
+        return normalizedBase + " " + suffix;
+    }
+
+    private String deriveNameFromGraph(Map<String, Object> artifact) {
+        Map<String, Object> graph = readMap(artifact.get("graphJson"));
+        List<Map<String, Object>> nodes = readMapList(graph.get("nodes"));
+        if (nodes.isEmpty()) return "";
+        Map<String, Integer> tokenCounts = new LinkedHashMap<>();
+        for (Map<String, Object> node : nodes) {
+            String type = stringValue(node.get("type")).toLowerCase(Locale.ROOT);
+            if ("start".equals(type) || "end".equals(type) || "synthesis".equals(type)) continue;
+            String label = cleanNameCandidate(stringValue(node.get("label")));
+            if (label.isBlank()) continue;
+            for (String token : label.toLowerCase(Locale.ROOT).split("[^a-z0-9]+")) {
+                if (token.length() < 3) continue;
+                if (Set.of("get", "set", "run", "call", "tool", "step", "check", "active", "node").contains(token)) continue;
+                tokenCounts.put(token, tokenCounts.getOrDefault(token, 0) + 1);
+            }
+        }
+        if (tokenCounts.isEmpty()) return "";
+        List<String> top = tokenCounts.entrySet().stream()
+                .sorted((a, b) -> {
+                    int byCount = Integer.compare(b.getValue(), a.getValue());
+                    if (byCount != 0) return byCount;
+                    return a.getKey().compareTo(b.getKey());
+                })
+                .map(Map.Entry::getKey)
+                .limit(3)
+                .toList();
+        return String.join(" ", top);
+    }
+
+    private static boolean looksPromptLike(String text) {
+        if (text == null || text.isBlank()) return true;
+        String value = text.trim().toLowerCase(Locale.ROOT);
+        return value.startsWith("build ")
+                || value.startsWith("create ")
+                || value.startsWith("make ")
+                || value.startsWith("design ")
+                || value.startsWith("generate ")
+                || value.contains("toolchain that")
+                || value.contains("workflow that")
+                || value.contains("pipeline that");
+    }
+
+    private static String cleanNameCandidate(String raw) {
+        if (raw == null) return "";
+        String value = raw.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
+        if (value.isBlank()) return "";
+        value = value.replaceAll("(?i)^(please\\s+)?(build|create|make|design|generate)\\s+(me\\s+)?(a|an|the)?\\s*(ai\\s+)?(tool\\s*chain|toolchain|workflow|pipeline)\\s*(that|to)?\\s*", "");
+        value = value.replaceAll("(?i)^for\\s+", "");
+        value = value.replaceAll("^[\\p{Punct}\\s]+", "").replaceAll("[\\p{Punct}\\s]+$", "");
+        return value;
     }
 
     private static String truncateDescription(String raw) {

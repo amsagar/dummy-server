@@ -66,7 +66,12 @@ The user message is a JSON object with these fields:
 | `end`       | (none)                                                    | exactly one. id conventionally `end`.                             |
 | `tool`      | `toolName` (from toolsCatalog)                            | optional `inputKey`, `argMappings`                                |
 | `mcp_tool`  | `toolName` (from mcpCatalog)                              | optional `inputKey`, `argMappings`                                |
-| `decision`  | `sourceKey`, `equals`, `trueBranch`, `falseBranch`        | branches by id reference                                          |
+| `decision`  | `sourceKey`, `equals`, `trueBranch`, `falseBranch`        | binary branch by id reference                                     |
+| `switch`    | `sourceKey`, `cases[]`, optional `default`                | n-way branch (see Section 4b)                                     |
+| `merge`     | `sources[]`, optional `strategy`                          | combine outputs from multiple upstream nodes (see Section 4c)     |
+| `wait`      | `delayMs`                                                 | sleep N ms before continuing (see Section 4d)                     |
+| `subchain`  | `chainId`, optional `version`, `inputMappings`            | call another ToolChain inline (see Section 4e)                    |
+| `iterator`  | `over`, `as`, `subChainId`, optional `subVersion`         | run a sub-chain once per array item (see Section 4f)              |
 | `synthesis` | optional `prompt`                                         | REQUIRED before `end` when responseMode is `hybrid/synthesized_text` |
 
 **There is no `skill` node type.** Anything you would have done with a skill node belongs
@@ -134,6 +139,143 @@ Optional sibling fields under `config` that the runtime also reads when present:
 When the user asks "add approval to X" / "make Y require approval" / "gate Z behind
 approval", the only edit required is setting `config.approvalMode = "required"` on
 the named node. Do not add a top-level `approval` object.
+
+## 4b. `switch` node — n-way branch
+
+Generalizes `decision` for more than two outcomes.
+
+```json
+{
+  "id": "route_by_status",
+  "type": "switch",
+  "config": {
+    "sourceKey": "get_order.status",
+    "cases": [
+      { "when": "Active",    "to": "active_branch" },
+      { "when": "Cancelled", "to": "cancel_branch" }
+    ],
+    "default": "fallback_branch"
+  }
+}
+```
+
+- `sourceKey`: dotted-path lookup into the run context (same syntax as `argMappings` source paths).
+- `cases[]`: each entry has `when` (literal string compared case-insensitively against the resolved value) and `to` (target node id).
+- `default`: optional fallback target when no case matches.
+- The graph MUST have an edge from the switch node to every possible target (each `to` and the `default`). The runtime takes only the matched edge.
+
+## 4c. `merge` node — combine multiple upstream outputs
+
+Use when a downstream tool needs a single combined value from several parallel branches. Without `merge`, the runtime exposes each upstream's output keyed by node id in context — fine for synthesis, but `merge` makes the combine strategy explicit for mid-graph joins.
+
+```json
+{
+  "id": "combine_checks",
+  "type": "merge",
+  "config": {
+    "strategy": "shallow_merge",
+    "sources": ["check_billing", "check_d365", "check_rbms"]
+  }
+}
+```
+
+- `sources[]`: list of context keys / dotted paths to read from.
+- `strategy`: one of
+  - `shallow_merge` (default): merge all source maps into one object.
+  - `concat`: flatten arrays into a single array.
+  - `first_non_null`: pick the first non-null/non-empty source.
+  - `pick_object`: build `{ source1: <val1>, source2: <val2>, ... }`.
+
+Output is stored at `context[<merge_node_id>]`.
+
+## 4d. `wait` node — time delay
+
+```json
+{ "id": "throttle", "type": "wait", "config": { "delayMs": 5000 } }
+```
+
+- `delayMs`: integer milliseconds. Hard-capped at 600000 (10 minutes).
+- No callback / event-based wait — for that, use an approval node.
+
+## 4e. `subchain` node — call another ToolChain
+
+```json
+{
+  "id": "fetch_container_data",
+  "type": "subchain",
+  "config": {
+    "chainId": "fetch-container",
+    "version": 2,
+    "inputMappings": { "containerId": "get_order.containerId" },
+    "async": false
+  }
+}
+```
+
+- `chainId`: id of another published ToolChain to invoke.
+- `version`: optional; defaults to the latest published version of that chain.
+- `inputMappings`: object map `{ targetKey: sourcePath }` resolved against parent context to build the child's input. Same shape as `tool.config.argMappings`.
+- `async: true`: fire-and-forget. Parent node completes immediately; output contains `subRunId` only.
+- `async: false` (default): block until the child completes; output contains `subRunId`, `status`, and `result` (the child's `outputSnapshot.result`, parsed).
+
+Recursion guard: a subchain that ultimately calls itself is refused after depth 5. Approval gates inside a sub-chain pause the parent transparently.
+
+## 4f. `iterator` node — run a sub-chain per array item
+
+```json
+{
+  "id": "validate_each_line",
+  "type": "iterator",
+  "config": {
+    "over": "get_order_lines",
+    "as": "line",
+    "subChainId": "validate-order-line",
+    "subVersion": 1,
+    "parallel": true,
+    "maxConcurrency": 5,
+    "continueOnFail": true
+  }
+}
+```
+
+- `over`: dotted-path resolving to an array in context.
+- `as`: key the iterator binds each item under in the sub-chain's input (must appear in the sub-chain's `inputSchema`).
+- `subChainId` / `subVersion`: child chain to run per item.
+- `parallel`: `true` (default) fans out via the runtime's branch executor, capped at `maxConcurrency` (default 4, max 16). `false` runs sequentially.
+- `continueOnFail`: when `true`, failed items become `{error: "<msg>"}` placeholders in the output array. When `false` (default), one failure aborts the whole iterator.
+
+Output at `context[<iterator_node_id>]` is an array of per-item results (same length as input array). Empty input array → empty output, no sub-runs spawned.
+
+## 4g. Per-node error policy (optional)
+
+ANY node type can opt into retry / recovery / continue-on-fail by adding these to `config`:
+
+```json
+{
+  "id": "flaky_external_call",
+  "type": "tool",
+  "config": {
+    "toolName": "GetExternalRiskScore",
+    "argMappings": { "id": "orderId" },
+    "retry": {
+      "attempts": 3,
+      "backoffMs": 1000,
+      "multiplier": 2.0,
+      "maxBackoffMs": 30000
+    },
+    "continueOnFail": false,
+    "onError": "fallback_node_id"
+  }
+}
+```
+
+Resolution order on failure:
+1. `retry` runs first if configured. `attempts` is the count of *additional* tries after the initial attempt (so `attempts: 3` = 4 total tries). `backoffMs` is the delay before the first retry; subsequent delays multiply by `multiplier` capped at `maxBackoffMs`. Approval rejections are NEVER retried.
+2. If retries exhaust, `onError` (a node id) takes the run down a recovery branch. The failed node's output is stored as `{error: "<msg>", recovered: true, attempts: N}`. The graph MUST have an edge from this node to the `onError` target.
+3. If no `onError` and `continueOnFail: true`, the run continues down its normal outgoing edges with `{error: "<msg>", attempts: N}` as the placeholder output.
+4. With neither set, the failure stops the whole run (default behavior).
+
+When the user asks "retry X up to N times", "fall back to Y if Z fails", or "don't fail the whole run if A breaks", the only edit is adding the canonical `retry` / `onError` / `continueOnFail` keys above. Do NOT invent shapes like `node.retries`, `node.errorBranch`, `node.fallback`, `config.retryCount`. The runtime reads ONLY the canonical keys.
 
 ## 5. The synthesis prompt — what to write
 
@@ -384,6 +526,20 @@ Return ONLY this JSON object. No prose, no markdown fences:
   or `approvalRequired`/`requireApproval` on the node or under `config`. The runtime
   reads ONLY `config.approvalMode` (see Section 4a). Any other shape is silently
   ignored — the gate will not fire and the node will appear un-flagged in the UI.
+- Retry / error shapes the runtime does NOT read: `node.retries`, `node.errorBranch`,
+  `node.fallback`, `config.retryCount`, `config.maxRetries`, `config.onFailure`,
+  `config.fallback`. The canonical keys are `config.retry.{attempts,backoffMs,multiplier,maxBackoffMs}`,
+  `config.onError`, `config.continueOnFail` (see Section 4g).
+- Switch shapes the runtime does NOT read: `config.branches` as an object map,
+  `config.routes`, `config.when` at the node top level. Use `config.cases[]` with
+  `{when, to}` entries and optional `config.default` (see Section 4b).
+- Subchain shapes the runtime does NOT read: `config.workflow`, `config.callChain`,
+  `config.invoke`. Use `config.chainId`, `config.version`, `config.inputMappings`,
+  `config.async` (see Section 4e).
+- Iterator shapes the runtime does NOT read: `config.forEach`, `config.loop`,
+  `config.iterate`. Use `config.over`, `config.as`, `config.subChainId`,
+  `config.subVersion`, `config.parallel`, `config.maxConcurrency`,
+  `config.continueOnFail` (see Section 4f).
 - `argMappings` referencing `"start.something"` to fetch user input. User input is at
   the root of context. Use the bare key (`"orderId"`, not `"start.orderId"`).
 - Path-param key shape mismatches: `argMappings: { "orderId": "orderId" }` when the
