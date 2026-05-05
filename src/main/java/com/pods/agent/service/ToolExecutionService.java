@@ -105,7 +105,11 @@ public class ToolExecutionService {
         if (endpoint == null) {
             return new ExecutionResult(false, null, "Invalid tool endpoint");
         }
-        Map<String, Object> args = parseArgs(userText);
+        Map<String, Object> args = normalizeDomainArgs(tool.getName(), parseArgs(userText));
+        String validationError = validateRequiredArgs(tool.getName(), args);
+        if (validationError != null) {
+            return new ExecutionResult(false, null, validationError);
+        }
         Set<String> consumedKeys = new HashSet<>();
         endpoint = hydratePathParams(endpoint, args, consumedKeys);
         List<String> unresolvedPathParams = unresolvedPathParams(endpoint);
@@ -823,6 +827,82 @@ public class ToolExecutionService {
             }
         }
         return null;
+    }
+
+    private Map<String, Object> normalizeDomainArgs(String toolName, Map<String, Object> rawArgs) {
+        Map<String, Object> args = new LinkedHashMap<>();
+        if (rawArgs != null) args.putAll(rawArgs);
+        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase();
+
+        if ("containeravailability".equals(normalizedName)) {
+            Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
+            if (zip != null) {
+                putIfMissing(args, "zip", zip);
+                putIfMissing(args, "Zip", zip);
+                putIfMissing(args, "postalCode", zip);
+                putIfMissing(args, "PostalCode", zip);
+            }
+            Object region = firstPresentArg(args, "regionCode", "RegionCode", "countryCode", "CountryCode");
+            if (region != null) {
+                putIfMissing(args, "regionCode", region);
+                putIfMissing(args, "RegionCode", region);
+                putIfMissing(args, "countryCode", region);
+                putIfMissing(args, "CountryCode", region);
+            }
+        }
+
+        if ("serviceability".equals(normalizedName)) {
+            Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
+            Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
+            if (originZip != null) {
+                putIfMissing(args, "originPostalCode", originZip);
+                putIfMissing(args, "originZip", originZip);
+            }
+            if (destinationZip != null) {
+                putIfMissing(args, "destinationPostalCode", destinationZip);
+                putIfMissing(args, "destinationZip", destinationZip);
+            }
+        }
+        return args;
+    }
+
+    private String validateRequiredArgs(String toolName, Map<String, Object> args) {
+        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase();
+        if ("serviceability".equals(normalizedName)) {
+            Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
+            Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
+            if (isBlankValue(originZip) || isBlankValue(destinationZip)) {
+                return "Serviceability requires origin and destination postal codes mapped from order data (do not call with empty payload).";
+            }
+        }
+        if ("containeravailability".equals(normalizedName)) {
+            Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
+            if (isBlankValue(zip)) {
+                return "ContainerAvailability requires a non-empty zip/postalCode mapped from order leg data.";
+            }
+        }
+        return null;
+    }
+
+    private Object firstPresentArg(Map<String, Object> args, String... keys) {
+        if (args == null || args.isEmpty() || keys == null) return null;
+        for (String key : keys) {
+            Object value = findArgIgnoreCase(args, key);
+            if (!isBlankValue(value)) return value;
+        }
+        return null;
+    }
+
+    private boolean isBlankValue(Object value) {
+        if (value == null) return true;
+        String text = String.valueOf(value);
+        return text == null || text.isBlank();
+    }
+
+    private void putIfMissing(Map<String, Object> args, String key, Object value) {
+        if (key == null || key.isBlank() || value == null) return;
+        Object existing = findArgIgnoreCase(args, key);
+        if (isBlankValue(existing)) args.put(key, value);
     }
 
     private String buildRequestBody(AgentTool tool,
