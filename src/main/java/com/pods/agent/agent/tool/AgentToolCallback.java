@@ -247,7 +247,7 @@ public class AgentToolCallback implements ToolCallback {
     private String resolveInputSchema(AgentTool t) {
         String raw = t.getRequestSchema();
         if (raw == null || raw.isBlank()) {
-            return ensureEndpointPathParams(EMPTY_OBJECT_SCHEMA, t);
+            return ensureEndpointPathParams(inferSchemaFromSampleRequest(t, EMPTY_OBJECT_SCHEMA), t);
         }
         try {
             Object parsed = objectMapper.readValue(raw, Object.class);
@@ -255,15 +255,16 @@ public class AgentToolCallback implements ToolCallback {
             if (parsed instanceof java.util.Map<?, ?> outer && outer.get("inputSchema") != null) {
                 schema = outer.get("inputSchema");
             }
-            return ensureEndpointPathParams(normalizeObjectSchema(schema), t);
+            String normalized = normalizeObjectSchema(schema);
+            return ensureEndpointPathParams(inferSchemaFromSampleRequest(t, normalized), t);
         } catch (Exception e) {
             String legacy = resolveLegacyFallbackSchema(t, raw);
             if (legacy != null) {
-                return ensureEndpointPathParams(legacy, t);
+                return ensureEndpointPathParams(inferSchemaFromSampleRequest(t, legacy), t);
             }
             log.debug("[AgentToolCallback] schema parse failed for tool={}, falling back to empty object. error={}, schemaSnippet={}",
                     t.getName(), e.getMessage(), truncate(raw, 220));
-            return ensureEndpointPathParams(EMPTY_OBJECT_SCHEMA, t);
+            return ensureEndpointPathParams(inferSchemaFromSampleRequest(t, EMPTY_OBJECT_SCHEMA), t);
         }
     }
 
@@ -469,6 +470,84 @@ public class AgentToolCallback implements ToolCallback {
     private static String truncate(String value, int max) {
         if (value == null || value.length() <= max) return value;
         return value.substring(0, Math.max(0, max - 3)) + "...";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String inferSchemaFromSampleRequest(AgentTool tool, String schemaJson) {
+        if (tool == null || tool.getSampleRequest() == null || tool.getSampleRequest().isBlank()) {
+            return schemaJson;
+        }
+        try {
+            Object schemaParsed = objectMapper.readValue(schemaJson, Object.class);
+            if (!(schemaParsed instanceof Map<?, ?> rawSchema)) return schemaJson;
+            Map<String, Object> schema = new LinkedHashMap<>((Map<String, Object>) rawSchema);
+            schema.putIfAbsent("type", "object");
+
+            Object propsObj = schema.get("properties");
+            Map<String, Object> properties = propsObj instanceof Map<?, ?> map
+                    ? new LinkedHashMap<>((Map<String, Object>) map)
+                    : new LinkedHashMap<>();
+            if (!properties.isEmpty()) return schemaJson;
+
+            Object sampleParsed = objectMapper.readValue(tool.getSampleRequest(), Object.class);
+            if (!(sampleParsed instanceof Map<?, ?> sampleMap) || sampleMap.isEmpty()) return schemaJson;
+
+            Map<String, Object> inferredProps = new LinkedHashMap<>();
+            List<String> inferredRequired = new ArrayList<>();
+            for (Map.Entry<?, ?> entry : sampleMap.entrySet()) {
+                if (entry.getKey() == null) continue;
+                String key = String.valueOf(entry.getKey());
+                Object value = entry.getValue();
+                inferredProps.put(key, inferSchemaNode(value));
+                if (value != null) inferredRequired.add(key);
+            }
+            if (inferredProps.isEmpty()) return schemaJson;
+
+            schema.put("properties", inferredProps);
+            if (!inferredRequired.isEmpty()) {
+                schema.put("required", inferredRequired.stream().distinct().toList());
+            }
+            normalizeSchemaNode(schema);
+            return objectMapper.writeValueAsString(schema);
+        } catch (Exception e) {
+            log.debug("[AgentToolCallback] sampleRequest schema inference skipped for tool={} error={}",
+                    tool.getName(), e.getMessage());
+            return schemaJson;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> inferSchemaNode(Object value) {
+        if (value == null) return Map.of("type", "string");
+        if (value instanceof Boolean) return Map.of("type", "boolean");
+        if (value instanceof Integer || value instanceof Long) return Map.of("type", "integer");
+        if (value instanceof Number) return Map.of("type", "number");
+        if (value instanceof String) return Map.of("type", "string");
+        if (value instanceof List<?> list) {
+            if (list.isEmpty()) {
+                return Map.of("type", "array", "items", Map.of("type", "string"));
+            }
+            return Map.of("type", "array", "items", inferSchemaNode(list.get(0)));
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> nestedProps = new LinkedHashMap<>();
+            List<String> nestedRequired = new ArrayList<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() == null) continue;
+                String key = String.valueOf(entry.getKey());
+                Object nestedValue = entry.getValue();
+                nestedProps.put(key, inferSchemaNode(nestedValue));
+                if (nestedValue != null) nestedRequired.add(key);
+            }
+            Map<String, Object> node = new LinkedHashMap<>();
+            node.put("type", "object");
+            node.put("properties", nestedProps);
+            if (!nestedRequired.isEmpty()) {
+                node.put("required", nestedRequired.stream().distinct().toList());
+            }
+            return node;
+        }
+        return Map.of("type", "string");
     }
 
     private String buildToolCallSignature(String toolName, String payload) {
