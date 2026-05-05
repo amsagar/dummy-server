@@ -438,6 +438,11 @@ public class ToolExecutionService {
                     inputs = new LinkedHashMap<>(args);
                     inputs.remove("tableName");
                 }
+                List<String> missing = missingRequiredDecisionInputs(tableName, inputs);
+                if (!missing.isEmpty()) {
+                    return new ExecutionResult(false, null,
+                            "decisionTableEvaluate is missing required inputs: " + String.join(", ", missing));
+                }
                 var result = decisionTableService.evaluate(tableName, inputs);
                 return new ExecutionResult(true, objectMapper.writeValueAsString(result.asMap()), null);
             } catch (Exception e) {
@@ -836,9 +841,10 @@ public class ToolExecutionService {
     private Map<String, Object> normalizeDomainArgs(String toolName, Map<String, Object> rawArgs) {
         Map<String, Object> args = new LinkedHashMap<>();
         if (rawArgs != null) args.putAll(rawArgs);
-        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase();
+        flattenKnownNestedArgs(args);
+        String normalizedName = normalizeToolName(toolName);
 
-        if ("containeravailability".equals(normalizedName)) {
+        if (isContainerAvailabilityTool(normalizedName)) {
             Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
             if (zip != null) {
                 putIfMissing(args, "zip", zip);
@@ -853,9 +859,24 @@ public class ToolExecutionService {
                 putIfMissing(args, "countryCode", region);
                 putIfMissing(args, "CountryCode", region);
             }
+            Object serviceDate = firstPresentArg(args, "serviceDate", "ServiceDate", "requestedDate", "date");
+            if (serviceDate != null) {
+                putIfMissing(args, "serviceDate", serviceDate);
+                putIfMissing(args, "ServiceDate", serviceDate);
+            }
+            Object serviceType = firstPresentArg(args, "serviceType", "ServiceType", "legCode", "code");
+            if (serviceType != null) {
+                putIfMissing(args, "serviceType", serviceType);
+                putIfMissing(args, "ServiceType", serviceType);
+            }
+            Object siteIdentity = firstPresentArg(args, "siteIdentity", "SiteIdentity", "serviceCenter", "sc");
+            if (siteIdentity != null) {
+                putIfMissing(args, "siteIdentity", siteIdentity);
+                putIfMissing(args, "SiteIdentity", siteIdentity);
+            }
         }
 
-        if ("serviceability".equals(normalizedName)) {
+        if (isServiceabilityTool(normalizedName)) {
             Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
             Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
             if (originZip != null) {
@@ -871,15 +892,15 @@ public class ToolExecutionService {
     }
 
     private String validateRequiredArgs(String toolName, Map<String, Object> args) {
-        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase();
-        if ("serviceability".equals(normalizedName)) {
+        String normalizedName = normalizeToolName(toolName);
+        if (isServiceabilityTool(normalizedName)) {
             Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
             Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
             if (isBlankValue(originZip) || isBlankValue(destinationZip)) {
                 return "Serviceability requires origin and destination postal codes mapped from order data (do not call with empty payload).";
             }
         }
-        if ("containeravailability".equals(normalizedName)) {
+        if (isContainerAvailabilityTool(normalizedName)) {
             Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
             if (isBlankValue(zip)) {
                 return "ContainerAvailability requires a non-empty zip/postalCode mapped from order leg data.";
@@ -998,15 +1019,64 @@ public class ToolExecutionService {
     }
 
     private boolean requiresMappedPayload(String toolName) {
-        if (toolName == null) return false;
-        String normalized = toolName.trim().toLowerCase();
-        return "serviceability".equals(normalized) || "containeravailability".equals(normalized);
+        String normalized = normalizeToolName(toolName);
+        return isServiceabilityTool(normalized) || isContainerAvailabilityTool(normalized);
     }
 
     private boolean shouldMirrorArgsToQuery(String toolName) {
-        if (toolName == null) return false;
-        String normalized = toolName.trim().toLowerCase();
-        return "containeravailability".equals(normalized);
+        String normalized = normalizeToolName(toolName);
+        return isContainerAvailabilityTool(normalized);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void flattenKnownNestedArgs(Map<String, Object> args) {
+        if (args == null || args.isEmpty()) return;
+        Object leg = firstPresentArg(args, "leg", "orderLeg", "segment");
+        if (leg instanceof Map<?, ?> map) {
+            map.forEach((k, v) -> {
+                String key = k == null ? null : String.valueOf(k);
+                if (key == null || key.isBlank() || v == null) return;
+                args.putIfAbsent(key, v);
+            });
+        }
+        Object order = firstPresentArg(args, "order", "orderData", "orderDetails");
+        if (order instanceof Map<?, ?> map) {
+            Object originZip = findArgIgnoreCase((Map<String, Object>) map, "originZip");
+            Object destinationZip = findArgIgnoreCase((Map<String, Object>) map, "destinationZip");
+            if (!isBlankValue(originZip)) putIfMissing(args, "originZip", originZip);
+            if (!isBlankValue(destinationZip)) putIfMissing(args, "destinationZip", destinationZip);
+        }
+    }
+
+    private boolean isServiceabilityTool(String normalizedName) {
+        return "serviceability".equals(normalizedName);
+    }
+
+    private boolean isContainerAvailabilityTool(String normalizedName) {
+        return "containeravailability".equals(normalizedName);
+    }
+
+    private String normalizeToolName(String value) {
+        if (value == null) return "";
+        return value.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+    }
+
+    private List<String> missingRequiredDecisionInputs(String tableName, Map<String, Object> inputs) {
+        if (decisionTableService == null || tableName == null || tableName.isBlank()) return List.of();
+        List<String> required;
+        try {
+            required = decisionTableService.requiredInputNames(tableName);
+        } catch (Exception ignored) {
+            return List.of();
+        }
+        if (required == null || required.isEmpty()) return List.of();
+        List<String> missing = new ArrayList<>();
+        for (String key : required) {
+            if (key == null || key.isBlank()) continue;
+            Object value = findArgIgnoreCase(inputs, key);
+            if (isBlankValue(value)) missing.add(key);
+        }
+        return missing;
     }
 
     private boolean isLikelyEmptyJsonObject(String body) {

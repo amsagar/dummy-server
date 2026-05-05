@@ -7,12 +7,40 @@ description: Validate a PODS order for service area, calendar availability, and 
 
 You validate a PODS order against 3 scheduling categories.
 
+## Deterministic behavior (must follow)
+
+- Execute checks in strict sequence: Order -> Serviceability -> ContainerAvailability -> Decision table.
+- Always map fields from `Get_OrderID` output before calling downstream tools.
+- Never call downstream tools with `{}` or missing required fields.
+- If required mapping data is missing, stop that category and report the missing fields clearly.
+- Do not claim "decision table not found" unless the tool explicitly returns a not-found error.
+
 ## Tools to use
 
 - `Get_OrderID` (or your order lookup tool name)
 - `Serviceability`
 - `ContainerAvailability`
 - `decisionTableEvaluate` with `tableName: "Leg Sequences"`
+
+## Canonical mapping from Get_OrderID
+
+Use this normalization before any tool call:
+
+- `orderId` <- `orderId` | `ORD_ID` | `orderNumber`
+- `journeyType` <- `journeyType` | `journey` | `JourneyType`
+- `originZip` <- `originZip` | `originPostalCode` | `origin.zip`
+- `destinationZip` <- `destinationZip` | `destinationPostalCode` | `destination.zip`
+- `originCountryCode` <- `originCountryCode` | `originRegionCode` | default `"US"`
+- `destinationCountryCode` <- `destinationCountryCode` | `destinationRegionCode` | default `"US"`
+- `legs` <- `legs[]` | `orderLegs[]` | `segments[]`
+
+For each leg `i`:
+
+- `leg.code` <- `code` | `serviceType` | `legCode`
+- `leg.requestedDate` <- `requestedDate` | `serviceDate` | `date`
+- `leg.siteIdentity` <- `siteIdentity` | `serviceCenter` | `sc`
+- `leg.countryCode` <- `countryCode` | `regionCode` | use origin/destination country based on leg direction
+- `leg.postalCode` <- `postalCode` | `zip` | use origin/destination zip based on leg direction
 
 ## Required flow (in this order)
 
@@ -63,6 +91,7 @@ Call `Serviceability` and pass mapped values from order:
 ```
 
 Never call `Serviceability` with `{}`.
+Required before call: `originZip`, `destinationZip`.
 
 ### PASS
 If serviceable.
@@ -91,6 +120,8 @@ For each relevant leg, call `ContainerAvailability` with mapped leg fields:
 ```
 
 Never call `ContainerAvailability` with `{}`.
+Required before each call: `postalCode`, `regionCode`, `serviceType`, `serviceDate`.
+If any required field is missing for a leg, do not call API for that leg; record validation error for that leg.
 
 ### PASS
 If requested slots are available.
@@ -110,6 +141,20 @@ For each leg position `i` (1..N), call:
 with:
 - `tableName: "Leg Sequences"`
 - `inputs: { "journeyType": "<journeyType>", "position": i }`
+
+Call shape must be exactly:
+
+```json
+{
+  "tableName": "Leg Sequences",
+  "inputs": {
+    "journeyType": "<journeyType>",
+    "position": <i>
+  }
+}
+```
+
+Never call `decisionTableEvaluate` without `inputs.journeyType` and `inputs.position`.
 
 Compare actual leg code at that position with decision-table output:
 

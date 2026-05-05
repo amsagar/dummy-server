@@ -7,6 +7,8 @@ import com.pods.agent.repository.DecisionTableRepository;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,6 +66,21 @@ public class DecisionTableService {
         return parsed.evaluate(inputs == null ? Map.of() : inputs);
     }
 
+    public List<String> requiredInputNames(String name) {
+        DecisionTable table = getByName(name);
+        List<String> metadataRequired = requiredInputsFromMetadata(table.getMetadataJson());
+        if (!metadataRequired.isEmpty()) {
+            return metadataRequired;
+        }
+        DmnDecisionTable parsed = cache.computeIfAbsent(name, key -> DmnDecisionTable.fromJsonString(table.getName(), table.getDmnJson()));
+        List<String> out = new ArrayList<>();
+        for (DmnDecisionTable.InputColumn input : parsed.getInputs()) {
+            if (input == null || input.name() == null || input.name().isBlank()) continue;
+            out.add(input.name());
+        }
+        return out;
+    }
+
     public Object parseJsonSafely(String raw) {
         if (raw == null || raw.isBlank()) return Map.of();
         try {
@@ -89,5 +106,25 @@ public class DecisionTableService {
             throw new IllegalArgumentException("Decision table JSON is required");
         }
         DmnDecisionTable.fromJsonString(table.getName(), table.getDmnJson());
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> requiredInputsFromMetadata(String metadataJson) {
+        if (metadataJson == null || metadataJson.isBlank()) return List.of();
+        try {
+            Map<String, Object> metadata = objectMapper.readValue(metadataJson, Map.class);
+            if (metadata == null || metadata.isEmpty()) return List.of();
+            Object raw = metadata.get("requiredInputs");
+            if (!(raw instanceof List<?> list) || list.isEmpty()) return List.of();
+            LinkedHashSet<String> unique = new LinkedHashSet<>();
+            for (Object value : list) {
+                if (value == null) continue;
+                String key = String.valueOf(value).trim();
+                if (!key.isBlank()) unique.add(key);
+            }
+            return unique.isEmpty() ? List.of() : new ArrayList<>(unique);
+        } catch (Exception ignored) {
+            return List.of();
+        }
     }
 }

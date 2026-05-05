@@ -461,12 +461,96 @@ public class ToolChainRuntimeService {
         }
         Map<String, Object> payload = resolveNodeInput(node, context);
         payload.remove("tableName");
+        Map<String, Object> inputs = normalizeDecisionTableInputs(tableName, payload, context);
+        List<String> missing = missingRequiredDecisionTableInputs(tableName, inputs);
+        if (!missing.isEmpty()) {
+            return StepResult.failed("Decision table '" + tableName + "' is missing required inputs: " + String.join(", ", missing));
+        }
         try {
-            var result = decisionTableService.evaluate(tableName, payload);
+            var result = decisionTableService.evaluate(tableName, inputs);
             return StepResult.success(Map.of(node.id(), result.asMap()), null);
         } catch (Exception e) {
             return StepResult.failed("Decision table '" + tableName + "' failed: " + e.getMessage());
         }
+    }
+
+    private Map<String, Object> normalizeDecisionTableInputs(String tableName,
+                                                             Map<String, Object> payload,
+                                                             Map<String, Object> context) {
+        Map<String, Object> inputs = new LinkedHashMap<>();
+        if (payload != null) {
+            Object nested = payload.get("inputs");
+            if (nested instanceof Map<?, ?> nestedMap) {
+                for (Map.Entry<?, ?> entry : nestedMap.entrySet()) {
+                    if (entry.getKey() == null) continue;
+                    inputs.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+            for (Map.Entry<String, Object> entry : payload.entrySet()) {
+                String key = entry.getKey();
+                if (key == null) continue;
+                if ("inputs".equalsIgnoreCase(key) || "tableName".equalsIgnoreCase(key)) continue;
+                inputs.putIfAbsent(key, entry.getValue());
+            }
+        }
+        List<String> required = requiredDecisionInputNames(tableName);
+        for (String key : required) {
+            if (key == null || key.isBlank()) continue;
+            Object current = findIgnoreCase(inputs, key);
+            if (!isBlankValue(current)) continue;
+            Object fromContext = resolvePath(context, key);
+            if (fromContext == null && context != null) {
+                for (Map.Entry<String, Object> entry : context.entrySet()) {
+                    if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) {
+                        fromContext = entry.getValue();
+                        break;
+                    }
+                }
+            }
+            if (!isBlankValue(fromContext)) {
+                inputs.put(key, fromContext);
+            }
+        }
+        return inputs;
+    }
+
+    private List<String> missingRequiredDecisionTableInputs(String tableName, Map<String, Object> inputs) {
+        List<String> required = requiredDecisionInputNames(tableName);
+        if (required.isEmpty()) return List.of();
+        List<String> missing = new ArrayList<>();
+        for (String key : required) {
+            if (key == null || key.isBlank()) continue;
+            Object value = findIgnoreCase(inputs, key);
+            if (isBlankValue(value)) missing.add(key);
+        }
+        return missing;
+    }
+
+    private List<String> requiredDecisionInputNames(String tableName) {
+        if (decisionTableService == null || tableName == null || tableName.isBlank()) return List.of();
+        try {
+            List<String> required = decisionTableService.requiredInputNames(tableName);
+            return required == null ? List.of() : required;
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    private Object findIgnoreCase(Map<String, Object> source, String key) {
+        if (source == null || source.isEmpty() || key == null || key.isBlank()) return null;
+        if (source.containsKey(key)) return source.get(key);
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private boolean isBlankValue(Object value) {
+        if (value == null) return true;
+        String text = String.valueOf(value);
+        return text.isBlank();
     }
 
     private StepResult executeDecision(NodeModel node, Map<String, Object> context) {
