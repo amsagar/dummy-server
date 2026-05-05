@@ -427,6 +427,12 @@ public class AgentRuntimeService {
         boolean enforceSkillFirst = !designerMode
                 && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
+        String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
+        if ((selectedSkillContext == null || selectedSkillContext.isBlank()) && enforceSkillFirst) {
+            // For execution turns that require skill-first behavior, always inject at least
+            // a compact skill catalog so the model has deterministic routing guidance.
+            selectedSkillContext = buildSkillCatalogContext(skillRegistryService.getEnabledSkills());
+        }
 
         // In designer mode, bind the per-session workspace and bypass the approval prompt
         // for FS tools. The architect's read/edit/apply_patch are sandboxed to the workspace
@@ -437,7 +443,7 @@ public class AgentRuntimeService {
                 designerWorkspace, designerMode);
         // Keep skill guidance in base system prompt and load full skill content only when
         // model explicitly calls the native `skill` tool.
-        String stepContext = buildStepContext(userText, "", mcpContext, runtimeMode, session, "");
+        String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "");
 
         log.debug("[AgentRuntime] streamTurn start: sessionId={}, turnId={}, tools={}",
                 session.getSessionId(), turnId, toolCallbacks.size());

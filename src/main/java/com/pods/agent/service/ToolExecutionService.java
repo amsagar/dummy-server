@@ -897,13 +897,17 @@ public class ToolExecutionService {
             Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
             Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
             if (isBlankValue(originZip) || isBlankValue(destinationZip)) {
-                return "Serviceability requires origin and destination postal codes mapped from order data (do not call with empty payload).";
+                return "Serviceability requires originPostalCode and destinationPostalCode mapped from order data. "
+                        + "Expected payload keys: originPostalCode, destinationPostalCode, originRegionCode, destinationRegionCode.";
             }
         }
         if (isContainerAvailabilityTool(normalizedName)) {
             Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
-            if (isBlankValue(zip)) {
-                return "ContainerAvailability requires a non-empty zip/postalCode mapped from order leg data.";
+            Object serviceType = firstPresentArg(args, "serviceType", "ServiceType", "code", "legCode");
+            Object serviceDate = firstPresentArg(args, "serviceDate", "ServiceDate", "requestedDate", "date");
+            if (isBlankValue(zip) || isBlankValue(serviceType) || isBlankValue(serviceDate)) {
+                return "ContainerAvailability requires mapped leg fields. "
+                        + "Expected payload keys: postalCode (or zip), regionCode, serviceType, serviceDate, siteIdentity.";
             }
         }
         return null;
