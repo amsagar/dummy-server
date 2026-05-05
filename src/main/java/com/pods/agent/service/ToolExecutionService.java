@@ -118,6 +118,10 @@ public class ToolExecutionService {
         }
         if ("GET".equals(method) || "DELETE".equals(method)) {
             endpoint = appendQueryParams(endpoint, extractQueryParams(args, consumedKeys));
+        } else if (shouldMirrorArgsToQuery(tool.getName())) {
+            // Some upstream APIs (notably PODS calendar/availability endpoints) accept
+            // request data via query params even on POST routes.
+            endpoint = appendQueryParams(endpoint, extractQueryParams(args, new HashSet<>(consumedKeys)));
         }
 
         String body = buildRequestBody(tool, args, consumedKeys, userText, method);
@@ -955,6 +959,12 @@ public class ToolExecutionService {
         if (toolName == null) return false;
         String normalized = toolName.trim().toLowerCase();
         return "serviceability".equals(normalized) || "containeravailability".equals(normalized);
+    }
+
+    private boolean shouldMirrorArgsToQuery(String toolName) {
+        if (toolName == null) return false;
+        String normalized = toolName.trim().toLowerCase();
+        return "containeravailability".equals(normalized);
     }
 
     private boolean isLikelyEmptyJsonObject(String body) {
