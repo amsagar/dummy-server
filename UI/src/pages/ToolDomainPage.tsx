@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import yaml from "js-yaml";
 import { EmbeddingSetupBanner } from "@/components/EmbeddingSetupBanner";
 
-type ToolActionModal = "none" | "tool-action-options" | "openapi" | "curl" | "auth" | "override-auth";
+type ToolActionModal = "none" | "tool-action-options" | "openapi" | "curl" | "postman" | "auth" | "override-auth";
 const TOOLS_PAGE_SIZE = 10;
 
 export default function ToolDomainPage() {
@@ -35,7 +35,13 @@ export default function ToolDomainPage() {
   const [curlText, setCurlText] = useState("");
   const [curlResponseSample, setCurlResponseSample] = useState("");
   const [curlError, setCurlError] = useState("");
+  const [postmanFile, setPostmanFile] = useState<File | null>(null);
+  const [postmanJsonText, setPostmanJsonText] = useState("");
+  const [postmanError, setPostmanError] = useState("");
   const [selectedTool, setSelectedTool] = useState<AgentTool | null>(null);
+  const [testToolOpen, setTestToolOpen] = useState(false);
+  const [testToolPayload, setTestToolPayload] = useState("{}");
+  const [testToolResult, setTestToolResult] = useState<any>(null);
   const [overrideEnabled, setOverrideEnabled] = useState(false);
   const [overrideAuthType, setOverrideAuthType] = useState("bearer_token");
   const [overrideError, setOverrideError] = useState("");
@@ -148,6 +154,21 @@ export default function ToolDomainPage() {
     onError: (e: any) => toast.error(e.message || "cURL import failed"),
   });
 
+  const importPostman = useMutation({
+    mutationFn: () =>
+      api.post("/tool-domains/import/postman", {
+        domainId,
+        collectionJson: postmanJsonText,
+        enabled: true,
+      }),
+    onSuccess: () => {
+      refresh();
+      closeModal();
+      toast.success("Postman tools imported");
+    },
+    onError: (e: any) => toast.error(e.message || "Postman import failed"),
+  });
+
   const clearToolOverride = useMutation({
     mutationFn: () =>
       api.patch(`/tool-auth/domains/${domainId}/tools/${selectedTool?.id}/binding`, {
@@ -194,6 +215,24 @@ export default function ToolDomainPage() {
     },
   });
 
+  const testToolMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTool) throw new Error("No tool selected");
+      let payloadObj: any = {};
+      try {
+        payloadObj = JSON.parse(testToolPayload);
+      } catch {
+        payloadObj = testToolPayload;
+      }
+      return api.post(`/tool-domains/${domainId}/tools/${selectedTool.id}/test`, { payload: payloadObj });
+    },
+    onSuccess: (result) => {
+      setTestToolResult(result);
+      toast.success(result?.success ? "Tool test succeeded" : "Tool test failed");
+    },
+    onError: (e: any) => toast.error(e.message || "Tool test failed"),
+  });
+
   const reauthenticateOverride = useMutation({
     mutationFn: async () => {
       if (!selectedTool) throw new Error("Select a tool first");
@@ -204,6 +243,18 @@ export default function ToolDomainPage() {
       toast.success("Override reauthenticated");
     },
     onError: (e: any) => toast.error(e.message || "Failed to reauthenticate override"),
+  });
+
+  const testToolAuth = useMutation({
+    mutationFn: async () => {
+      if (!selectedTool) throw new Error("Select a tool first");
+      return api.post(`/tool-auth/tools/${selectedTool.id}/test`, {});
+    },
+    onSuccess: (result: any) => {
+      const names = Array.isArray(result?.headerNames) ? result.headerNames.join(", ") : "";
+      toast.success(result?.ok ? `Auth test passed${names ? ` (${names})` : ""}` : (result?.message || "Auth test could not resolve credentials"));
+    },
+    onError: (e: any) => toast.error(e.message || "Auth test failed"),
   });
 
 
@@ -240,10 +291,17 @@ export default function ToolDomainPage() {
     setCurlError("");
   };
 
+  const resetPostmanForm = () => {
+    setPostmanFile(null);
+    setPostmanJsonText("");
+    setPostmanError("");
+  };
+
   const closeModal = () => {
     setActiveModal("none");
     resetOpenApiForm();
     resetCurlForm();
+    resetPostmanForm();
     setSelectedTool(null);
     setOverrideError("");
   };
@@ -278,6 +336,13 @@ export default function ToolDomainPage() {
     }));
     setOverrideError("");
     setActiveModal("auth");
+  };
+
+  const openTestToolModal = (tool: AgentTool) => {
+    setSelectedTool(tool);
+    setTestToolResult(null);
+    setTestToolPayload(tool.sampleRequest && tool.sampleRequest.trim() ? tool.sampleRequest : "{}");
+    setTestToolOpen(true);
   };
 
   const handleOpenApiFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -328,6 +393,32 @@ export default function ToolDomainPage() {
       return;
     }
     importCurl.mutate();
+  };
+
+  const handlePostmanFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setPostmanError("");
+    const file = e.target.files?.[0] ?? null;
+    setPostmanFile(file);
+    setPostmanJsonText("");
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") throw new Error("Collection must be a JSON object");
+      if (!Array.isArray((parsed as any).item)) throw new Error("Missing collection item[]");
+      setPostmanJsonText(JSON.stringify(parsed));
+    } catch (err: any) {
+      setPostmanError(`Could not parse Postman JSON: ${err?.message ?? "invalid json"}`);
+    }
+  };
+
+  const handleImportPostman = () => {
+    setPostmanError("");
+    if (!postmanJsonText.trim()) {
+      setPostmanError("Choose a valid Postman collection JSON file");
+      return;
+    }
+    importPostman.mutate();
   };
 
   const parseJsonInput = (raw: string, fallback: any) => {
@@ -490,6 +581,7 @@ export default function ToolDomainPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-40">
                         <DropdownMenuItem onClick={() => openAuthModal(t)}>Auth</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openTestToolModal(t)}>Test Tool</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => toggleTool(t)}>{t.enabled ? "Disable" : "Enable"}</DropdownMenuItem>
                         <DropdownMenuItem variant="destructive" onClick={() => deleteTool(t)}>Delete</DropdownMenuItem>
                       </DropdownMenuContent>
@@ -533,6 +625,7 @@ export default function ToolDomainPage() {
           <div className="grid gap-2">
             <Button variant="outline" className="justify-start" onClick={() => setActiveModal("openapi")}>Import from OpenAPI</Button>
             <Button variant="outline" className="justify-start" onClick={() => setActiveModal("curl")}>Import from cURL</Button>
+            <Button variant="outline" className="justify-start" onClick={() => setActiveModal("postman")}>Import from Postman JSON</Button>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeModal}>Close</Button>
@@ -601,6 +694,31 @@ export default function ToolDomainPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={activeModal === "postman"} onOpenChange={(open) => !open && closeModal()}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Import from Postman JSON</DialogTitle>
+            <DialogDescription>Upload a Postman collection JSON file to import its requests as tools.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <input
+              type="file"
+              accept=".json,application/json"
+              onChange={handlePostmanFileChange}
+              className="block w-full text-sm"
+            />
+            {postmanFile ? <p className="text-xs text-gray-600">Loaded: {postmanFile.name} ({postmanFile.size} bytes)</p> : null}
+            {postmanError ? <p className="text-xs text-red-600">{postmanError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActiveModal("tool-action-options")}>Back</Button>
+            <Button onClick={handleImportPostman} disabled={importPostman.isPending || !postmanJsonText.trim()}>
+              {importPostman.isPending ? "Importing..." : "Import Postman"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={activeModal === "auth"} onOpenChange={(open) => !open && closeModal()}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -657,6 +775,14 @@ export default function ToolDomainPage() {
                   disabled={!selectedTool || reauthenticateOverride.isPending || !overrideEnabled}
                 >
                   {reauthenticateOverride.isPending ? "Reauth..." : "Reauthenticate"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => testToolAuth.mutate()}
+                  disabled={!selectedTool || testToolAuth.isPending}
+                >
+                  {testToolAuth.isPending ? "Testing..." : "Test Auth"}
                 </Button>
                 <Button
                   size="sm"
@@ -772,6 +898,30 @@ export default function ToolDomainPage() {
                 Authenticate
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={testToolOpen} onOpenChange={(open) => !open && setTestToolOpen(false)}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Test Tool</DialogTitle>
+            <DialogDescription>Run a live test call for <span className="font-medium">{selectedTool?.name}</span>.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <textarea
+              value={testToolPayload}
+              onChange={(e) => setTestToolPayload(e.target.value)}
+              className="h-36 w-full rounded-md border border-input p-2 text-xs font-mono"
+              placeholder='{"orderId":"123"}'
+            />
+            <pre className="h-56 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border bg-slate-50 p-2 text-xs">{JSON.stringify(testToolResult, null, 2)}</pre>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTestToolOpen(false)}>Close</Button>
+            <Button onClick={() => testToolMutation.mutate()} disabled={testToolMutation.isPending}>
+              {testToolMutation.isPending ? "Testing..." : "Run Test"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

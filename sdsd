@@ -1,0 +1,81 @@
+INSERT INTO agent.decision_tables (
+  id,
+  name,
+  description,
+  dmn_json,
+  hit_policy,
+  metadata_json,
+  created_at,
+  updated_at
+) VALUES (
+  gen_random_uuid()::text,
+  'pods-leg-sequence',
+  'PODS leg sequencing rules from CSV',
+  $${
+    "hitPolicy": "FIRST",
+    "inputs": [
+      { "name": "journeyType", "type": "string", "label": "Journey Type" },
+      { "name": "position", "type": "integer", "label": "Leg Sequence" }
+    ],
+    "outputs": [
+      { "name": "expectedCode", "type": "string", "label": "Leg Code" },
+      { "name": "expectedName", "type": "string", "label": "Leg Name" },
+      { "name": "optional", "type": "boolean", "label": "Optional" }
+    ],
+    "rules": [
+      { "id": "rule-01", "inputs": { "journeyType": "Storage Onsite", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-02", "inputs": { "journeyType": "Storage Onsite", "position": 2 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": false } },
+
+      { "id": "rule-03", "inputs": { "journeyType": "Storage Warehouse", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-04", "inputs": { "journeyType": "Storage Warehouse", "position": 2 }, "outputs": { "expectedCode": "WRT", "expectedName": "Warehouse Return", "optional": false } },
+      { "id": "rule-05", "inputs": { "journeyType": "Storage Warehouse", "position": 3 }, "outputs": { "expectedCode": "RDL", "expectedName": "Redelivery", "optional": false } },
+      { "id": "rule-06", "inputs": { "journeyType": "Storage Warehouse", "position": 4 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": false } },
+
+      { "id": "rule-07", "inputs": { "journeyType": "Local Move", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-08", "inputs": { "journeyType": "Local Move", "position": 2 }, "outputs": { "expectedCode": "MOV", "expectedName": "Move", "optional": false } },
+      { "id": "rule-09", "inputs": { "journeyType": "Local Move", "position": 3 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": true } },
+
+      { "id": "rule-10", "inputs": { "journeyType": "Local + Storage Onsite", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-11", "inputs": { "journeyType": "Local + Storage Onsite", "position": 2 }, "outputs": { "expectedCode": "MOV", "expectedName": "Move", "optional": false } },
+      { "id": "rule-12", "inputs": { "journeyType": "Local + Storage Onsite", "position": 3 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": true } },
+
+      { "id": "rule-13", "inputs": { "journeyType": "Local + Storage Warehouse", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-14", "inputs": { "journeyType": "Local + Storage Warehouse", "position": 2 }, "outputs": { "expectedCode": "WRT", "expectedName": "Warehouse Return", "optional": false } },
+      { "id": "rule-15", "inputs": { "journeyType": "Local + Storage Warehouse", "position": 3 }, "outputs": { "expectedCode": "RDL", "expectedName": "Redelivery", "optional": false } },
+      { "id": "rule-16", "inputs": { "journeyType": "Local + Storage Warehouse", "position": 4 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": false } },
+      { "id": "rule-17", "inputs": { "journeyType": "Local + Storage Warehouse", "position": 5 }, "outputs": { "expectedCode": "MOV", "expectedName": "Move", "optional": true } },
+
+      { "id": "rule-18", "inputs": { "journeyType": "Inter-Franchise Move", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-19", "inputs": { "journeyType": "Inter-Franchise Move", "position": 2 }, "outputs": { "expectedCode": "WTW", "expectedName": "IF Transit", "optional": false } },
+      { "id": "rule-20", "inputs": { "journeyType": "Inter-Franchise Move", "position": 3 }, "outputs": { "expectedCode": "RDL", "expectedName": "Redelivery", "optional": false } },
+      { "id": "rule-21", "inputs": { "journeyType": "Inter-Franchise Move", "position": 4 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": false } },
+      { "id": "rule-22", "inputs": { "journeyType": "Inter-Franchise Move", "position": 5 }, "outputs": { "expectedCode": "MOV", "expectedName": "Move", "optional": true } },
+
+      { "id": "rule-23", "inputs": { "journeyType": "Inter-Franchise Onsite", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-24", "inputs": { "journeyType": "Inter-Franchise Onsite", "position": 2 }, "outputs": { "expectedCode": "WTW", "expectedName": "IF Transit", "optional": false } },
+      { "id": "rule-25", "inputs": { "journeyType": "Inter-Franchise Onsite", "position": 3 }, "outputs": { "expectedCode": "RDL", "expectedName": "Redelivery", "optional": false } },
+      { "id": "rule-26", "inputs": { "journeyType": "Inter-Franchise Onsite", "position": 4 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": false } },
+      { "id": "rule-27", "inputs": { "journeyType": "Inter-Franchise Onsite", "position": 5 }, "outputs": { "expectedCode": "MOV", "expectedName": "Move", "optional": true } },
+
+      { "id": "rule-28", "inputs": { "journeyType": "Inter-Franchise Warehouse", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-29", "inputs": { "journeyType": "Inter-Franchise Warehouse", "position": 2 }, "outputs": { "expectedCode": "WRT", "expectedName": "Warehouse Return", "optional": false } },
+      { "id": "rule-30", "inputs": { "journeyType": "Inter-Franchise Warehouse", "position": 3 }, "outputs": { "expectedCode": "WTW", "expectedName": "IF Transit", "optional": false } },
+      { "id": "rule-31", "inputs": { "journeyType": "Inter-Franchise Warehouse", "position": 4 }, "outputs": { "expectedCode": "RDL", "expectedName": "Redelivery", "optional": false } },
+      { "id": "rule-32", "inputs": { "journeyType": "Inter-Franchise Warehouse", "position": 5 }, "outputs": { "expectedCode": "FPU", "expectedName": "Final Pickup", "optional": true } },
+
+      { "id": "rule-33", "inputs": { "journeyType": "Self Delivery or Pickup", "position": 1 }, "outputs": { "expectedCode": "SID", "expectedName": "Self Initial Delivery", "optional": false } },
+      { "id": "rule-34", "inputs": { "journeyType": "Self Delivery or Pickup", "position": 2 }, "outputs": { "expectedCode": "SFP", "expectedName": "Self Final Pickup", "optional": false } },
+
+      { "id": "rule-35", "inputs": { "journeyType": "City Service", "position": 1 }, "outputs": { "expectedCode": "SCDEL", "expectedName": "City Service Initial Delivery", "optional": false } },
+      { "id": "rule-36", "inputs": { "journeyType": "City Service", "position": 2 }, "outputs": { "expectedCode": "CSRED", "expectedName": "City Service Redelivery", "optional": false } },
+      { "id": "rule-37", "inputs": { "journeyType": "City Service", "position": 3 }, "outputs": { "expectedCode": "CSFPU", "expectedName": "City Service Final Pickup", "optional": false } },
+
+      { "id": "rule-38", "inputs": { "journeyType": "Cross Border", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } },
+      { "id": "rule-39", "inputs": { "journeyType": "Hawaii", "position": 1 }, "outputs": { "expectedCode": "NEW", "expectedName": "Initial Delivery", "optional": false } }
+    ]
+  }$$,
+  'FIRST',
+  '{}',
+  (extract(epoch from now()) * 1000)::bigint,
+  (extract(epoch from now()) * 1000)::bigint
+);

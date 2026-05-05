@@ -196,6 +196,51 @@ public class HttpToolAuthService {
         return Map.of("ok", true, "scope", "tool", "id", toolId);
     }
 
+    public Map<String, Object> testProfile(String profileId) {
+        ToolAuthProfile profile = profileRepository.findById(profileId)
+                .orElseThrow(() -> new IllegalArgumentException("Auth profile not found"));
+        AuthState state = AuthState.forProfile(profile);
+        Map<String, String> headers = buildHeaders(state);
+        Map<String, String> query = buildQueryParams(state);
+        return Map.of(
+                "ok", true,
+                "scope", "profile",
+                "id", profileId,
+                "authType", profile.getAuthType(),
+                "headerNames", headers.keySet(),
+                "queryParamNames", query.keySet(),
+                "tokenConnected", profile.getEncryptedAccessToken() != null && !profile.getEncryptedAccessToken().isBlank(),
+                "tokenExpiresAt", profile.getTokenExpiresAt()
+        );
+    }
+
+    public Map<String, Object> testTool(String toolId) {
+        AgentTool tool = toolRepository.findById(toolId)
+                .orElseThrow(() -> new IllegalArgumentException("Tool not found"));
+        AuthResolution resolution = resolveAuthState(tool);
+        if (resolution.state() == null) {
+            return Map.of(
+                    "ok", false,
+                    "toolId", toolId,
+                    "authSource", resolution.source(),
+                    "reason", resolution.reason(),
+                    "message", "No active auth could be resolved for this tool."
+            );
+        }
+        Map<String, String> headers = buildHeaders(resolution.state());
+        Map<String, String> query = buildQueryParams(resolution.state());
+        return Map.of(
+                "ok", true,
+                "toolId", toolId,
+                "authSource", resolution.source(),
+                "authType", resolution.state().authType,
+                "headerNames", headers.keySet(),
+                "queryParamNames", query.keySet(),
+                "tokenConnected", resolution.state().encryptedAccessToken != null && !resolution.state().encryptedAccessToken.isBlank(),
+                "tokenExpiresAt", resolution.state().tokenExpiresAt
+        );
+    }
+
     private Map<String, String> buildHeaders(AuthState state) {
         String type = lower(state.authType);
         if (type == null || "none".equals(type)) return Map.of();

@@ -454,6 +454,7 @@ public class AgentRuntimeService {
             sender.sendTextDelta(response);
             session.getMessages().add(new AssistantMessage(response));
         }
+        response = replaceGenericScopeReplyWithToolFailure(turnId, response);
 
         recordSelectionSignals(session.getSessionId(), userText, tools, response);
 
@@ -465,6 +466,36 @@ public class AgentRuntimeService {
                 .sessionId(session.getSessionId()).turnId(turnId).eventType("task.done")
                 .payload("{\"task\":\"core_loop_complete\"}").build());
         return response == null ? "" : response;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String replaceGenericScopeReplyWithToolFailure(String turnId, String response) {
+        if (response == null || response.isBlank()) return response;
+        String normalized = response.toLowerCase(Locale.ROOT);
+        if (!normalized.contains("i can only help with tasks covered by your registered tools and skills")
+                && !normalized.contains("no relevant tool or skill is configured")) {
+            return response;
+        }
+        try {
+            List<RuntimeEvent> events = runtimeEventRepository.findByTurnId(turnId);
+            for (int i = events.size() - 1; i >= 0; i--) {
+                RuntimeEvent event = events.get(i);
+                if (event == null || event.getPayload() == null || !"tool.done".equalsIgnoreCase(event.getEventType())) continue;
+                Map<String, Object> payload = objectMapper.readValue(event.getPayload(), Map.class);
+                String status = String.valueOf(payload.getOrDefault("status", ""));
+                if (!"error".equalsIgnoreCase(status) && !"denied".equalsIgnoreCase(status)) continue;
+                String toolName = String.valueOf(payload.getOrDefault("toolName", "tool"));
+                String output = String.valueOf(payload.getOrDefault("output", "Tool execution failed"));
+                String hint = output.toLowerCase(Locale.ROOT).contains("access denied")
+                        ? "Access was denied by the upstream API (likely IP allowlist/VPN or auth policy)."
+                        : "Please review tool auth/profile and endpoint access, then retry.";
+                return "Tool call failed for `" + toolName + "`.\n\n"
+                        + "Error: " + truncate(output, 500) + "\n\n"
+                        + hint;
+            }
+        } catch (Exception ignored) {
+        }
+        return response;
     }
 
     private List<AgentTool> selectTurnTools(String userText,

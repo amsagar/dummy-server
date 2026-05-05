@@ -25,6 +25,7 @@ import {
   Workflow,
   LogOut,
   UserCircle2,
+  Table2,
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -43,6 +44,8 @@ import ToolChainDesignerPage from "./pages/ToolChainDesignerPage";
 import ToolChainRunsPage from "./pages/ToolChainRunsPage";
 import ToolChainRunDetailPage from "./pages/ToolChainRunDetailPage";
 import ToolChainApprovalsPage from "./pages/ToolChainApprovalsPage";
+import DecisionTablesPage from "./pages/DecisionTablesPage";
+import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import { clearAuthToken, getAuthUser, isAuthenticated } from "./services/api";
@@ -63,6 +66,7 @@ function Sidebar() {
     { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: Workflow, name: "ToolChains", path: "/toolchains" },
+    { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
   ];
@@ -195,6 +199,7 @@ function Header() {
     "/tools": "Tools",
     "/tools/": "Tools",
     "/toolchains": "ToolChains",
+    "/decision-tables": "Decision Tables",
     "/skills": "Skills",
     "/mcp-registry": "MCP Registry",
     "/mcp-registry/": "MCP Registry",
@@ -203,6 +208,7 @@ function Header() {
   const title =
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
     (location.pathname.startsWith("/toolchains/") ? "ToolChains" : undefined) ||
+    (location.pathname.startsWith("/decision-tables/") ? "Decision Tables" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
     "PODS AI Agent";
@@ -264,6 +270,8 @@ export default function App() {
                 <Route path="/toolchains/:id/runs" element={<ToolChainRunsPage />} />
                 <Route path="/toolchains/runs/:runId" element={<ToolChainRunDetailPage />} />
                 <Route path="/toolchains/approvals" element={<ToolChainApprovalsPage />} />
+                <Route path="/decision-tables" element={<DecisionTablesPage />} />
+                <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/mcp-registry" element={<McpRegistryPage />} />
                 <Route path="/mcp-registry/:serverId/tools" element={<McpServerToolsPage />} />

@@ -240,6 +240,26 @@ public class ToolAuthController {
         }
     }
 
+    @PostMapping("/profiles/{profileId}/test")
+    @Operation(summary = "Test auth profile configuration")
+    public ResponseEntity<?> testProfile(@PathVariable String profileId) {
+        try {
+            return ResponseEntity.ok(authService.testProfile(profileId));
+        } catch (Exception e) {
+            return ResponseEntityFactory.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/tools/{toolId}/test")
+    @Operation(summary = "Test tool auth resolution")
+    public ResponseEntity<?> testToolAuth(@PathVariable String toolId) {
+        try {
+            return ResponseEntity.ok(authService.testTool(toolId));
+        } catch (Exception e) {
+            return ResponseEntityFactory.badRequest(e.getMessage());
+        }
+    }
+
     @GetMapping(value = "/oauth/callback", produces = MediaType.TEXT_HTML_VALUE)
     @Operation(summary = "OAuth callback endpoint for HTTP tool auth")
     public ResponseEntity<String> oauthCallback(@RequestParam(required = false) String code,

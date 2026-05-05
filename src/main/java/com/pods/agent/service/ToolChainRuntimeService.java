@@ -52,6 +52,7 @@ public class ToolChainRuntimeService {
     private final ModelProviderRouter modelProviderRouter;
     private final SkillRegistryService skillRegistryService;
     private final RuntimeTuningProperties runtimeTuningProperties;
+    private final DecisionTableService decisionTableService;
     private final ObjectMapper objectMapper;
     private final ExecutorService runExecutor = Executors.newFixedThreadPool(6);
     private final ExecutorService branchExecutor = Executors.newFixedThreadPool(8);
@@ -67,6 +68,7 @@ public class ToolChainRuntimeService {
                                    ModelProviderRouter modelProviderRouter,
                                    SkillRegistryService skillRegistryService,
                                    RuntimeTuningProperties runtimeTuningProperties,
+                                   DecisionTableService decisionTableService,
                                    ObjectMapper objectMapper) {
         this.toolChainService = toolChainService;
         this.toolRegistryService = toolRegistryService;
@@ -78,6 +80,7 @@ public class ToolChainRuntimeService {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.runtimeTuningProperties = runtimeTuningProperties;
+        this.decisionTableService = decisionTableService;
         this.objectMapper = objectMapper;
     }
 
@@ -315,6 +318,7 @@ public class ToolChainRuntimeService {
                 case "subchain" -> executeSubchain(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "iterator" -> executeIterator(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "tool", "mcp_tool" -> executeToolNode(node, context);
+                case "decision_table" -> executeDecisionTableNode(node, context);
                 case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
                 case "skill" -> StepResult.failed("Skill nodes are no longer supported as graph steps; use synthesisPrompt to invoke skills in the final LLM stage.");
                 default -> StepResult.success(Map.of(node.id(), "skipped"), null);
@@ -448,6 +452,21 @@ public class ToolChainRuntimeService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put(node.id(), parseFlexibleBody(result.body()));
         return StepResult.success(out, null);
+    }
+
+    private StepResult executeDecisionTableNode(NodeModel node, Map<String, Object> context) {
+        String tableName = node.configString("tableName");
+        if (tableName == null || tableName.isBlank()) {
+            return StepResult.failed("decision_table node is missing tableName");
+        }
+        Map<String, Object> payload = resolveNodeInput(node, context);
+        payload.remove("tableName");
+        try {
+            var result = decisionTableService.evaluate(tableName, payload);
+            return StepResult.success(Map.of(node.id(), result.asMap()), null);
+        } catch (Exception e) {
+            return StepResult.failed("Decision table '" + tableName + "' failed: " + e.getMessage());
+        }
     }
 
     private StepResult executeDecision(NodeModel node, Map<String, Object> context) {

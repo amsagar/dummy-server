@@ -52,10 +52,11 @@ public class ToolExecutionService {
     private final McpRuntimeAdapter mcpRuntimeAdapter;
     private final MemoryTools memoryTools;
     private final HttpToolAuthService httpToolAuthService;
+    private final DecisionTableService decisionTableService;
     private final Map<String, CircuitState> circuits = new ConcurrentHashMap<>();
 
     public ToolExecutionService(ObjectMapper objectMapper) {
-        this(objectMapper, null, null, null, null);
+        this(objectMapper, null, null, null, null, null);
     }
 
     @Autowired
@@ -63,12 +64,14 @@ public class ToolExecutionService {
                                 McpClientService mcpClientService,
                                 McpRuntimeAdapter mcpRuntimeAdapter,
                                 MemoryTools memoryTools,
-                                HttpToolAuthService httpToolAuthService) {
+                                HttpToolAuthService httpToolAuthService,
+                                DecisionTableService decisionTableService) {
         this.objectMapper = objectMapper;
         this.mcpClientService = mcpClientService;
         this.mcpRuntimeAdapter = mcpRuntimeAdapter;
         this.memoryTools = memoryTools;
         this.httpToolAuthService = httpToolAuthService;
+        this.decisionTableService = decisionTableService;
     }
 
     public ExecutionResult execute(AgentTool tool, String userText) {
@@ -403,6 +406,32 @@ public class ToolExecutionService {
     }
 
     private ExecutionResult executeIntegration(AgentTool tool, String userText) {
+        String name = tool.getName().toLowerCase();
+        if ("decisiontableevaluate".equals(name)) {
+            if (decisionTableService == null) {
+                return new ExecutionResult(false, null, "Decision table service is unavailable");
+            }
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                String tableName = stringArg(args, "tableName", null);
+                if (tableName == null || tableName.isBlank()) {
+                    return new ExecutionResult(false, null, "tableName is required");
+                }
+                Object inputsObj = args.get("inputs");
+                Map<String, Object> inputs;
+                if (inputsObj instanceof Map<?, ?> map) {
+                    inputs = new LinkedHashMap<>();
+                    map.forEach((k, v) -> inputs.put(String.valueOf(k), v));
+                } else {
+                    inputs = new LinkedHashMap<>(args);
+                    inputs.remove("tableName");
+                }
+                var result = decisionTableService.evaluate(tableName, inputs);
+                return new ExecutionResult(true, objectMapper.writeValueAsString(result.asMap()), null);
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "Decision table evaluation failed: " + e.getMessage());
+            }
+        }
         if ("integration".equalsIgnoreCase(resolveExecutionKind(tool))
                 && (mcpClientService != null || mcpRuntimeAdapter != null)
                 && tool.getRequestSchema() != null
@@ -426,7 +455,6 @@ public class ToolExecutionService {
                 return new ExecutionResult(false, null, "MCP integration failed: " + e.getMessage());
             }
         }
-        String name = tool.getName().toLowerCase();
         if (Set.of("agent_send", "agent_receive", "skill", "lsp").contains(name)) {
             return new ExecutionResult(true, "{\"status\":\"ok\",\"tool\":\"" + name + "\"}", null);
         }

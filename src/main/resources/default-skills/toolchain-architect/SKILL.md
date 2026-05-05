@@ -72,6 +72,7 @@ The user message is a JSON object with these fields:
 | `wait`      | `delayMs`                                                 | sleep N ms before continuing (see Section 4d)                     |
 | `subchain`  | `chainId`, optional `version`, `inputMappings`            | call another ToolChain inline (see Section 4e)                    |
 | `iterator`  | `over`, `as`, `subChainId`, optional `subVersion`         | run a sub-chain once per array item (see Section 4f)              |
+| `decision_table` | `tableName`, optional `inputKey`, `argMappings`      | evaluate a persisted decision table in-process                      |
 | `synthesis` | optional `prompt`                                         | REQUIRED before `end` when responseMode is `hybrid/synthesized_text` |
 
 **There is no `skill` node type.** Anything you would have done with a skill node belongs
@@ -83,6 +84,11 @@ before the `end` node.
 `config.argMappings` is an **object map** of `{ targetKey: sourceContextPath }`. Source
 paths are dotted (`"orderId"`, `"get_order.customer.id"`). There is no `inputMappings`,
 no `inputDefaults`, no `inputs`, no `parameters`.
+
+`decision_table` nodes follow the same payload rules as `tool` nodes:
+- `inputKey` picks a base object from context (or entire context when omitted).
+- `argMappings` overlays/renames fields into the evaluation payload.
+- `tableName` must match an existing decision table record.
 
 ## 4. Path-param hard rule
 

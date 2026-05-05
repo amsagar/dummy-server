@@ -2,6 +2,7 @@ package com.pods.agent.api;
 
 import com.pods.agent.api.dto.CurlImportRequest;
 import com.pods.agent.api.dto.OpenApiImportRequest;
+import com.pods.agent.api.dto.PostmanImportRequest;
 import com.pods.agent.api.dto.ToolDomainRequest;
 import com.pods.agent.api.dto.ToolRequest;
 import com.pods.agent.domain.AgentDomain;
@@ -11,6 +12,7 @@ import com.pods.agent.repository.AgentDomainRepository;
 import com.pods.agent.repository.AgentToolRepository;
 import com.pods.agent.service.FrameworkToolPackService;
 import com.pods.agent.service.ToolImportService;
+import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -30,6 +32,7 @@ public class ToolController {
     private final ToolImportService toolImportService;
     private final ToolRegistryService toolRegistryService;
     private final FrameworkToolPackService frameworkToolPackService;
+    private final ToolExecutionService toolExecutionService;
     private final ObjectMapper objectMapper;
 
     public ToolController(AgentDomainRepository domainRepository,
@@ -37,12 +40,14 @@ public class ToolController {
                           ToolImportService toolImportService,
                           ToolRegistryService toolRegistryService,
                           FrameworkToolPackService frameworkToolPackService,
+                          ToolExecutionService toolExecutionService,
                           ObjectMapper objectMapper) {
         this.domainRepository = domainRepository;
         this.toolRepository = toolRepository;
         this.toolImportService = toolImportService;
         this.toolRegistryService = toolRegistryService;
         this.frameworkToolPackService = frameworkToolPackService;
+        this.toolExecutionService = toolExecutionService;
         this.objectMapper = objectMapper;
     }
 
@@ -258,6 +263,39 @@ public class ToolController {
         return ResponseEntity.ok(Map.of("deleted", true, "toolId", toolId));
     }
 
+    @PostMapping("/{domainId}/tools/{toolId}/test")
+    @Operation(summary = "Execute tool with test payload")
+    public ResponseEntity<?> testTool(@PathVariable String domainId,
+                                      @PathVariable String toolId,
+                                      @RequestBody(required = false) Map<String, Object> body) {
+        AgentTool tool = toolRepository.findById(toolId).orElse(null);
+        if (tool == null || !domainId.equals(tool.getDomainId())) {
+            return ResponseEntityFactory.notFound("Tool not found: " + toolId);
+        }
+        Object payloadObj = body == null ? null : body.get("payload");
+        String payload;
+        if (payloadObj == null) {
+            payload = (tool.getSampleRequest() == null || tool.getSampleRequest().isBlank()) ? "{}" : tool.getSampleRequest();
+        } else if (payloadObj instanceof String s) {
+            payload = s;
+        } else {
+            try {
+                payload = objectMapper.writeValueAsString(payloadObj);
+            } catch (Exception e) {
+                payload = "{}";
+            }
+        }
+        var result = toolExecutionService.execute(tool, payload);
+        return ResponseEntity.ok(Map.of(
+                "success", result.success(),
+                "toolId", toolId,
+                "toolName", tool.getName(),
+                "payload", payload,
+                "body", result.body() == null ? "" : result.body(),
+                "error", result.error() == null ? "" : result.error()
+        ));
+    }
+
     @PostMapping("/import/openapi")
     @Operation(summary = "Import tools from OpenAPI spec")
     public ResponseEntity<?> importOpenApi(@Valid @RequestBody OpenApiImportRequest request) {
@@ -295,6 +333,20 @@ public class ToolController {
                 Boolean.TRUE.equals(request.getEnabled()));
         toolRegistryService.refresh();
         return ResponseEntity.ok(imported);
+    }
+
+    @PostMapping("/import/postman")
+    @Operation(summary = "Import tools from Postman collection JSON")
+    public ResponseEntity<?> importPostman(@Valid @RequestBody PostmanImportRequest request) {
+        if (domainRepository.findById(request.getDomainId()).isEmpty()) {
+            return ResponseEntityFactory.notFound("Tool domain not found: " + request.getDomainId());
+        }
+        var imported = toolImportService.importPostmanCollection(
+                request.getDomainId(),
+                request.getCollectionJson(),
+                Boolean.TRUE.equals(request.getEnabled()));
+        toolRegistryService.refresh();
+        return ResponseEntity.ok(Map.of("importedCount", imported.size(), "tools", imported));
     }
 
     @PostMapping("/install/framework-defaults")

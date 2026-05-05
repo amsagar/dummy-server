@@ -169,4 +169,17 @@ export const api = {
     saveConfigSessionLayout: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     deleteConfigSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
   },
+  decisionTables: {
+    list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),
+    get: (name: string) => fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}`, { headers: getHeaders() }).then(handleResponse),
+    create: (payload: any) => fetch(`${BASE_URL}/decision-tables`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
+    upsert: (name: string, payload: any) => fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}`, { method: 'PUT', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
+    delete: (name: string) => fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
+    evaluate: (name: string, inputs: Record<string, any>) =>
+      fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}/evaluate`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ inputs }),
+      }).then(handleResponse),
+  },
 };

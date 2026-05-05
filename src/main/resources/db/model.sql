@@ -516,6 +516,19 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_config_layouts (
 
 CREATE INDEX IF NOT EXISTS idx_tool_chain_config_layouts_scope ON agent.tool_chain_config_layouts (tool_chain_id, session_id, user_id);
 
+CREATE TABLE IF NOT EXISTS agent.decision_tables (
+    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    name         TEXT NOT NULL UNIQUE,
+    description  TEXT,
+    dmn_json     TEXT NOT NULL,
+    hit_policy   TEXT NOT NULL DEFAULT 'FIRST',
+    metadata_json TEXT,
+    created_at   BIGINT NOT NULL,
+    updated_at   BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_tables_name ON agent.decision_tables (name);
+
 
 -- ALTER TABLE agent.agent_tool_embeddings
 -- ALTER COLUMN embedding TYPE halfvec(3072);

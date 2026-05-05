@@ -220,6 +220,18 @@ export default function ToolsPage() {
     onError: (e: any) => toast.error(e.message || "Failed to delete auth profile"),
   });
 
+  const testAuthProfile = useMutation({
+    mutationFn: async () => {
+      if (!editingProfileId) throw new Error("Save profile first before testing");
+      return api.post(`/tool-auth/profiles/${editingProfileId}/test`, {});
+    },
+    onSuccess: (result: any) => {
+      const names = Array.isArray(result?.headerNames) ? result.headerNames.join(", ") : "";
+      toast.success(`Auth test succeeded${names ? ` (${names})` : ""}`);
+    },
+    onError: (e: any) => toast.error(e.message || "Auth test failed"),
+  });
+
   const toggleDomain = async (domain: ToolDomain) => {
     try {
       await api.patch(`/tool-domains/${domain.id}`, {
@@ -692,6 +704,15 @@ export default function ToolsPage() {
                 disabled={deleteAuthProfile.isPending}
               >
                 {deleteAuthProfile.isPending ? "Deleting..." : "Delete"}
+              </Button>
+            )}
+            {editingProfileId && (
+              <Button
+                variant="outline"
+                onClick={() => testAuthProfile.mutate()}
+                disabled={testAuthProfile.isPending}
+              >
+                {testAuthProfile.isPending ? "Testing..." : "Test Auth"}
               </Button>
             )}
             <Button

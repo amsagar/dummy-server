@@ -99,6 +99,15 @@ public class FrameworkToolPackService {
                 seed("memoryinsert", "Insert text into memory file at line", "memory", "memory", false, false, Map.of("path", "string", "after_line", "number", "text", "string"), true),
                 seed("memorydelete", "Delete memory file", "memory", "memory", false, false, Map.of("path", "string"), true),
                 seed("memoryrename", "Rename memory file", "memory", "memory", false, false, Map.of("old_path", "string", "new_path", "string"), true),
+                seed("decisionTableEvaluate", "Evaluate a stored decision table by name with structured inputs.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "tableName", Map.of("type", "string"),
+                                        "inputs", Map.of("type", "object")
+                                ),
+                                "required", List.of("tableName")
+                        ), true),
 
                 // Retrieval-eligible (semantic match required). baseInjected=false. Descriptions clarify scope so the model doesn't grab them for remote-hosted entities.
                 seed("read", "Read content of a file in the local workspace. Local files only — does not access GitHub, remote repos, web URLs, or external systems; use the appropriate MCP/integration tool for those.", "filesystem", "filesystem", false, false, Map.of("path", "string"), false),
