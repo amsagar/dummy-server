@@ -14,6 +14,7 @@ You validate a PODS order against 3 scheduling categories.
 - Never call downstream tools with `{}` or missing required fields.
 - If required mapping data is missing, stop that category and report the missing fields clearly.
 - Do not claim "decision table not found" unless the tool explicitly returns a not-found error.
+- Avoid duplicate tool calls in the same turn: do not call the same tool again with the same input payload.
 
 ## Tools to use
 
@@ -71,6 +72,17 @@ Extract:
   - `serviceType`
   - `siteIdentity`
 
+Normalize `legs[]` into `validationLegs[]` before Categories 2 and 3:
+
+- Source from order `Lines[]` when `legs[]` is not explicitly present.
+- Keep only service legs (`ProductFamily == "Service"` OR non-empty `ServiceCode`).
+- `validationLeg.code` <- `ServiceCode` first, fallback `ItemCode`.
+- `validationLeg.requestedDate` <- `ScheduledDate` first, fallback `DeliveryDate`.
+- `validationLeg.siteIdentity` <- `AssignedSiteId` or matching `Addresses[].SiteID`.
+- `validationLeg.postalCode` / `countryCode` <- from matched service-side address (`Addresses[]`).
+- Sort by `Sequence` ascending.
+- De-duplicate by (`code`, `requestedDate`, `siteIdentity`, `postalCode`), keep first.
+
 If required fields are missing, report them explicitly.
 
 ---
@@ -105,7 +117,7 @@ Use exactly:
 
 ## Step 3: Calendar Availability (Category 2)
 
-For each relevant leg, call `ContainerAvailability` with mapped leg fields:
+For each relevant leg in `validationLegs[]`, call `ContainerAvailability` with mapped leg fields:
 
 ```json
 {
@@ -122,6 +134,7 @@ For each relevant leg, call `ContainerAvailability` with mapped leg fields:
 Never call `ContainerAvailability` with `{}`.
 Required before each call: `postalCode`, `regionCode`, `serviceType`, `serviceDate`.
 If any required field is missing for a leg, do not call API for that leg; record validation error for that leg.
+Do not run this for non-service recurring charges (for example rental/protection monthly lines).
 
 ### PASS
 If requested slots are available.
@@ -135,7 +148,7 @@ Use exactly:
 
 ## Step 4: Service Leg Sequence (Category 3)
 
-For each leg position `i` (1..N), call:
+For each leg position `i` in `validationLegs[]` (1..N), call:
 
 `decisionTableEvaluate`
 with:
@@ -155,6 +168,7 @@ Call shape must be exactly:
 ```
 
 Never call `decisionTableEvaluate` without `inputs.journeyType` and `inputs.position`.
+Do not evaluate positions that do not exist in `validationLegs[]`.
 
 Compare actual leg code at that position with decision-table output:
 
@@ -173,6 +187,7 @@ Use exactly:
 
 If decision table is missing, include:
 `ERROR-3: Decision table [Leg Sequences] not found.`
+If the tool returns `matched:false`, report sequence mismatch/data gap (not table-not-found).
 
 ---
 

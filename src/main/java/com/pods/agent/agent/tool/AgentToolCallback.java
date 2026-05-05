@@ -16,6 +16,7 @@ import org.springframework.ai.tool.definition.ToolDefinition;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.TreeMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -113,6 +114,7 @@ public class AgentToolCallback implements ToolCallback {
         String payload = jsonInput == null ? "{}" : jsonInput;
         String callId = UUID.randomUUID().toString();
         boolean isSkillTool = tool.getName() != null && "skill".equalsIgnoreCase(tool.getName().trim());
+        String toolCallSignature = buildToolCallSignature(tool.getName(), payload);
 
         if (!isSkillTool && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
             // Soft gate: don't block the first domain tool call. Hard-blocking causes
@@ -169,6 +171,17 @@ public class AgentToolCallback implements ToolCallback {
         saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
         log.debug("[AgentToolCallback] tool={} input={}", tool.getName(), payload);
 
+        if (skillExecutionGate != null && toolCallSignature != null) {
+            String cached = skillExecutionGate.getCachedToolResult(toolCallSignature);
+            if (cached != null) {
+                log.info("[AgentToolCallback] deduped tool={} sessionId={} turnId={}",
+                        tool.getName(), sessionId, turnId);
+                sender.sendToolResult(sessionId, callId, tool.getName(), cached, "success");
+                saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"success\",\"output\":" + json(cached) + "}");
+                return cached;
+            }
+        }
+
         ToolExecutionService.ExecutionResult execution;
         try {
             // Bind the per-session workspace path so filesystem tools (read/edit/apply_patch
@@ -199,6 +212,9 @@ public class AgentToolCallback implements ToolCallback {
         sender.sendToolResult(sessionId, callId, tool.getName(), output,
                 execution.success() ? "success" : "error");
         saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(output) + "}");
+        if (skillExecutionGate != null && toolCallSignature != null) {
+            skillExecutionGate.cacheToolResult(toolCallSignature, output);
+        }
         return output;
     }
 
@@ -453,5 +469,40 @@ public class AgentToolCallback implements ToolCallback {
     private static String truncate(String value, int max) {
         if (value == null || value.length() <= max) return value;
         return value.substring(0, Math.max(0, max - 3)) + "...";
+    }
+
+    private String buildToolCallSignature(String toolName, String payload) {
+        if (toolName == null || toolName.isBlank()) return null;
+        String normalizedToolName = toolName.trim().toLowerCase();
+        String canonicalPayload = canonicalizeJsonPayload(payload);
+        return normalizedToolName + "|" + canonicalPayload;
+    }
+
+    private String canonicalizeJsonPayload(String payload) {
+        if (payload == null || payload.isBlank()) return "{}";
+        try {
+            Object parsed = objectMapper.readValue(payload, Object.class);
+            Object normalized = normalizeJson(parsed);
+            return objectMapper.writeValueAsString(normalized);
+        } catch (Exception ignored) {
+            return payload.trim();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object normalizeJson(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> normalized = new TreeMap<>();
+            map.forEach((k, v) -> normalized.put(String.valueOf(k), normalizeJson(v)));
+            return normalized;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> normalized = new ArrayList<>(list.size());
+            for (Object item : list) {
+                normalized.add(normalizeJson(item));
+            }
+            return normalized;
+        }
+        return value;
     }
 }
