@@ -101,7 +101,8 @@ public class AgentToolCallbackFactory {
                         runtimeEventRepository,
                         skillExecutionGate,
                         workspace,
-                        bypassApprovalGate))
+                        bypassApprovalGate,
+                        runtimeTuningProperties.getToolOutputVfsSpillThresholdChars()))
                 .collect(Collectors.toList());
 
         callbacks.add(new SkillToolCallback(

@@ -55,6 +55,7 @@ public class RuntimeTuningProperties {
     private boolean skillShortlistFallbackToCatalogOnMiss = true;
     private int qualityExpansionMaxRetries = 2;
     private int maxToolCallbacksPerTurn = 120;
+    private int toolOutputVfsSpillThresholdChars = 16_384;
     private int maxOutputTokens = 8192;
     private boolean enableAnthropicThinking = false;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
@@ -480,6 +481,14 @@ public class RuntimeTuningProperties {
 
     public void setMaxToolCallbacksPerTurn(int maxToolCallbacksPerTurn) {
         this.maxToolCallbacksPerTurn = maxToolCallbacksPerTurn;
+    }
+
+    public int getToolOutputVfsSpillThresholdChars() {
+        return toolOutputVfsSpillThresholdChars;
+    }
+
+    public void setToolOutputVfsSpillThresholdChars(int toolOutputVfsSpillThresholdChars) {
+        this.toolOutputVfsSpillThresholdChars = toolOutputVfsSpillThresholdChars;
     }
 
     public int getMaxOutputTokens() {

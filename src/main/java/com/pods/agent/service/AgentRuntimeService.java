@@ -660,6 +660,11 @@ public class AgentRuntimeService {
         if (observationContext != null && !observationContext.isBlank()) {
             context.append("Tool observations:\n").append(observationContext).append("\n\n");
         }
+        context.append("<tool_result_vfs_policy>\n")
+                .append("- If a tool result includes `storedInVfs=true`, the full output was saved to local workspace VFS at `path`.\n")
+                .append("- Before final synthesis, inspect that file using filesystem tools (`read` and `grep`) against the provided `path`.\n")
+                .append("- Do not assume the `preview` field contains complete output; treat it as a teaser only.\n")
+                .append("</tool_result_vfs_policy>\n\n");
         if (isToolChainDesignerMode(runtimeMode)) {
             context.append("""
 <toolchain_designer_mode>

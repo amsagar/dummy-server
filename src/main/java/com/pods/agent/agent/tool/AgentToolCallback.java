@@ -22,6 +22,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,6 +50,7 @@ public class AgentToolCallback implements ToolCallback {
     private final SkillExecutionGate skillExecutionGate;
     private final java.nio.file.Path workspace;
     private final boolean bypassApprovalGate;
+    private final int toolOutputVfsSpillThresholdChars;
 
     public AgentToolCallback(AgentTool tool,
                              ToolExecutionService toolExecutionService,
@@ -62,7 +66,7 @@ public class AgentToolCallback implements ToolCallback {
                              SkillExecutionGate skillExecutionGate) {
         this(tool, toolExecutionService, policyEngine, pendingInteractionService, sender,
                 sessionId, turnId, userId, approvalTimeoutMs, objectMapper,
-                runtimeEventRepository, skillExecutionGate, null, false);
+                runtimeEventRepository, skillExecutionGate, null, false, 16_384);
     }
 
     public AgentToolCallback(AgentTool tool,
@@ -78,7 +82,8 @@ public class AgentToolCallback implements ToolCallback {
                              RuntimeEventRepository runtimeEventRepository,
                              SkillExecutionGate skillExecutionGate,
                              java.nio.file.Path workspace,
-                             boolean bypassApprovalGate) {
+                             boolean bypassApprovalGate,
+                             int toolOutputVfsSpillThresholdChars) {
         this.tool = tool;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -93,6 +98,7 @@ public class AgentToolCallback implements ToolCallback {
         this.skillExecutionGate = skillExecutionGate;
         this.workspace = workspace;
         this.bypassApprovalGate = bypassApprovalGate;
+        this.toolOutputVfsSpillThresholdChars = Math.max(0, toolOutputVfsSpillThresholdChars);
     }
 
     @Override
@@ -209,13 +215,77 @@ public class AgentToolCallback implements ToolCallback {
                     ? "Tool '" + tool.getName() + "' returned an empty response. The service may be unavailable, the record may not exist, or the query returned no results. Do not mark this as unverifiable without reporting this specific issue to the user."
                     : "Tool '" + tool.getName() + "' failed with no error detail. The service endpoint may be unreachable.";
         }
-        sender.sendToolResult(sessionId, callId, tool.getName(), output,
+        String emittedOutput = maybeSpillToolOutput(output, callId, execution.success() ? "success" : "error");
+        sender.sendToolResult(sessionId, callId, tool.getName(), emittedOutput,
                 execution.success() ? "success" : "error");
-        saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(output) + "}");
+        saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(emittedOutput) + "}");
         if (skillExecutionGate != null && toolCallSignature != null) {
-            skillExecutionGate.cacheToolResult(toolCallSignature, output);
+            skillExecutionGate.cacheToolResult(toolCallSignature, emittedOutput);
         }
-        return output;
+        return emittedOutput;
+    }
+
+    private String maybeSpillToolOutput(String output, String callId, String status) {
+        if (output == null || output.isBlank()) return output;
+        if (toolOutputVfsSpillThresholdChars <= 0) return output;
+        if (output.length() < toolOutputVfsSpillThresholdChars) return output;
+        if (workspace == null || isFilesystemTool()) return output;
+        try {
+            String extension = looksLikeJson(output) ? "json" : "txt";
+            String safeToolName = sanitizeName(tool.getName());
+            Path relative = Path.of(".pods-agent", "turns", turnId, "tool-results",
+                    safeToolName + "-" + callId + "." + extension);
+            Path target = workspace.resolve(relative).normalize();
+            if (!target.startsWith(workspace)) {
+                log.warn("[AgentToolCallback] refused tool output spill outside workspace: {}", target);
+                return output;
+            }
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, output, StandardCharsets.UTF_8);
+
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("status", status);
+            envelope.put("toolName", tool.getName());
+            envelope.put("storedInVfs", true);
+            envelope.put("path", relative.toString().replace("\\", "/"));
+            envelope.put("chars", output.length());
+            envelope.put("bytes", output.getBytes(StandardCharsets.UTF_8).length);
+            envelope.put("preview", truncate(output, 500));
+            envelope.put("guidance",
+                    "Large output was saved to workspace VFS. Use read/grep on the provided path to analyze details.");
+            return objectMapper.writeValueAsString(envelope);
+        } catch (Exception e) {
+            log.warn("[AgentToolCallback] failed spilling large tool output to VFS, returning inline output: {}", e.getMessage());
+            return output;
+        }
+    }
+
+    private boolean looksLikeJson(String text) {
+        if (text == null) return false;
+        String trimmed = text.trim();
+        if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return false;
+        try {
+            objectMapper.readTree(trimmed);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isFilesystemTool() {
+        String executionKind = tool == null || tool.getExecutionKind() == null
+                ? ""
+                : tool.getExecutionKind().trim().toLowerCase();
+        if ("filesystem".equals(executionKind)) return true;
+        String name = tool == null || tool.getName() == null ? "" : tool.getName().trim().toLowerCase();
+        return "read".equals(name)
+                || "glob".equals(name)
+                || "grep".equals(name)
+                || "write".equals(name)
+                || "edit".equals(name)
+                || "apply_patch".equals(name);
     }
 
     private void saveRuntimeEvent(String eventType, String payload) {
