@@ -811,12 +811,22 @@ public class ToolChainRuntimeService {
 
     @SuppressWarnings("unchecked")
     private StepResult executeIterator(NodeModel node, Map<String, Object> context, String parentRunId, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
-        String over = node.configString("over");
-        if (over == null || over.isBlank()) {
-            return StepResult.failed("iterator node missing 'over'");
-        }
         String as = node.configString("as");
         if (as == null || as.isBlank()) as = "item";
+
+        // Inline-tool mode: a single tool called once per item from a JSONata-resolved list,
+        // with per-item argMappings that may reference $item.X. This is what the suggestion
+        // service emits when it sees consecutive same-tool calls in a recorded turn.
+        String inlineToolName = node.configString("toolName");
+        if (inlineToolName != null && !inlineToolName.isBlank()) {
+            return executeInlineToolIterator(node, context, runOptions, as, inlineToolName);
+        }
+
+        // Legacy sub-chain mode: each item runs the same chain identified by subChainId.
+        String over = node.configString("over");
+        if (over == null || over.isBlank()) {
+            return StepResult.failed("iterator node missing 'over' (or 'toolName' for inline mode)");
+        }
         String subChainId = node.configString("subChainId");
         if (subChainId == null || subChainId.isBlank()) {
             return StepResult.failed("iterator node missing 'subChainId'");
@@ -898,6 +908,124 @@ public class ToolChainRuntimeService {
             }
         }
         return StepResult.success(Map.of(node.id(), results), null);
+    }
+
+    /**
+     * Iterator that calls a single tool once per item, with per-item argMappings evaluated
+     * against the running context plus $item. The list of items is resolved from a special
+     * "items" entry inside argMappings — its value is a JSONata expression yielding a list.
+     * Per-item argMappings reference $item.X.
+     *
+     * Output shape: {nodeId: {input: {items: [...]}, output: [<each tool's output>...]}}
+     * — same {input, output} envelope as a single tool node so downstream JSONata works.
+     */
+    @SuppressWarnings("unchecked")
+    private StepResult executeInlineToolIterator(NodeModel node,
+                                                 Map<String, Object> context,
+                                                 Map<String, Object> runOptions,
+                                                 String itemKey,
+                                                 String toolName) {
+        AgentTool tool = toolRegistryService.getEnabledToolByName(toolName);
+        if (tool == null) {
+            return StepResult.failed("Iterator tool is not enabled: " + toolName);
+        }
+
+        Map<String, Object> argMappings = new LinkedHashMap<>(node.configMap("argMappings"));
+        Object itemsMapping = argMappings.remove("items");
+        List<?> items = resolveIteratorItems(itemsMapping, context);
+        if (items == null) items = List.of();
+        if (items.isEmpty()) {
+            return StepResult.success(
+                    Map.of(node.id(), Map.of("input", Map.of("items", List.of()), "output", List.of())),
+                    null);
+        }
+
+        Object modelRefObj = runOptions == null ? null : runOptions.get("_runtime_modelRef");
+        ModelRef modelRef = modelRefObj instanceof ModelRef m ? m : null;
+
+        boolean parallel = !Boolean.FALSE.equals(node.config().get("parallel"));
+        int maxConcurrency = 4;
+        Object concObj = node.config().get("maxConcurrency");
+        if (concObj instanceof Number n) maxConcurrency = Math.max(1, Math.min(n.intValue(), 16));
+        boolean continueOnFail = Boolean.TRUE.equals(node.config().get("continueOnFail"));
+
+        java.util.concurrent.Semaphore limiter = new java.util.concurrent.Semaphore(maxConcurrency);
+        List<CompletableFuture<Map<String, Object>>> futures = new ArrayList<>();
+        for (Object item : items) {
+            Map<String, Object> itemContext = new LinkedHashMap<>(context);
+            itemContext.put(itemKey, item);
+            itemContext.put("$item", item);
+            CompletableFuture<Map<String, Object>> fut;
+            if (parallel) {
+                fut = CompletableFuture.supplyAsync(() -> {
+                    try { limiter.acquire(); }
+                    catch (InterruptedException ie) { Thread.currentThread().interrupt(); return Map.of("error", "interrupted"); }
+                    try {
+                        return runInlineIteratorItem(tool, toolName, argMappings, itemContext, modelRef);
+                    } finally { limiter.release(); }
+                }, branchExecutor);
+            } else {
+                fut = CompletableFuture.completedFuture(runInlineIteratorItem(tool, toolName, argMappings, itemContext, modelRef));
+            }
+            futures.add(fut);
+        }
+
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (CompletableFuture<Map<String, Object>> f : futures) {
+            try {
+                results.add(f.join());
+            } catch (Exception e) {
+                if (continueOnFail) {
+                    results.add(Map.of("error", e.getMessage() == null ? "iterator item failed" : e.getMessage()));
+                } else {
+                    return StepResult.failed("iterator item failed: " + e.getMessage());
+                }
+            }
+        }
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("input", Map.of("items", items));
+        envelope.put("output", results);
+        return StepResult.success(Map.of(node.id(), envelope), null);
+    }
+
+    private List<?> resolveIteratorItems(Object itemsMapping, Map<String, Object> context) {
+        if (itemsMapping == null) return List.of();
+        Object value = argMappingResolver.resolveOne(itemsMapping, context, key -> resolvePath(context, key));
+        if (value instanceof List<?> list) return list;
+        if (value == null) return null;
+        return List.of(value);
+    }
+
+    private Map<String, Object> runInlineIteratorItem(AgentTool tool,
+                                                      String toolName,
+                                                      Map<String, Object> argMappings,
+                                                      Map<String, Object> itemContext,
+                                                      ModelRef modelRef) {
+        ArgMappingResolver.ResolutionResult res = argMappingResolver.resolveAll(
+                argMappings, itemContext, key -> resolvePath(itemContext, key));
+        Map<String, Object> resolvedInput = new LinkedHashMap<>(res.resolved());
+        if (modelRef != null) {
+            for (ArgMappingResolver.DeferredArg deferred : res.deferred()) {
+                if (resolvedInput.containsKey(deferred.argName())) continue;
+                Object hint = deferred.mapping() == null ? null : deferred.mapping().expr();
+                String hintExpr = hint instanceof String s ? s : null;
+                llmArgResolver.resolve(toolName, deferred.argName(), itemContext, modelRef, hintExpr)
+                        .ifPresent(resolved -> {
+                            if (resolved.value() != null) resolvedInput.put(deferred.argName(), resolved.value());
+                        });
+            }
+        }
+        ToolExecutionService.ExecutionResult result = toolExecutionService.execute(tool, toJson(resolvedInput));
+        if (!result.success()) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", result.error());
+            err.put("input", resolvedInput);
+            return err;
+        }
+        Map<String, Object> ok = new LinkedHashMap<>();
+        ok.put("input", resolvedInput);
+        ok.put("output", parseFlexibleBody(result.body()));
+        return ok;
     }
 
     private Object runIteratorItem(String subChainId, Integer subVersion, String initiatedBy,
@@ -1025,10 +1153,12 @@ public class ToolChainRuntimeService {
 
     private Map<String, Object> resolveNodeInput(NodeModel node, Map<String, Object> context) {
         String inputPath = node.configString("inputKey");
+        Map<String, Object> argMappings = node.configMap("argMappings");
+        boolean hasMappings = argMappings != null && !argMappings.isEmpty();
+
         Map<String, Object> payload;
-        if (inputPath == null || inputPath.isBlank()) {
-            payload = new LinkedHashMap<>(context);
-        } else {
+        if (inputPath != null && !inputPath.isBlank()) {
+            // Explicit inputKey: pull that subtree as the base payload.
             Object value = resolvePath(context, inputPath);
             if (value instanceof Map<?, ?> m) {
                 payload = new LinkedHashMap<>((Map<String, Object>) m);
@@ -1039,8 +1169,16 @@ public class ToolChainRuntimeService {
                 payload = new LinkedHashMap<>();
                 if (value != null) payload.put(targetKey, value);
             }
+        } else if (hasMappings) {
+            // argMappings define exactly what the tool needs; do NOT also dump the full context,
+            // or a missing mapping silently sends garbage downstream (e.g., context.message
+            // colliding with a tool field, or required fields like ORD_ID never being set).
+            payload = new LinkedHashMap<>();
+        } else {
+            // Legacy: no inputKey AND no argMappings — pass the entire context through.
+            // Only safe for tools that explicitly accept the chain's free-form context.
+            payload = new LinkedHashMap<>(context);
         }
-        Map<String, Object> argMappings = node.configMap("argMappings");
         Map<String, Object> resolved = argMappingResolver.resolve(
                 argMappings,
                 context,

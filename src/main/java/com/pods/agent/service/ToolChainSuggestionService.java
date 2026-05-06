@@ -101,6 +101,14 @@ public class ToolChainSuggestionService {
         metadata.put("authoredByLlm", authoredByLlm);
         metadata.put("sessionId", sessionId == null ? "" : sessionId);
         metadata.put("turnId", turnId);
+        // Persist the model used during the recorded turn so the runtime can call
+        // LlmArgResolver for llm_assisted mappings even when the chain is invoked
+        // without an explicit model in the run options (e.g. matched-chain dialog).
+        if (modelRef != null) {
+            metadata.put("defaultModelRef", Map.of(
+                    "providerID", modelRef.providerID(),
+                    "modelID", modelRef.modelID()));
+        }
 
         ToolChain chain = toolChainService.createSystemSuggested(
                 chainName,
@@ -191,10 +199,17 @@ public class ToolChainSuggestionService {
         for (Object nodeObj : list) {
             if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
             String nodeId = String.valueOf(nodeMap.get("id"));
-            Map<String, Object> overrides = nodeMappings.get(nodeId);
-            if (overrides == null || overrides.isEmpty()) continue;
             Object configObj = nodeMap.get("config");
             if (!(configObj instanceof Map<?, ?> cfg)) continue;
+            String toolName = String.valueOf(((Map<String, Object>) cfg).get("toolName"));
+            // The LLM is told to key by node id (tool_1, tool_2…) but occasionally it keys
+            // by tool name instead. Accept either to avoid silently dropping the entire
+            // mapping block.
+            Map<String, Object> overrides = nodeMappings.get(nodeId);
+            if ((overrides == null || overrides.isEmpty()) && toolName != null && !toolName.isBlank()) {
+                overrides = nodeMappings.get(toolName);
+            }
+            if (overrides == null || overrides.isEmpty()) continue;
             ((Map<String, Object>) cfg).put("argMappings", overrides);
             ((Map<String, Object>) cfg).put("mappingStatus", "ai_authored");
         }
@@ -234,24 +249,60 @@ public class ToolChainSuggestionService {
     }
 
     private Map<String, Object> buildGraph(String userPrompt, List<ToolCallRow> calls) {
+        // Group consecutive calls to the same tool into a single iterator node — e.g. four
+        // ContainerAvailability calls (one per leg) become one node with type=iterator.
+        // The runtime expands the iterator at execution time, calling the tool once per item.
+        List<List<ToolCallRow>> groups = groupConsecutiveSameTool(calls);
+
         List<Map<String, Object>> nodes = new ArrayList<>();
         List<Map<String, Object>> edges = new ArrayList<>();
         nodes.add(Map.of("id", "start", "type", "start", "label", "Start"));
         String previousId = "start";
-        for (int i = 0; i < calls.size(); i++) {
-            ToolCallRow call = calls.get(i);
-            String nodeId = "tool_" + (i + 1);
-            Map<String, Object> config = new LinkedHashMap<>();
-            config.put("toolName", call.toolName());
-            Map<String, Object> mappings = inferMappings(i, calls);
-            if (!mappings.isEmpty()) {
-                config.put("argMappings", mappings);
-                config.put("mappingStatus", "inferred");
-            }
+        int nodeIndex = 0;
+        int globalCallIndex = 0;
+        for (List<ToolCallRow> group : groups) {
+            nodeIndex++;
+            String nodeId = "tool_" + nodeIndex;
             Map<String, Object> node = new LinkedHashMap<>();
             node.put("id", nodeId);
-            node.put("type", "tool");
-            node.put("label", call.toolName());
+            Map<String, Object> config = new LinkedHashMap<>();
+            String toolName = group.get(0).toolName();
+            config.put("toolName", toolName);
+
+            if (group.size() == 1) {
+                ToolCallRow call = group.get(0);
+                node.put("type", "tool");
+                node.put("label", toolName);
+                Map<String, Object> mappings = inferMappings(globalCallIndex, calls);
+                if (!mappings.isEmpty()) {
+                    config.put("argMappings", mappings);
+                    config.put("mappingStatus", "inferred");
+                }
+                // Capture the recorded input as a hint for downstream LLM authoring.
+                if (!call.input().isEmpty()) {
+                    config.put("recordedInputSample", call.input());
+                }
+                globalCallIndex++;
+            } else {
+                // Iterator node — same tool, called once per item in a list. The list is
+                // resolved at runtime from a JSONata expression, so the iteration count is
+                // data-driven (a different order may produce 2 legs or 7 legs, not exactly
+                // the count we recorded). The recorded inputs are kept only as samples for
+                // the LLM authoring step to learn the per-item shape.
+                node.put("type", "iterator");
+                node.put("label", toolName);
+                config.put("recordedSampleCount", group.size());
+                List<Map<String, Object>> samples = new ArrayList<>();
+                for (ToolCallRow row : group) {
+                    if (!row.input().isEmpty()) samples.add(row.input());
+                }
+                if (!samples.isEmpty()) config.put("recordedInputSamples", samples);
+                // The LLM authoring step is responsible for filling in `items` (a JSONata
+                // expression yielding the per-iteration list, evaluated at runtime) and
+                // `argMappings` that reference `$item.X` for each iteration's data.
+                config.put("mappingStatus", "needs_iterator_authoring");
+                globalCallIndex += group.size();
+            }
             node.put("config", config);
             nodes.add(node);
             edges.add(Map.of("from", previousId, "to", nodeId));
@@ -265,6 +316,24 @@ public class ToolChainSuggestionService {
         graph.put("edges", edges);
         graph.put("description", normalizeIntentText(userPrompt, calls));
         return graph;
+    }
+
+    private List<List<ToolCallRow>> groupConsecutiveSameTool(List<ToolCallRow> calls) {
+        List<List<ToolCallRow>> groups = new ArrayList<>();
+        List<ToolCallRow> current = new ArrayList<>();
+        String currentTool = null;
+        for (ToolCallRow call : calls) {
+            if (currentTool != null && currentTool.equals(call.toolName())) {
+                current.add(call);
+            } else {
+                if (!current.isEmpty()) groups.add(current);
+                current = new ArrayList<>();
+                current.add(call);
+                currentTool = call.toolName();
+            }
+        }
+        if (!current.isEmpty()) groups.add(current);
+        return groups;
     }
 
     private Map<String, Object> inferMappings(int index, List<ToolCallRow> calls) {

@@ -251,8 +251,9 @@ public class ToolChainAuthoringService {
 
     private static final String SYSTEM_PROMPT = """
             You design a reusable workflow ("toolchain") from one recorded execution.
-            You will receive: the user's original prompt and an ordered list of tool calls
-            (each with input, output, and the tool's request JSON Schema).
+            You will receive: the user's original prompt and an ordered list of nodes, each
+            either a single tool call or an iterator group (same tool called multiple times in
+            a row, one call per item).
 
             Return ONLY valid JSON, no prose, no code fences:
             {
@@ -264,9 +265,18 @@ public class ToolChainAuthoringService {
                   "<argName>": { "expr": "<JSONata>", "policy": "strict" | "llm_assisted", "fallback": <optional> }
                 }
               }
+              // For iterator nodes (you'll see them in the input as type: "iterator" with
+              // "recordedInputSamples" showing per-iteration shapes), key by node id and add
+              // a special "items" entry alongside the per-iteration arg mappings:
+              //
+              //   "tool_3": {
+              //     "items": { "expr": "$.tool_1.output.Lines[ServiceCode in ['IDEL','WTW','RDL','FPU']]" },
+              //     "referenceDate": { "expr": "$item.ScheduledDate", "policy": "strict" },
+              //     "siteIdentity":  { "expr": "$item.AssignedSiteId",  "policy": "strict" }
+              //   }
             }
 
-            Rules for argMappings:
+            Rules for argMappings (single-tool nodes):
             - The runtime context exposes:
                 $.chainInput.<key>            — the original user-level input passed to the chain
                 $.tool_<N>.input.<key>        — the resolved arguments sent to step N
@@ -278,8 +288,17 @@ public class ToolChainAuthoringService {
             - When a value requires multi-rule reasoning, lookup tables, or judgement that cannot be
               cleanly expressed in JSONata, set "policy": "llm_assisted" and still provide your best
               JSONata as a hint (it will be tried first, the LLM is only invoked as fallback).
-            - Cover EVERY argument the tool actually received in the recorded run; do not omit args.
+            - Cover EVERY required argument from the tool's request JSON Schema. Do not skip required args.
             - Do not hallucinate fields that are not present in the recorded outputs.
+
+            Rules for iterator nodes (when the recorded run shows the same tool called multiple times):
+            - Set the special "items" key to a JSONata expression that produces a list to iterate over.
+              Example: "$.tool_1.output.Lines[ServiceCode in ['IDEL','WTW','RDL','FPU']]".
+            - Within the iterator's argMappings, reference the current iteration's data via "$item.X"
+              and any other context as usual ("$.tool_1.output...", "$.chainInput...").
+            - If the iteration cannot be derived from a single JSONata expression (e.g., the items come
+              from multiple sources), set "items": { "expr": "$item", "policy": "llm_assisted" } and the
+              runtime will resolve them via LLM.
 
             Naming rules:
             - Name: 2-8 words, business outcome (not "Step 1 then Step 2"). Title Case. No quotes.
