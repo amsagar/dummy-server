@@ -121,6 +121,26 @@ public class ChatService {
                 validateAttachments(request);
                 AgentSession session = sessionManager.getOrCreate(request.getSessionId(), userId);
                 String sessionId = session.getSessionId();
+                session.setActiveEmitter(emitter);
+                emitter.onCompletion(() -> {
+                    session.cancel();
+                    session.setActiveEmitter(null);
+                    log.debug("[ChatService] SSE completed for session={}", sessionId);
+                });
+                emitter.onTimeout(() -> {
+                    session.cancel();
+                    session.setActiveEmitter(null);
+                    log.warn("[ChatService] SSE timed out for session={}", sessionId);
+                    try {
+                        emitter.complete();
+                    } catch (Exception ignored) {
+                    }
+                });
+                emitter.onError(ex -> {
+                    session.cancel();
+                    session.setActiveEmitter(null);
+                    log.warn("[ChatService] SSE error for session={}: {}", sessionId, ex != null ? ex.getMessage() : "unknown");
+                });
 
                 ChatState state = buildEffectiveState(session, request);
                 session.setActiveState(state);
@@ -198,11 +218,19 @@ public class ChatService {
 
                 sender.sendDone(sessionId, response);
                 sender.complete();
+                session.setActiveEmitter(null);
 
             } catch (Exception e) {
                 log.error("[ChatService] Error during chat: {}", e.getMessage(), e);
                 sender.sendError(e.getMessage());
                 sender.complete();
+                try {
+                    AgentSession active = sessionManager.get(request.getSessionId());
+                    if (active != null) {
+                        active.setActiveEmitter(null);
+                    }
+                } catch (Exception ignored) {
+                }
             }
         });
     }

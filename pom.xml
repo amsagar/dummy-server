@@ -22,6 +22,7 @@
         <spring-ai.version>2.0.0-M4</spring-ai.version>
         <springdoc.version>2.8.13</springdoc.version>
         <lombok.version>1.18.42</lombok.version>
+        <anthropic.sdk.version>2.18.0</anthropic.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -91,6 +92,11 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-anthropic</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.anthropic</groupId>
+            <artifactId>anthropic-java-foundry</artifactId>
+            <version>${anthropic.sdk.version}</version>
         </dependency>
 
         <dependency>

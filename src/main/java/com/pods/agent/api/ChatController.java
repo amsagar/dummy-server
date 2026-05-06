@@ -99,7 +99,8 @@ public class ChatController {
         response.setHeader("X-Accel-Buffering", "no");
         response.setHeader("Cache-Control", "no-cache");
 
-        SseEmitter emitter = new SseEmitter(300_000L);
+        // Keep SSE open for long-running token generation; close only on done/cancel/error.
+        SseEmitter emitter = new SseEmitter(-1L);
         chatService.handleChatAsync(request, emitter, userId);
         return emitter;
     }

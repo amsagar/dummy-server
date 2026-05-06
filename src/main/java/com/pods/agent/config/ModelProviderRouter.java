@@ -23,12 +23,10 @@ import org.springframework.ai.ollama.api.OllamaApi;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
-import java.util.Arrays;
-import java.util.List;
+import java.net.URI;
 
 /**
  * Routes a ModelRef (providerID + modelID) to the correct ChatClient + ChatOptions.
@@ -69,6 +67,25 @@ public class ModelProviderRouter {
                 || id.startsWith("gpt-5") || id.startsWith("gpt-o");
     }
 
+    private static String normalizeAzureEndpoint(String endpoint) {
+        String base = endpoint == null ? "" : endpoint.trim();
+        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (base.endsWith("/openai/v1")) return base.substring(0, base.length() - "/openai/v1".length());
+        if (base.endsWith("/openai")) return base.substring(0, base.length() - "/openai".length());
+        return base;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void trySetAzurePreviewServiceVersion(OpenAIClientBuilder builder) {
+        try {
+            Class<?> versionClass = Class.forName("com.azure.ai.openai.models.OpenAIServiceVersion");
+            Object version = Enum.valueOf((Class<Enum>) versionClass.asSubclass(Enum.class), "V2024_10_21");
+            OpenAIClientBuilder.class.getMethod("serviceVersion", versionClass).invoke(builder, version);
+        } catch (Exception ignored) {
+            // Best-effort for SDKs that expose serviceVersion. Keep defaults otherwise.
+        }
+    }
+
     private OpenAiChatOptions openAiOptions(String modelID) {
         OpenAiChatOptions.Builder b = OpenAiChatOptions.builder().model(modelID);
         if (requiresCompletionTokens(modelID)) {
@@ -107,6 +124,7 @@ public class ModelProviderRouter {
 
         return switch (provider) {
             case "anthropic" -> resolveAnthropic(modelID, disableThinking);
+            case "azure_claude" -> resolveAzureClaude(modelID);
             case "azure", "azure_openai" -> resolveAzure(provider, modelID);
             case "openai" -> resolveOpenAI(modelID);
             case "google", "google-vertex" -> resolveGoogle(modelID);
@@ -166,20 +184,108 @@ public class ModelProviderRouter {
                 throw new IllegalStateException("Azure endpoint (Base URL) is missing for " + modelID);
             }
 
+            String normalizedEndpoint = normalizeAzureEndpoint(endpoint);
+            OpenAIClientBuilder clientBuilder = new OpenAIClientBuilder()
+                    .endpoint(normalizedEndpoint)
+                    .credential(new AzureKeyCredential(apiKey));
+            // Claude and other partner models may require newer Azure API versions.
+            trySetAzurePreviewServiceVersion(clientBuilder);
+
             AzureOpenAiChatModel model = AzureOpenAiChatModel.builder()
-                    .openAIClientBuilder(new OpenAIClientBuilder()
-                            .endpoint(endpoint)
-                            .credential(new AzureKeyCredential(apiKey)))
+                    .openAIClientBuilder(clientBuilder)
                     .defaultOptions(AzureOpenAiChatOptions.builder()
                             .deploymentName(modelID)
                             .maxCompletionTokens(maxTokens())
                             .build())
                     .build();
 
-            log.debug("[ModelProviderRouter] → {}/{}", providerID, modelID);
+            log.debug("[ModelProviderRouter] → {}/{} (azure-deployment-api, endpoint={})",
+                    providerID, modelID, normalizedEndpoint);
             return new Spec(ChatClient.create(model), null);
         } catch (Exception e) {
             throw wrapError(providerID, modelID, e);
+        }
+    }
+
+    private static String extractFoundryResource(String baseUrlOrResource) {
+        if (baseUrlOrResource == null || baseUrlOrResource.isBlank()) return "";
+        String value = baseUrlOrResource.trim();
+        try {
+            if (value.contains("://")) {
+                URI uri = URI.create(value);
+                String host = uri.getHost();
+                if (host != null && !host.isBlank()) {
+                    int dot = host.indexOf('.');
+                    return dot > 0 ? host.substring(0, dot) : host;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        int dot = value.indexOf('.');
+        return dot > 0 ? value.substring(0, dot) : value;
+    }
+
+    private static Object buildFoundryBackend(String resource, String apiKey) {
+        try {
+            Class<?> c = Class.forName("com.anthropic.foundry.backends.FoundryBackend");
+            Object builder = c.getMethod("builder").invoke(null);
+            builder.getClass().getMethod("resource", String.class).invoke(builder, resource);
+            builder.getClass().getMethod("apiKey", String.class).invoke(builder, apiKey);
+            return builder.getClass().getMethod("build").invoke(builder);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to initialize FoundryBackend: " + e.getMessage(), e);
+        }
+    }
+
+    private static void applyBackend(Object clientBuilder, Object backend) {
+        try {
+            for (var m : clientBuilder.getClass().getMethods()) {
+                if (!"backend".equals(m.getName()) || m.getParameterCount() != 1) continue;
+                m.invoke(clientBuilder, backend);
+                return;
+            }
+            throw new IllegalStateException("No backend(...) method found on client builder " + clientBuilder.getClass().getName());
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to apply Foundry backend: " + e.getMessage(), e);
+        }
+    }
+
+    private Spec resolveAzureClaude(String modelID) {
+        var creds = getCredsOrThrowFromProviders(modelID, "azure_claude", "azure", "azure_openai");
+        try {
+            String apiKey = encryptionService.decrypt(creds.encryptedKey());
+            String baseUrlOrResource = creds.baseUrl();
+            if (baseUrlOrResource == null || baseUrlOrResource.isBlank()) {
+                throw new IllegalStateException(
+                        "Azure Claude baseUrl/resource is required (for Foundry Anthropic endpoint).");
+            }
+            String resource = extractFoundryResource(baseUrlOrResource);
+            if (resource.isBlank()) {
+                throw new IllegalStateException("Could not derive Foundry resource from baseUrl/resource: " + baseUrlOrResource);
+            }
+
+            Object backend = buildFoundryBackend(resource, apiKey);
+            Object syncBuilder = AnthropicOkHttpClient.builder();
+            applyBackend(syncBuilder, backend);
+            Object syncFoundry = syncBuilder.getClass().getMethod("build").invoke(syncBuilder);
+
+            Object asyncBuilder = AnthropicOkHttpClientAsync.builder();
+            applyBackend(asyncBuilder, backend);
+            Object asyncFoundry = asyncBuilder.getClass().getMethod("build").invoke(asyncBuilder);
+
+            AnthropicChatModel model = AnthropicChatModel.builder()
+                    .anthropicClient((AnthropicClient) syncFoundry)
+                    .anthropicClientAsync((AnthropicClientAsync) asyncFoundry)
+                    .options(AnthropicChatOptions.builder()
+                            .model(modelID)
+                            .maxTokens(maxTokens())
+                            .build())
+                    .build();
+
+            log.debug("[ModelProviderRouter] → azure_claude/{} (anthropic-foundry, resource={})", modelID, resource);
+            return new Spec(ChatClient.create(model), null);
+        } catch (Exception e) {
+            throw wrapError("azure_claude", modelID, e);
         }
     }
 
@@ -288,6 +394,17 @@ public class ModelProviderRouter {
                 .orElseThrow(() -> new IllegalStateException(
                         "No API key found for " + providerID + "/" + modelID +
                         " — register the model with an API key via the Models page"));
+    }
+
+    private ModelRepository.ModelCredentials getCredsOrThrowFromProviders(String modelID, String... providerIDs) {
+        for (String providerID : providerIDs) {
+            var creds = modelRepository.getCredentials(providerID, modelID)
+                    .filter(ModelRepository.ModelCredentials::hasKey);
+            if (creds.isPresent()) return creds.get();
+        }
+        throw new IllegalStateException(
+                "No API key found for model '" + modelID + "' under providers " + String.join(", ", providerIDs) +
+                        " — register the model with an API key via the Models page");
     }
 
     private IllegalStateException wrapError(String provider, String modelID, Exception e) {

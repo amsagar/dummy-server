@@ -50,7 +50,12 @@ public class SseEventSender {
             String json = objectMapper.writeValueAsString(envelope);
             emitter.send(SseEmitter.event().data(json));
         } catch (Exception e) {
-            log.warn("[SseEventSender] Failed to send event: {}", e.getMessage());
+            String msg = e.getMessage() == null ? "" : e.getMessage();
+            if (msg.contains("already") || msg.contains("completed") || msg.contains("Broken pipe")) {
+                log.debug("[SseEventSender] Stream already closed; skipping event send.");
+            } else {
+                log.warn("[SseEventSender] Failed to send event: {}", msg);
+            }
         }
     }
 

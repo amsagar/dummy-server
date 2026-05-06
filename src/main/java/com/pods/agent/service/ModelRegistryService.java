@@ -110,6 +110,7 @@ public class ModelRegistryService {
     public ModelConfig register(ModelRegisterRequest req) {
         String encryptedKey = null;
         String baseUrl = req.getBaseUrl();
+        String providerID = req.getProviderID();
 
         if (req.getApiKey() != null && !req.getApiKey().isBlank()) {
             if (!encryption.isConfigured()) {
@@ -119,13 +120,20 @@ public class ModelRegistryService {
             encryptedKey = encryption.encrypt(req.getApiKey());
         } else {
             // No key provided — inherit credentials from another model in the same provider
-            var existing = modelRepository.findCredentialsByProvider(req.getProviderID());
+            var existing = modelRepository.findCredentialsByProvider(providerID);
+            // For azure_claude, allow inheriting credentials from existing Azure providers.
+            if (existing.isEmpty() && "azure_claude".equalsIgnoreCase(providerID)) {
+                existing = modelRepository.findCredentialsByProvider("azure");
+            }
+            if (existing.isEmpty() && "azure_claude".equalsIgnoreCase(providerID)) {
+                existing = modelRepository.findCredentialsByProvider("azure_openai");
+            }
             if (existing.isPresent()) {
                 encryptedKey = existing.get().encryptedKey();
                 if ((baseUrl == null || baseUrl.isBlank()) && existing.get().baseUrl() != null) {
                     baseUrl = existing.get().baseUrl();
                 }
-                log.info("[ModelRegistryService] Reusing provider credentials for {}/{}", req.getProviderID(), req.getModelID());
+                log.info("[ModelRegistryService] Reusing provider credentials for {}/{}", providerID, req.getModelID());
             }
         }
 
@@ -151,9 +159,13 @@ public class ModelRegistryService {
      * Returns all providers as seen in the models.dev catalog.
      */
     public List<ModelsDevService.ProviderEntry> listProviders() {
-        return modelsDevService.getProviders().stream()
+        List<ModelsDevService.ProviderEntry> providers = new ArrayList<>(modelsDevService.getProviders().stream()
                 .filter(p -> whitelist.isProviderAllowed(p.id()))
-                .toList();
+                .toList());
+        if (whitelist.isProviderAllowed("azure_claude")) {
+            providers.add(buildAzureClaudeProvider(providers));
+        }
+        return providers;
     }
 
     // ── Merge logic ───────────────────────────────────────────────────────────
@@ -211,5 +223,40 @@ public class ModelRegistryService {
 
     private static String key(String providerID, String modelID) {
         return providerID.toLowerCase() + ":" + modelID.toLowerCase();
+    }
+
+    private ModelsDevService.ProviderEntry buildAzureClaudeProvider(List<ModelsDevService.ProviderEntry> providers) {
+        List<ModelsDevService.ModelEntry> azureClaudeModels = new ArrayList<>();
+        for (ModelsDevService.ProviderEntry provider : providers) {
+            String pid = provider.id() == null ? "" : provider.id().toLowerCase();
+            if (!"azure".equals(pid) && !"azure_openai".equals(pid)) continue;
+            for (ModelsDevService.ModelEntry m : provider.models()) {
+                if (m.id() != null && m.id().toLowerCase().startsWith("claude")) {
+                    azureClaudeModels.add(new ModelsDevService.ModelEntry(
+                            m.id(), m.name(), "azure_claude", "Azure Claude",
+                            m.context(), m.costInput(), m.costOutput(),
+                            m.supportsTools(), m.supportsVision(), m.supportsTemperature(),
+                            m.supportsReasoning(), m.supportsStreaming()
+                    ));
+                }
+            }
+        }
+
+        // Include already-registered Claude model IDs even if catalog omits them.
+        for (ModelConfig cfg : modelRepository.findAll()) {
+            String pid = cfg.getProviderId() == null ? "" : cfg.getProviderId().toLowerCase();
+            String mid = cfg.getModelId();
+            if (mid == null || !mid.toLowerCase().startsWith("claude")) continue;
+            if (!"azure".equals(pid) && !"azure_openai".equals(pid) && !"azure_claude".equals(pid)) continue;
+            boolean exists = azureClaudeModels.stream().anyMatch(m -> m.id().equalsIgnoreCase(mid));
+            if (exists) continue;
+            azureClaudeModels.add(new ModelsDevService.ModelEntry(
+                    mid, mid, "azure_claude", "Azure Claude",
+                    null, null, null,
+                    true, false, true, true, true
+            ));
+        }
+
+        return new ModelsDevService.ProviderEntry("azure_claude", "Azure Claude", azureClaudeModels);
     }
 }

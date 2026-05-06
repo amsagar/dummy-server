@@ -54,6 +54,9 @@ public class EmbeddingProviderRouter {
         if ("anthropic".equals(provider)) {
             throw new IllegalStateException("Anthropic does not provide an embedding API");
         }
+        if ("azure_claude".equals(provider)) {
+            throw new IllegalStateException("Azure Claude does not provide an embedding API");
+        }
         if (!whitelist.isAllowed(provider, modelID)) {
             throw new IllegalStateException(
                     "Embedding model '" + provider + "/" + modelID + "' is not in the allowed list");

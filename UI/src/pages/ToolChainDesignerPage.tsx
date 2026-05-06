@@ -777,6 +777,7 @@ export default function ToolChainDesignerPage() {
     // When true, we keep isConfigStreaming on after done so the user perceives a
     // single continuous turn through the question→answer→continuation cycle.
     let clarificationPending = false;
+    let sawTerminalEvent = false;
     try {
       const token = getAuthToken();
       const isRequirementFirst = !toolChainId;
@@ -981,6 +982,8 @@ export default function ToolChainDesignerPage() {
               queryClient.invalidateQueries({ queryKey: ["toolchain-versions", ev.toolChainId || toolChainId] });
               break;
             case "done":
+              sawTerminalEvent = true;
+              clarificationPending = false;
               setChatMessages((prev) => {
                 const doneText = ev.content !== undefined ? String(ev.content || "") : "";
                 let next = prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m));
@@ -1025,6 +1028,8 @@ export default function ToolChainDesignerPage() {
               }
               break;
             case "error":
+              sawTerminalEvent = true;
+              clarificationPending = false;
               setChatMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
               toast.error(ev.message || "ToolChain streaming failed");
               break;
@@ -1037,6 +1042,11 @@ export default function ToolChainDesignerPage() {
         const { done, value } = await reader.read();
         if (done) {
           if (buffer.trim()) processLine(buffer);
+          // Some backends close SSE without an explicit terminal event.
+          // Treat EOF as stream completion unless we are actively waiting on clarification.
+          if (!sawTerminalEvent) {
+            clarificationPending = false;
+          }
           break;
         }
         buffer += decoder.decode(value, { stream: true });

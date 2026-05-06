@@ -908,6 +908,7 @@ export default function ChatPage() {
             break;
 
           case 'done':
+            sawDoneEvent = true;
             setIsStreaming(false);
             isStreamingRef.current = false;
             skipNextHydrationRef.current = true;
@@ -944,15 +945,29 @@ export default function ChatPage() {
             break;
 
           case 'error':
+            sawDoneEvent = true;
             toast.error(ev.message || 'An error occurred');
             setIsStreaming(false);
             break;
         }
       };
 
+      let sawDoneEvent = false;
+
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          // Backend can occasionally close stream without an explicit 'done' event.
+          // Ensure UI always exits streaming state on EOF.
+          if (!sawDoneEvent) {
+            setIsStreaming(false);
+            isStreamingRef.current = false;
+            setMessages(prev =>
+              prev.map(m => (m.id === assistantId ? { ...m, isStreaming: false } : m))
+            );
+          }
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
