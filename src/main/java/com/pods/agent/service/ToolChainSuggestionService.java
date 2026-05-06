@@ -371,20 +371,64 @@ public class ToolChainSuggestionService {
         for (Object nodeObj : list) {
             if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
             String nodeId = String.valueOf(nodeMap.get("id"));
+            String nodeType = String.valueOf(nodeMap.get("type"));
             Object configObj = nodeMap.get("config");
             if (!(configObj instanceof Map<?, ?> cfg)) continue;
             String toolName = String.valueOf(((Map<String, Object>) cfg).get("toolName"));
+
             // The LLM is told to key by node id (tool_1, tool_2…) but occasionally it keys
-            // by tool name instead. Accept either to avoid silently dropping the entire
-            // mapping block.
+            // by tool name instead. Accept either to avoid silently dropping the entire block.
             Map<String, Object> overrides = nodeMappings.get(nodeId);
             if ((overrides == null || overrides.isEmpty()) && toolName != null && !toolName.isBlank()) {
                 overrides = nodeMappings.get(toolName);
             }
             if (overrides == null || overrides.isEmpty()) continue;
+
+            // Schema-compatibility guard: if the LLM's mapping is for a different tool
+            // entirely (the off-by-one indexing failure mode), the arg names won't match
+            // the target tool's request schema. Reject the whole block in that case —
+            // ensureRequiredArgsHaveFallback will then add llm_assisted mappings for the
+            // real required args, which is far better than running with wrong-shaped input.
+            if (!mappingArgsLookCompatible(toolName, nodeType, overrides)) {
+                log.warn("[ToolChainSuggestionService] Rejecting LLM mapping for node {} ({}): "
+                        + "arg names do not appear in the tool's request schema. Likely off-by-one "
+                        + "node indexing in the LLM output. Authored args were: {}",
+                        nodeId, toolName, overrides.keySet());
+                continue;
+            }
             ((Map<String, Object>) cfg).put("argMappings", overrides);
             ((Map<String, Object>) cfg).put("mappingStatus", "ai_authored");
         }
+    }
+
+    /**
+     * Returns true if at least one of the LLM's authored arg names actually appears in the
+     * target tool's request schema. Iterators get a free pass for the special "items" key.
+     * If no overlap at all, the LLM's mapping is for a different tool — reject it.
+     */
+    @SuppressWarnings("unchecked")
+    private boolean mappingArgsLookCompatible(String toolName, String nodeType, Map<String, Object> mapping) {
+        if (toolName == null || toolName.isBlank()) return true;  // can't check; allow
+        Set<String> schemaProps;
+        try {
+            var tool = toolRegistryService.getEnabledToolByName(toolName);
+            if (tool == null) return true;  // unknown tool; allow
+            String schemaJson = tool.getRequestSchema();
+            if (schemaJson == null || schemaJson.isBlank()) return true;
+            Map<String, Object> schema = objectMapper.readValue(schemaJson, Map.class);
+            Object props = schema.get("properties");
+            if (!(props instanceof Map<?, ?> propsMap)) return true;
+            schemaProps = new java.util.LinkedHashSet<>();
+            propsMap.forEach((k, v) -> schemaProps.add(String.valueOf(k)));
+        } catch (Exception e) {
+            return true;  // can't inspect; allow
+        }
+        if (schemaProps.isEmpty()) return true;
+        for (String argName : mapping.keySet()) {
+            if ("items".equals(argName) && "iterator".equalsIgnoreCase(nodeType)) return true;
+            if (schemaProps.contains(argName)) return true;
+        }
+        return false;
     }
 
     /**

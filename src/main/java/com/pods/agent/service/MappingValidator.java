@@ -102,13 +102,30 @@ public class MappingValidator {
                                     RecordedCall recorded,
                                     Map<String, Object> context,
                                     List<Failure> failures) {
-        if (argMappings.isEmpty()) return;
         Object recordedInput = recorded.input();
         Map<String, Object> expected = recordedInput instanceof Map<?, ?> m
                 ? coerceKeys((Map<?, ?>) m) : Map.of();
-        for (Map.Entry<String, Object> entry : argMappings.entrySet()) {
-            String argName = entry.getKey();
-            Object source = entry.getValue();
+
+        // Walk the union of (argMappings keys) ∪ (recorded.input keys). This catches:
+        //   1. mappings that resolve to wrong values (was already covered)
+        //   2. recorded args with NO mapping at all — the off-by-one indexing failure
+        //      mode that produces a chain where Get_OrderID has no ORD_ID mapping
+        //   3. mappings for args the tool never received — wrong recipe entirely
+        java.util.Set<String> allArgs = new java.util.LinkedHashSet<>(argMappings.keySet());
+        allArgs.addAll(expected.keySet());
+
+        for (String argName : allArgs) {
+            Object source = argMappings.get(argName);
+            Object expectedValue = expected.get(argName);
+            // Recorded arg has no mapping → fail loud. This is the fix for the
+            // off-by-one node-indexing bug that the previous validator silently passed.
+            if (source == null) {
+                if (expectedValue != null) {
+                    failures.add(new Failure(nodeId, argName, expectedValue, null,
+                            "no mapping authored for required arg — chain will never send it to the tool"));
+                }
+                continue;
+            }
             // Skip llm_assisted args — the LLM is expected to fill them at runtime, so a
             // null at validation time is acceptable.
             if (source instanceof Map<?, ?> mappingMap
@@ -116,7 +133,6 @@ public class MappingValidator {
                 continue;
             }
             Object resolved = argMappingResolver.resolveOne(source, context, key -> dotPath(context, key));
-            Object expectedValue = expected.get(argName);
             if (!valuesEqual(resolved, expectedValue)) {
                 failures.add(new Failure(nodeId, argName, expectedValue, resolved,
                         describeMappingSource(source)));

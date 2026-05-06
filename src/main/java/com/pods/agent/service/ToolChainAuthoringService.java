@@ -79,6 +79,11 @@ public class ToolChainAuthoringService {
         Map<String, Object> userPayload = new LinkedHashMap<>();
         userPayload.put("userPrompt", userPrompt == null ? "" : userPrompt);
         userPayload.put("toolCalls", calls.stream().map(this::renderCall).toList());
+        // Explicit node→tool listing eliminates the LLM's off-by-one indexing failure mode.
+        // Without this, models routinely emit tool_0 keys (0-indexed) when the suggestion
+        // service uses tool_1, tool_2, … (1-indexed), and every node ends up with the next
+        // tool's argMappings — Get_OrderID without ORD_ID, Serviceability with iterator args, etc.
+        userPayload.put("nodeIdsByTool", buildNodeListing(calls));
         if (!skillContexts.isEmpty()) {
             userPayload.put("skillContexts", skillContexts);
         }
@@ -162,6 +167,33 @@ public class ToolChainAuthoringService {
     }
 
     private static final int MAX_SKILL_CONTENT_CHARS = 8000;
+
+    /**
+     * Mirrors {@code ToolChainSuggestionService.groupConsecutiveSameTool} + {@code buildGraph}
+     * so the LLM receives the EXACT node IDs it must use in nodeMappings keys. Without this
+     * the LLM tends to invent its own indexing (tool_0..N-1) and the off-by-one shifts every
+     * mapping by one position.
+     */
+    private List<Map<String, Object>> buildNodeListing(List<RecordedToolCall> calls) {
+        List<Map<String, Object>> listing = new ArrayList<>();
+        int nodeIndex = 0;
+        int i = 0;
+        while (i < calls.size()) {
+            String toolName = calls.get(i).toolName();
+            int j = i;
+            while (j < calls.size() && toolName.equals(calls.get(j).toolName())) j++;
+            int groupSize = j - i;
+            nodeIndex++;
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("nodeId", "tool_" + nodeIndex);
+            entry.put("toolName", toolName);
+            entry.put("nodeType", groupSize > 1 ? "iterator" : "tool");
+            if (groupSize > 1) entry.put("recordedSampleCount", groupSize);
+            listing.add(entry);
+            i = j;
+        }
+        return listing;
+    }
 
     private List<RecordedToolCall> pairCallsAndResults(List<RuntimeEvent> events) {
         List<RecordedToolCall> calls = new ArrayList<>();
@@ -328,6 +360,30 @@ public class ToolChainAuthoringService {
             You will receive: the user's original prompt, an ordered list of nodes (each either
             a single tool call or an iterator group), and OPTIONALLY the markdown content of
             any skills the recorded turn loaded.
+
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            CRITICAL — NODE INDEXING. READ THIS BEFORE WRITING ANY EXPRESSION.
+
+            The input includes a `nodeIdsByTool` array. Those IDs are the ONLY valid node IDs.
+            They are 1-indexed: the FIRST tool is tool_1. There is NO tool_0. Ever.
+
+            Two rules — both mandatory:
+
+            1) Keys in your `nodeMappings` MUST be exactly one of the IDs from `nodeIdsByTool`.
+               If nodeIdsByTool says `[{nodeId:"tool_1", toolName:"Get_OrderID"}, …]`, then
+               your nodeMappings must have a key `"tool_1"` whose argMappings define args FOR
+               Get_OrderID — not for Serviceability, not for the next tool. The mapping at
+               key `tool_1` IS the arg-resolution recipe for the tool whose nodeId is tool_1.
+
+            2) JSONata expressions reference prior steps as `$.tool_<N>.output.<…>` where N is
+               the nodeId of the EARLIER step you want output from. Get_OrderID's output is at
+               `$.tool_1.output.…`, not `$.tool_0.output.…`. Writing `$.tool_0` always returns
+               null and silently breaks the chain.
+
+            Self-check before returning your JSON: for every nodeMapping key, look it up in
+            nodeIdsByTool. If it isn't there, fix it. For every $.tool_<N> reference in any
+            expression, the same: it must match a nodeId from the listing.
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
             If the input includes a `correctiveFeedback` field, your previous attempt at this
             chain failed validation. Each failed mapping is listed with expected vs. resolved
