@@ -97,7 +97,7 @@ const SystemEventCard: FC<Props> = ({
           </span>
         </summary>
         {payloadText ? (
-          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-white p-2 text-[10px] text-slate-800">
+          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-300 bg-white p-2.5 text-xs leading-5 text-slate-900">
             {payloadText}
           </pre>
         ) : null}
@@ -137,7 +137,7 @@ const SystemEventCard: FC<Props> = ({
           <span className="min-w-0 flex-1 truncate text-slate-700">{m.content}</span>
         </summary>
         {summarizedPayloadText ? (
-          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-white p-2 text-[10px] text-slate-800">
+          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-300 bg-white p-2.5 text-xs leading-5 text-slate-900">
             {summarizedPayloadText}
           </pre>
         ) : null}
