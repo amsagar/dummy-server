@@ -106,10 +106,6 @@ public class ToolExecutionService {
             return new ExecutionResult(false, null, "Invalid tool endpoint");
         }
         Map<String, Object> args = normalizeDomainArgs(tool.getName(), parseArgs(userText));
-        String validationError = validateRequiredArgs(tool.getName(), args);
-        if (validationError != null) {
-            return new ExecutionResult(false, null, validationError);
-        }
         Set<String> consumedKeys = new HashSet<>();
         endpoint = hydratePathParams(endpoint, args, consumedKeys);
         List<String> unresolvedPathParams = unresolvedPathParams(endpoint);
@@ -889,28 +885,6 @@ public class ToolExecutionService {
             }
         }
         return args;
-    }
-
-    private String validateRequiredArgs(String toolName, Map<String, Object> args) {
-        String normalizedName = normalizeToolName(toolName);
-        if (isServiceabilityTool(normalizedName)) {
-            Object originZip = firstPresentArg(args, "originPostalCode", "originZip", "origin_zip");
-            Object destinationZip = firstPresentArg(args, "destinationPostalCode", "destinationZip", "destination_zip");
-            if (isBlankValue(originZip) || isBlankValue(destinationZip)) {
-                return "Serviceability requires originPostalCode and destinationPostalCode mapped from order data. "
-                        + "Expected payload keys: originPostalCode, destinationPostalCode, originRegionCode, destinationRegionCode.";
-            }
-        }
-        if (isContainerAvailabilityTool(normalizedName)) {
-            Object zip = firstPresentArg(args, "zip", "Zip", "postalCode", "PostalCode", "zipcode", "zipCode");
-            Object serviceType = firstPresentArg(args, "serviceType", "ServiceType", "code", "legCode");
-            Object serviceDate = firstPresentArg(args, "serviceDate", "ServiceDate", "requestedDate", "date");
-            if (isBlankValue(zip) || isBlankValue(serviceType) || isBlankValue(serviceDate)) {
-                return "ContainerAvailability requires mapped leg fields. "
-                        + "Expected payload keys: postalCode (or zip), regionCode, serviceType, serviceDate, siteIdentity.";
-            }
-        }
-        return null;
     }
 
     private Object firstPresentArg(Map<String, Object> args, String... keys) {
