@@ -35,6 +35,8 @@ public class ToolChainAuthoringService {
 
     private static final Pattern FENCED_JSON = Pattern.compile("```(?:json)?\\s*([\\s\\S]*?)```", Pattern.CASE_INSENSITIVE);
     private static final int MAX_TOOL_OUTPUT_CHARS = 4000;
+    /** Mirror of ToolChainSuggestionService.AGENT_LOOP_INFRASTRUCTURE_TOOLS — keep in sync. */
+    private static final java.util.Set<String> AGENT_LOOP_INFRASTRUCTURE_TOOLS = java.util.Set.of("skill");
 
     private final ModelProviderRouter modelProviderRouter;
     private final ToolRegistryService toolRegistryService;
@@ -98,6 +100,7 @@ public class ToolChainAuthoringService {
             String type = event.getEventType().toLowerCase(Locale.ROOT);
             if ("tool.call".equals(type)) {
                 if (callId == null || toolName == null || toolName.isBlank()) continue;
+                if (AGENT_LOOP_INFRASTRUCTURE_TOOLS.contains(toolName.toLowerCase(Locale.ROOT))) continue;
                 Object input = parseFlexible(payload.get("input"));
                 RecordedToolCall call = new RecordedToolCall(toolName, input, null);
                 byCallId.put(callId, call);

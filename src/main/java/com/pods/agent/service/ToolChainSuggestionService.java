@@ -27,15 +27,18 @@ public class ToolChainSuggestionService {
     private final RuntimeEventRepository runtimeEventRepository;
     private final ToolChainService toolChainService;
     private final ToolChainAuthoringService authoringService;
+    private final ToolRegistryService toolRegistryService;
     private final ObjectMapper objectMapper;
 
     public ToolChainSuggestionService(RuntimeEventRepository runtimeEventRepository,
                                       ToolChainService toolChainService,
                                       ToolChainAuthoringService authoringService,
+                                      ToolRegistryService toolRegistryService,
                                       ObjectMapper objectMapper) {
         this.runtimeEventRepository = runtimeEventRepository;
         this.toolChainService = toolChainService;
         this.authoringService = authoringService;
+        this.toolRegistryService = toolRegistryService;
         this.objectMapper = objectMapper;
     }
 
@@ -70,6 +73,12 @@ public class ToolChainSuggestionService {
         if (authored.isPresent()) {
             applyAuthoredMappings(graph, authored.get().nodeMappings());
         }
+        // Final safety net: any required arg on a tool node that still has no mapping (neither
+        // inferred from key matches nor authored by the LLM) gets policy=llm_assisted. The runtime
+        // will resolve it via LlmArgResolver on first execution and self-heal a deterministic
+        // JSONata afterward. Without this, a chain like Get_OrderID would receive the entire
+        // context as its payload and the tool would reject it for missing required fields.
+        ensureRequiredArgsHaveFallback(graph);
         String graphJson = toJson(graph);
 
         String intentSignature = hashHex(buildIntentSignatureSeed(userPrompt, calls));
@@ -121,6 +130,59 @@ public class ToolChainSuggestionService {
     }
 
     @SuppressWarnings("unchecked")
+    private void ensureRequiredArgsHaveFallback(Map<String, Object> graph) {
+        Object nodesObj = graph.get("nodes");
+        if (!(nodesObj instanceof List<?> nodes)) return;
+        for (Object nodeObj : nodes) {
+            if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
+            String type = String.valueOf(nodeMap.get("type"));
+            if (!"tool".equalsIgnoreCase(type) && !"mcp_tool".equalsIgnoreCase(type)) continue;
+            Object configObj = nodeMap.get("config");
+            if (!(configObj instanceof Map<?, ?> cfg)) continue;
+            String toolName = String.valueOf(((Map<String, Object>) cfg).get("toolName"));
+            if (toolName == null || toolName.isBlank()) continue;
+            List<String> requiredFields = lookupRequiredFields(toolName);
+            if (requiredFields.isEmpty()) continue;
+            Map<String, Object> argMappings;
+            Object existing = ((Map<String, Object>) cfg).get("argMappings");
+            if (existing instanceof Map<?, ?> em) {
+                argMappings = (Map<String, Object>) em;
+            } else {
+                argMappings = new LinkedHashMap<>();
+                ((Map<String, Object>) cfg).put("argMappings", argMappings);
+            }
+            for (String field : requiredFields) {
+                if (argMappings.containsKey(field)) continue;
+                Map<String, Object> fallback = new LinkedHashMap<>();
+                fallback.put("policy", "llm_assisted");
+                argMappings.put(field, fallback);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> lookupRequiredFields(String toolName) {
+        try {
+            var tool = toolRegistryService.getEnabledToolByName(toolName);
+            if (tool == null) return List.of();
+            String schemaJson = tool.getRequestSchema();
+            if (schemaJson == null || schemaJson.isBlank()) return List.of();
+            Map<String, Object> schema = objectMapper.readValue(schemaJson, Map.class);
+            Object req = schema.get("required");
+            if (!(req instanceof List<?> list)) return List.of();
+            List<String> out = new ArrayList<>();
+            for (Object item : list) {
+                if (item == null) continue;
+                String s = String.valueOf(item);
+                if (!s.isBlank()) out.add(s);
+            }
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
     private void applyAuthoredMappings(Map<String, Object> graph,
                                        Map<String, Map<String, Object>> nodeMappings) {
         if (nodeMappings == null || nodeMappings.isEmpty()) return;
@@ -138,6 +200,15 @@ public class ToolChainSuggestionService {
         }
     }
 
+    /**
+     * Tool calls that exist purely as agent-loop infrastructure and have no place in a
+     * cached deterministic chain. The {@code skill} tool only loads instructional markdown
+     * for the LLM agent — once we're caching the flow, those instructions are no longer
+     * consumed, and including the call as a chain step makes it run against a generic
+     * stub at runtime which corrupts the downstream context.
+     */
+    private static final Set<String> AGENT_LOOP_INFRASTRUCTURE_TOOLS = Set.of("skill");
+
     private List<ToolCallRow> extractToolCalls(List<RuntimeEvent> events) {
         List<ToolCallRow> calls = new ArrayList<>();
         for (RuntimeEvent event : events) {
@@ -145,6 +216,7 @@ public class ToolChainSuggestionService {
             Map<String, Object> payload = readMap(event.getPayload());
             String toolName = string(payload.get("toolName"));
             if (toolName.isBlank()) continue;
+            if (AGENT_LOOP_INFRASTRUCTURE_TOOLS.contains(toolName.toLowerCase(Locale.ROOT))) continue;
             Map<String, Object> input = readMap(string(payload.get("input")));
             calls.add(new ToolCallRow(toolName, input));
         }
