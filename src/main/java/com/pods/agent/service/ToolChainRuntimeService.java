@@ -108,6 +108,11 @@ public class ToolChainRuntimeService {
                                 Map<String, Object> options,
                                 SseEventSender sender,
                                 String chatSessionId) {
+        var chain = toolChainService.getRequired(toolChainId);
+        if (ToolChainService.ORIGIN_SYSTEM_SUGGESTED.equalsIgnoreCase(chain.getOrigin())
+                && !ToolChainService.APPROVAL_APPROVED.equalsIgnoreCase(chain.getApprovalStatus())) {
+            throw new IllegalStateException("System suggested ToolChain requires one-time approval before it can run.");
+        }
         ToolChainVersion version = toolChainService.resolveVersion(toolChainId, requestedVersion)
                 .orElseThrow(() -> new IllegalArgumentException("No ToolChain version is available for " + toolChainId));
         Map<String, Object> normalizedInput = input == null ? new LinkedHashMap<>() : new LinkedHashMap<>(input);

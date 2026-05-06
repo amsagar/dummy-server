@@ -25,6 +25,8 @@ public final class ToolChainDtos {
         private String responseMode;
         private String synthesisPrompt;
         private List<String> intents;
+        private String intentSignature;
+        private String structureSignature;
         private Map<String, Object> ragConfig;
     }
 

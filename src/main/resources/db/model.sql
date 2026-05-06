@@ -1,58 +1,58 @@
 CREATE SCHEMA IF NOT EXISTS agent;
 
 CREATE TABLE IF NOT EXISTS agent.supported_models (
-    provider_id   TEXT    NOT NULL,
-    model_id      TEXT    NOT NULL,
-    display_name  TEXT,
-    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
-    encrypted_key TEXT,
-    base_url      TEXT,
-    PRIMARY KEY (provider_id, model_id)
-);
+                                                      provider_id   TEXT    NOT NULL,
+                                                      model_id      TEXT    NOT NULL,
+                                                      display_name  TEXT,
+                                                      enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+                                                      encrypted_key TEXT,
+                                                      base_url      TEXT,
+                                                      PRIMARY KEY (provider_id, model_id)
+    );
 
 CREATE TABLE IF NOT EXISTS agent.chat_sessions (
-    session_id  TEXT   PRIMARY KEY,
-    user_id     TEXT,
-    created_at  BIGINT NOT NULL,
-    last_active BIGINT NOT NULL,
-    timezone    TEXT,
-    title       TEXT,
-    archived_at BIGINT
+                                                   session_id  TEXT   PRIMARY KEY,
+                                                   user_id     TEXT,
+                                                   created_at  BIGINT NOT NULL,
+                                                   last_active BIGINT NOT NULL,
+                                                   timezone    TEXT,
+                                                   title       TEXT,
+                                                   archived_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS agent.users (
-    id             TEXT PRIMARY KEY,
-    email          TEXT NOT NULL UNIQUE,
-    password_hash  TEXT NOT NULL,
-    created_at     BIGINT NOT NULL,
-    updated_at     BIGINT NOT NULL
+                                           id             TEXT PRIMARY KEY,
+                                           email          TEXT NOT NULL UNIQUE,
+                                           password_hash  TEXT NOT NULL,
+                                           created_at     BIGINT NOT NULL,
+                                           updated_at     BIGINT NOT NULL
 );
 
 ALTER TABLE agent.chat_sessions ADD COLUMN IF NOT EXISTS user_id TEXT;
 
 CREATE TABLE IF NOT EXISTS agent.chat_messages (
-    id         TEXT   PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                   id         TEXT   PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id TEXT   NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     role       TEXT   NOT NULL CHECK (role IN ('user', 'assistant')),
     content    TEXT,
     created_at BIGINT NOT NULL
-);
+    );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON agent.chat_messages (session_id);
 
 ALTER TABLE agent.chat_messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
 
 CREATE TABLE IF NOT EXISTS agent.agent_domains (
-    id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
     enabled     BOOLEAN NOT NULL DEFAULT TRUE,
     created_at  BIGINT NOT NULL,
     updated_at  BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.agent_tools (
-    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                 id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     domain_id       TEXT NOT NULL REFERENCES agent.agent_domains (id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
     description     TEXT,
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_tools (
     created_at      BIGINT NOT NULL,
     updated_at      BIGINT NOT NULL,
     UNIQUE (domain_id, name)
-);
+    );
 
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS execution_kind TEXT NOT NULL DEFAULT 'http_proxy';
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS permission_scope TEXT;
@@ -116,7 +116,7 @@ ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS base_injected BOOLEAN NOT
 CREATE INDEX IF NOT EXISTS idx_agent_tools_base_injected ON agent.agent_tools (base_injected) WHERE base_injected = TRUE;
 
 CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
-    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     domain_id     TEXT NOT NULL REFERENCES agent.agent_domains (id) ON DELETE CASCADE,
     name          TEXT NOT NULL,
     description   TEXT,
@@ -135,10 +135,10 @@ CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
     created_at    BIGINT NOT NULL,
     updated_at    BIGINT NOT NULL,
     UNIQUE (domain_id, name)
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.tool_versions (
-    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     tool_id       TEXT NOT NULL REFERENCES agent.agent_tools (id) ON DELETE CASCADE,
     version       INTEGER NOT NULL,
     description   TEXT,
@@ -146,19 +146,19 @@ CREATE TABLE IF NOT EXISTS agent.tool_versions (
     response_schema TEXT,
     created_at    BIGINT NOT NULL,
     UNIQUE (tool_id, version)
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.skills (
-    id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                            id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
     enabled     BOOLEAN NOT NULL DEFAULT TRUE,
     created_at  BIGINT NOT NULL,
     updated_at  BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.skill_files (
-    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                 id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     skill_id         TEXT NOT NULL REFERENCES agent.skills (id) ON DELETE CASCADE,
     file_path       TEXT NOT NULL,
     blob_path       TEXT NOT NULL,
@@ -168,10 +168,10 @@ CREATE TABLE IF NOT EXISTS agent.skill_files (
     created_at      BIGINT NOT NULL,
     updated_at      BIGINT NOT NULL,
     UNIQUE (skill_id, file_path)
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.agent_profiles (
-    id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                    id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name           TEXT NOT NULL UNIQUE,
     mode           TEXT NOT NULL CHECK (mode IN ('planner_worker', 'swarm')),
     system_prompt  TEXT NOT NULL,
@@ -180,10 +180,10 @@ CREATE TABLE IF NOT EXISTS agent.agent_profiles (
     metadata       TEXT,
     created_at     BIGINT NOT NULL,
     updated_at     BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.guardrail_policies (
-    id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                        id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name        TEXT NOT NULL UNIQUE,
     scope       TEXT NOT NULL,
     rule_type   TEXT NOT NULL,
@@ -192,19 +192,19 @@ CREATE TABLE IF NOT EXISTS agent.guardrail_policies (
     enabled     BOOLEAN NOT NULL DEFAULT TRUE,
     created_at  BIGINT NOT NULL,
     updated_at  BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.runtime_events (
-    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id   TEXT REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     turn_id      TEXT,
     event_type   TEXT NOT NULL,
     payload      TEXT,
     created_at   BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.cost_usage (
-    id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id     TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     turn_id        TEXT,
     provider_id    TEXT,
@@ -214,10 +214,10 @@ CREATE TABLE IF NOT EXISTS agent.cost_usage (
     total_tokens   BIGINT NOT NULL DEFAULT 0,
     estimated_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_at     BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.eval_runs (
-    id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                               id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name           TEXT NOT NULL,
     status         TEXT NOT NULL,
     dataset_ref    TEXT,
@@ -225,10 +225,10 @@ CREATE TABLE IF NOT EXISTS agent.eval_runs (
     trace_ref      TEXT,
     started_at     BIGINT NOT NULL,
     completed_at   BIGINT
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.mcp_registry (
-    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name          TEXT NOT NULL UNIQUE,
     transport_type TEXT NOT NULL DEFAULT 'streamable_http',
     base_url      TEXT,
@@ -260,7 +260,7 @@ CREATE TABLE IF NOT EXISTS agent.mcp_registry (
     enabled       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at    BIGINT NOT NULL,
     updated_at    BIGINT NOT NULL
-);
+    );
 
 ALTER TABLE agent.mcp_registry ADD COLUMN IF NOT EXISTS transport_type TEXT NOT NULL DEFAULT 'streamable_http';
 ALTER TABLE agent.mcp_registry ADD COLUMN IF NOT EXISTS base_url TEXT;
@@ -288,7 +288,7 @@ ALTER TABLE agent.mcp_registry ADD COLUMN IF NOT EXISTS discovered_tools_json TE
 ALTER TABLE agent.mcp_registry ADD COLUMN IF NOT EXISTS discovered_tools_count INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS agent.hitl_interactions (
-    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                       id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id    TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     turn_id       TEXT,
     type          TEXT NOT NULL CHECK (type IN ('question', 'approval_required')),
@@ -297,10 +297,10 @@ CREATE TABLE IF NOT EXISTS agent.hitl_interactions (
     response_text TEXT,
     created_at    BIGINT NOT NULL,
     resolved_at   BIGINT
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.hook_mappings (
-    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     hook_point   TEXT NOT NULL,
     hook_name    TEXT NOT NULL,
     profile_id   TEXT REFERENCES agent.agent_profiles (id) ON DELETE SET NULL,
@@ -308,20 +308,20 @@ CREATE TABLE IF NOT EXISTS agent.hook_mappings (
     config_json  TEXT,
     created_at   BIGINT NOT NULL,
     updated_at   BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.runtime_traces (
-    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                    id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id    TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     turn_id       TEXT,
     trace_type    TEXT NOT NULL CHECK (trace_type IN ('plan', 'worker', 'synthesis', 'tool', 'eval_replay')),
     correlation_id TEXT,
     payload       TEXT,
     created_at    BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.session_context_state (
-    session_id      TEXT PRIMARY KEY REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
+                                                           session_id      TEXT PRIMARY KEY REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     runtime_mode    TEXT,
     model_selection_mode TEXT,
     model_ref       TEXT,
@@ -329,10 +329,10 @@ CREATE TABLE IF NOT EXISTS agent.session_context_state (
     rolling_summary TEXT,
     summary_tokens  BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.memories (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                              id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     user_id          TEXT NOT NULL REFERENCES agent.users (id) ON DELETE CASCADE,
     session_id       TEXT REFERENCES agent.chat_sessions (session_id) ON DELETE SET NULL,
     category         TEXT NOT NULL CHECK (category IN ('user','feedback','project','reference')),
@@ -341,7 +341,7 @@ CREATE TABLE IF NOT EXISTS agent.memories (
     tags             TEXT[],
     created_at       BIGINT NOT NULL,
     updated_at       BIGINT NOT NULL
-);
+    );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_user_file ON agent.memories (user_id, memory_file_path);
 CREATE INDEX IF NOT EXISTS idx_memories_user_id ON agent.memories (user_id);
@@ -368,34 +368,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_supported_models_default_per_kind
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS agent.agent_tool_embeddings (
-    tool_id        TEXT PRIMARY KEY REFERENCES agent.agent_tools (id) ON DELETE CASCADE,
+                                                           tool_id        TEXT PRIMARY KEY REFERENCES agent.agent_tools (id) ON DELETE CASCADE,
     model_provider TEXT NOT NULL,
     model_id       TEXT NOT NULL,
     dimensions     INTEGER NOT NULL,
     content_hash   TEXT NOT NULL,
     embedding      vector(3072),
     updated_at     BIGINT NOT NULL
-);
+    );
 CREATE INDEX IF NOT EXISTS idx_tool_embeddings_model
     ON agent.agent_tool_embeddings (model_provider, model_id);
-CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
-    ON agent.agent_tool_embeddings USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS agent.tool_chains (
-    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                 id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name            TEXT NOT NULL UNIQUE,
     description     TEXT,
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'disabled')),
     current_version INTEGER,
+    origin          TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'system_suggested')),
+    approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+    approved_by     TEXT,
+    approved_at     BIGINT,
+    intent_signature TEXT,
+    structure_signature TEXT,
     metadata_json   TEXT,
     created_by      TEXT,
     created_at      BIGINT NOT NULL,
     updated_at      BIGINT NOT NULL
-);
+    );
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved';
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approved_by TEXT;
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approved_at BIGINT;
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS intent_signature TEXT;
+ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS structure_signature TEXT;
+UPDATE agent.tool_chains SET origin = 'user' WHERE origin IS NULL;
+UPDATE agent.tool_chains SET approval_status = 'approved' WHERE approval_status IS NULL;
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_versions (
-    id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                         id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     tool_chain_id      TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
     version            INTEGER NOT NULL,
     graph_json         TEXT NOT NULL,
@@ -404,17 +416,21 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_versions (
     response_mode      TEXT NOT NULL DEFAULT 'hybrid',
     synthesis_prompt   TEXT,
     intents_json       TEXT,
+    intent_signature   TEXT,
+    structure_signature TEXT,
     rag_config_json    TEXT,
     is_published       BOOLEAN NOT NULL DEFAULT FALSE,
     created_by         TEXT,
     created_at         BIGINT NOT NULL,
     UNIQUE (tool_chain_id, version)
-);
+    );
 ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intents_json TEXT;
+ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intent_signature TEXT;
+ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS structure_signature TEXT;
 ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS rag_config_json TEXT;
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_runs (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                     id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
     tool_chain_version_id TEXT NOT NULL REFERENCES agent.tool_chain_versions (id) ON DELETE CASCADE,
     version          INTEGER NOT NULL,
@@ -427,10 +443,10 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_runs (
     input_snapshot   TEXT,
     output_snapshot  TEXT,
     error_message    TEXT
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_run_steps (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     run_id           TEXT NOT NULL REFERENCES agent.tool_chain_runs (id) ON DELETE CASCADE,
     node_id          TEXT NOT NULL,
     node_type        TEXT NOT NULL,
@@ -443,10 +459,10 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_run_steps (
     error_message    TEXT,
     started_at       BIGINT NOT NULL,
     ended_at         BIGINT
-);
+    );
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_approvals (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     run_id           TEXT NOT NULL REFERENCES agent.tool_chain_runs (id) ON DELETE CASCADE,
     step_id          TEXT NOT NULL REFERENCES agent.tool_chain_run_steps (id) ON DELETE CASCADE,
     node_id          TEXT NOT NULL,
@@ -458,16 +474,23 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_approvals (
     decision_comment TEXT,
     created_at       BIGINT NOT NULL,
     decided_at       BIGINT
-);
+    );
 
 CREATE INDEX IF NOT EXISTS idx_tool_chain_versions_chain ON agent.tool_chain_versions (tool_chain_id, version DESC);
+ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intent_signature TEXT;
+ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS structure_signature TEXT;
+CREATE INDEX IF NOT EXISTS idx_tool_chain_versions_signatures ON agent.tool_chain_versions (intent_signature, structure_signature);
+CREATE INDEX IF NOT EXISTS idx_tool_chains_origin_approval ON agent.tool_chains (origin, approval_status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_chain_system_signatures
+    ON agent.tool_chains (intent_signature, structure_signature)
+    WHERE origin = 'system_suggested' AND intent_signature IS NOT NULL AND structure_signature IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tool_chain_runs_chain ON agent.tool_chain_runs (tool_chain_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_chain_runs_status ON agent.tool_chain_runs (status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_chain_steps_run ON agent.tool_chain_run_steps (run_id, started_at ASC);
 CREATE INDEX IF NOT EXISTS idx_tool_chain_approvals_pending ON agent.tool_chain_approvals (status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_config_sessions (
-    id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                                id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     tool_chain_id       TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
     title               TEXT,
     status              TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'clarification_required', 'ready_to_compile', 'compiled')),
@@ -477,17 +500,17 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_config_sessions (
     created_at          BIGINT NOT NULL,
     updated_at          BIGINT NOT NULL,
     archived_at         BIGINT
-);
+    );
 ALTER TABLE agent.tool_chain_config_sessions ADD COLUMN IF NOT EXISTS archived_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_config_messages (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                                id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     session_id       TEXT NOT NULL REFERENCES agent.tool_chain_config_sessions (id) ON DELETE CASCADE,
     role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content          TEXT NOT NULL,
     metadata_json    TEXT,
     created_at       BIGINT NOT NULL
-);
+    );
 -- Allow the timeline to also persist system events (tool calls, questions,
 -- approvals) so reload restores the full conversation including HITL cards.
 ALTER TABLE agent.tool_chain_config_messages DROP CONSTRAINT IF EXISTS tool_chain_config_messages_role_check;
@@ -503,7 +526,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_chain_config_messages_session ON agent.tool_
 CREATE INDEX IF NOT EXISTS idx_tool_chain_config_messages_request ON agent.tool_chain_config_messages (request_id) WHERE request_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_config_layouts (
-    id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                               id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
     session_id       TEXT NOT NULL REFERENCES agent.tool_chain_config_sessions (id) ON DELETE CASCADE,
     user_id          TEXT NOT NULL,
@@ -512,12 +535,12 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_config_layouts (
     created_at       BIGINT NOT NULL,
     updated_at       BIGINT NOT NULL,
     UNIQUE (tool_chain_id, session_id, user_id)
-);
+    );
 
 CREATE INDEX IF NOT EXISTS idx_tool_chain_config_layouts_scope ON agent.tool_chain_config_layouts (tool_chain_id, session_id, user_id);
 
 CREATE TABLE IF NOT EXISTS agent.decision_tables (
-    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                                                     id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name         TEXT NOT NULL UNIQUE,
     description  TEXT,
     dmn_json     TEXT NOT NULL,
@@ -525,14 +548,14 @@ CREATE TABLE IF NOT EXISTS agent.decision_tables (
     metadata_json TEXT,
     created_at   BIGINT NOT NULL,
     updated_at   BIGINT NOT NULL
-);
+    );
 
 CREATE INDEX IF NOT EXISTS idx_decision_tables_name ON agent.decision_tables (name);
 
 
--- ALTER TABLE agent.agent_tool_embeddings
--- ALTER COLUMN embedding TYPE halfvec(3072);
---
--- CREATE INDEX idx_tool_embeddings_hnsw
---     ON agent.agent_tool_embeddings
---     USING hnsw (embedding halfvec_cosine_ops);
+ALTER TABLE agent.agent_tool_embeddings
+ALTER COLUMN embedding TYPE halfvec(3072);
+
+CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
+    ON agent.agent_tool_embeddings
+    USING hnsw (embedding halfvec_cosine_ops);

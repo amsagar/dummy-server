@@ -124,10 +124,15 @@ export const api = {
     }).then(handleResponse),
   },
   toolchains: {
-    list: () => fetch(`${BASE_URL}/toolchains`, { headers: getHeaders() }).then(handleResponse),
+    list: (origin?: "user" | "system_suggested") => {
+      const query = origin ? `?origin=${encodeURIComponent(origin)}` : "";
+      return fetch(`${BASE_URL}/toolchains${query}`, { headers: getHeaders() }).then(handleResponse);
+    },
     create: (payload: any) => fetch(`${BASE_URL}/toolchains`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     update: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     remove: (id: string) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
+    approve: (id: string, payload?: any) => fetch(`${BASE_URL}/toolchains/${id}/approve`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
+    reject: (id: string, payload?: any) => fetch(`${BASE_URL}/toolchains/${id}/reject`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
     versions: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/versions`, { headers: getHeaders() }).then(handleResponse),
     createVersion: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/versions`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     publishVersion: (id: string, version: number) => fetch(`${BASE_URL}/toolchains/${id}/versions/${version}/publish`, { method: 'POST', headers: getHeaders() }).then(handleResponse),

@@ -50,6 +50,21 @@ public class ToolChainRepository {
         return jdbc.query(sql.getQuery("TOOL_CHAIN.FIND_ENABLED"), (rs, n) -> map(rs));
     }
 
+    public List<ToolChain> findByOrigin(String origin) {
+        return namedJdbc.query(sql.getQuery("TOOL_CHAIN.FIND_BY_ORIGIN"),
+                new MapSqlParameterSource().addValue("origin", origin),
+                (rs, n) -> map(rs));
+    }
+
+    public Optional<ToolChain> findBySignatures(String intentSignature, String structureSignature) {
+        var rows = namedJdbc.query(sql.getQuery("TOOL_CHAIN.FIND_BY_SIGNATURES"),
+                new MapSqlParameterSource()
+                        .addValue("intentSignature", intentSignature)
+                        .addValue("structureSignature", structureSignature),
+                (rs, n) -> map(rs));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
     public void delete(String id) {
         jdbc.update(sql.getQuery("TOOL_CHAIN.DELETE"), id);
     }
@@ -62,6 +77,12 @@ public class ToolChainRepository {
                 .addValue("enabled", chain.isEnabled())
                 .addValue("status", chain.getStatus())
                 .addValue("currentVersion", chain.getCurrentVersion())
+                .addValue("origin", chain.getOrigin())
+                .addValue("approvalStatus", chain.getApprovalStatus())
+                .addValue("approvedBy", chain.getApprovedBy())
+                .addValue("approvedAt", chain.getApprovedAt())
+                .addValue("intentSignature", chain.getIntentSignature())
+                .addValue("structureSignature", chain.getStructureSignature())
                 .addValue("metadataJson", chain.getMetadataJson())
                 .addValue("createdBy", chain.getCreatedBy())
                 .addValue("createdAt", chain.getCreatedAt())
@@ -76,6 +97,12 @@ public class ToolChainRepository {
                 .enabled(rs.getBoolean("enabled"))
                 .status(rs.getString("status"))
                 .currentVersion((Integer) rs.getObject("current_version"))
+                .origin(rs.getString("origin"))
+                .approvalStatus(rs.getString("approval_status"))
+                .approvedBy(rs.getString("approved_by"))
+                .approvedAt((Long) rs.getObject("approved_at"))
+                .intentSignature(rs.getString("intent_signature"))
+                .structureSignature(rs.getString("structure_signature"))
                 .metadataJson(rs.getString("metadata_json"))
                 .createdBy(rs.getString("created_by"))
                 .createdAt(rs.getLong("created_at"))

@@ -16,6 +16,12 @@ public class ToolChain {
     private boolean enabled;
     private String status;
     private Integer currentVersion;
+    private String origin;
+    private String approvalStatus;
+    private String approvedBy;
+    private Long approvedAt;
+    private String intentSignature;
+    private String structureSignature;
     private String metadataJson;
     private String createdBy;
     private long createdAt;

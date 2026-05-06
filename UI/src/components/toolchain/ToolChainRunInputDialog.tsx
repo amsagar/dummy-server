@@ -176,6 +176,12 @@ export default function ToolChainRunInputDialog({
   const executeMutation = useMutation({
     mutationFn: async () => {
       if (!selectedVersionObj) throw new Error("Select a ToolChain version");
+      const currentToolChain = allToolChains.find((row: any) => row.id === toolChainId);
+      const isSystem = String(currentToolChain?.origin || "").toLowerCase() === "system_suggested";
+      const approvalStatus = String(currentToolChain?.approvalStatus || "").toLowerCase();
+      if (isSystem && approvalStatus !== "approved") {
+        throw new Error("This system toolchain needs one-time approval before execution.");
+      }
       const payloadInput: Record<string, any> = {};
       const nextErrors: Record<string, string> = {};
       for (const [key, prop] of Object.entries(schemaProperties)) {

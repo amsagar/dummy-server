@@ -19,6 +19,8 @@ public class ToolChainVersion {
     private String responseMode;
     private String synthesisPrompt;
     private String intentsJson;
+    private String intentSignature;
+    private String structureSignature;
     private String ragConfigJson;
     private boolean published;
     private String createdBy;

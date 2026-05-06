@@ -22,6 +22,12 @@ import java.util.stream.Collectors;
 
 @Service
 public class ToolChainService {
+    public static final String ORIGIN_USER = "user";
+    public static final String ORIGIN_SYSTEM_SUGGESTED = "system_suggested";
+    public static final String APPROVAL_PENDING = "pending";
+    public static final String APPROVAL_APPROVED = "approved";
+    public static final String APPROVAL_REJECTED = "rejected";
+
     public record IntentMatch(String toolChainId, int version, String name, double score, List<String> matchedIntents) {}
 
     private final ToolChainRepository toolChainRepository;
@@ -42,6 +48,8 @@ public class ToolChainService {
                 .description(request.getDescription())
                 .enabled(request.getEnabled() == null || request.getEnabled())
                 .status("draft")
+                .origin(ORIGIN_USER)
+                .approvalStatus(APPROVAL_APPROVED)
                 .metadataJson(toJson(request.getMetadata()))
                 .createdBy(createdBy)
                 .build();
@@ -73,6 +81,11 @@ public class ToolChainService {
         return toolChainRepository.findAll();
     }
 
+    public List<ToolChain> listAll(String origin) {
+        if (origin == null || origin.isBlank()) return listAll();
+        return toolChainRepository.findByOrigin(origin.toLowerCase(Locale.ROOT));
+    }
+
     public ToolChain getRequired(String id) {
         return toolChainRepository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("ToolChain not found: " + id));
@@ -101,6 +114,8 @@ public class ToolChainService {
                 .responseMode(request.getResponseMode() == null ? "hybrid" : request.getResponseMode())
                 .synthesisPrompt(request.getSynthesisPrompt())
                 .intentsJson(toJson(request.getIntents() == null ? List.of() : request.getIntents()))
+                .intentSignature(request.getIntentSignature())
+                .structureSignature(request.getStructureSignature())
                 .ragConfigJson(toJson(request.getRagConfig() == null ? Map.of() : request.getRagConfig()))
                 .published(false)
                 .createdBy(createdBy)
@@ -131,6 +146,8 @@ public class ToolChainService {
             draft.setResponseMode(request.getResponseMode() == null ? "hybrid" : request.getResponseMode());
             draft.setSynthesisPrompt(request.getSynthesisPrompt());
             draft.setIntentsJson(toJson(request.getIntents() == null ? List.of() : request.getIntents()));
+            draft.setIntentSignature(request.getIntentSignature());
+            draft.setStructureSignature(request.getStructureSignature());
             draft.setRagConfigJson(toJson(request.getRagConfig() == null ? Map.of() : request.getRagConfig()));
             toolChainVersionRepository.updateDraft(draft);
             if (chain.getCurrentVersion() == null || chain.getCurrentVersion() < draft.getVersion()) {
@@ -161,11 +178,67 @@ public class ToolChainService {
         toolChainRepository.delete(id);
     }
 
+    public ToolChain approveSystemToolChain(String id, String approver, String comment) {
+        ToolChain chain = getRequired(id);
+        if (!ORIGIN_SYSTEM_SUGGESTED.equalsIgnoreCase(chain.getOrigin())) {
+            throw new IllegalArgumentException("Only system suggested toolchains support approval workflow");
+        }
+        chain.setApprovalStatus(APPROVAL_APPROVED);
+        chain.setApprovedBy(approver);
+        chain.setApprovedAt(System.currentTimeMillis());
+        mergeApprovalComment(chain, comment);
+        return toolChainRepository.update(chain);
+    }
+
+    public ToolChain rejectSystemToolChain(String id, String approver, String comment) {
+        ToolChain chain = getRequired(id);
+        if (!ORIGIN_SYSTEM_SUGGESTED.equalsIgnoreCase(chain.getOrigin())) {
+            throw new IllegalArgumentException("Only system suggested toolchains support approval workflow");
+        }
+        chain.setApprovalStatus(APPROVAL_REJECTED);
+        chain.setApprovedBy(approver);
+        chain.setApprovedAt(System.currentTimeMillis());
+        mergeApprovalComment(chain, comment);
+        return toolChainRepository.update(chain);
+    }
+
+    public Optional<ToolChain> findBySignatures(String intentSignature, String structureSignature) {
+        if (intentSignature == null || intentSignature.isBlank() || structureSignature == null || structureSignature.isBlank()) {
+            return Optional.empty();
+        }
+        return toolChainRepository.findBySignatures(intentSignature, structureSignature);
+    }
+
+    public ToolChain createSystemSuggested(String name,
+                                           String description,
+                                           String createdBy,
+                                           String intentSignature,
+                                           String structureSignature,
+                                           Map<String, Object> metadata) {
+        ToolChain chain = ToolChain.builder()
+                .name(name)
+                .description(description)
+                .enabled(true)
+                .status("draft")
+                .origin(ORIGIN_SYSTEM_SUGGESTED)
+                .approvalStatus(APPROVAL_PENDING)
+                .intentSignature(intentSignature)
+                .structureSignature(structureSignature)
+                .metadataJson(toJson(metadata == null ? Map.of() : metadata))
+                .createdBy(createdBy)
+                .build();
+        return toolChainRepository.save(chain);
+    }
+
     public List<IntentMatch> findIntentMatches(String userText, double threshold, int limit) {
         if (userText == null || userText.isBlank()) return List.of();
         Set<String> userTokens = tokenize(userText);
         List<IntentMatch> matches = new ArrayList<>();
         for (ToolChain chain : toolChainRepository.findEnabled()) {
+            if (ORIGIN_SYSTEM_SUGGESTED.equalsIgnoreCase(chain.getOrigin())
+                    && !APPROVAL_APPROVED.equalsIgnoreCase(chain.getApprovalStatus())) {
+                continue;
+            }
             Optional<ToolChainVersion> versionOpt = toolChainVersionRepository.findPublished(chain.getId())
                     .or(() -> toolChainVersionRepository.findByChain(chain.getId()).stream().findFirst());
             if (versionOpt.isEmpty()) continue;
@@ -208,6 +281,21 @@ public class ToolChainService {
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void mergeApprovalComment(ToolChain chain, String comment) {
+        if (comment == null || comment.isBlank()) return;
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        try {
+            Object parsed = objectMapper.readValue(chain.getMetadataJson() == null ? "{}" : chain.getMetadataJson(), Object.class);
+            if (parsed instanceof Map<?, ?> map) {
+                map.forEach((k, v) -> metadata.put(String.valueOf(k), v));
+            }
+        } catch (Exception ignored) {
+        }
+        metadata.put("approvalComment", comment);
+        chain.setMetadataJson(toJson(metadata));
     }
 
     @SuppressWarnings("unchecked")

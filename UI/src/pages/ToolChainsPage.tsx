@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import ToolChainRunInputDialog from "@/components/toolchain/ToolChainRunInputDialog";
@@ -46,11 +47,21 @@ export default function ToolChainsPage() {
   const [runtimeToolChainId, setRuntimeToolChainId] = useState("");
   const [runtimeProvider, setRuntimeProvider] = useState("");
   const [runtimeModel, setRuntimeModel] = useState("");
+  const [activeTab, setActiveTab] = useState<"user" | "system">("user");
 
-  const { data: toolchains = [] } = useQuery<any[]>({
-    queryKey: ["toolchains"],
-    queryFn: () => api.toolchains.list(),
+  const { data: userToolchains = [] } = useQuery<any[]>({
+    queryKey: ["toolchains", "user"],
+    queryFn: () => api.toolchains.list("user"),
   });
+  const { data: systemToolchains = [] } = useQuery<any[]>({
+    queryKey: ["toolchains", "system"],
+    queryFn: () => api.toolchains.list("system_suggested"),
+  });
+  const toolchains = useMemo(
+    () => (activeTab === "system" ? systemToolchains : userToolchains),
+    [activeTab, systemToolchains, userToolchains]
+  );
+  const allToolchains = useMemo(() => [...userToolchains, ...systemToolchains], [systemToolchains, userToolchains]);
 
   const createMutation = useMutation({
     mutationFn: () => api.toolchains.create({ name, description, enabled: true }),
@@ -128,7 +139,7 @@ export default function ToolChainsPage() {
 
   const saveRuntimeModelMutation = useMutation({
     mutationFn: async () => {
-      const row = toolchains.find((item: any) => item.id === runtimeToolChainId);
+      const row = allToolchains.find((item: any) => item.id === runtimeToolChainId);
       if (!row) throw new Error("ToolChain not found");
       const metadata = parseMetadata(row.metadataJson);
       const parsed = parseModelRefKey(runtimeModel);
@@ -152,6 +163,24 @@ export default function ToolChainsPage() {
     onError: (e: any) => toast.error(e.message || "Failed to update runtime model"),
   });
 
+  const approveToolChainMutation = useMutation({
+    mutationFn: (id: string) => api.toolchains.approve(id, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+      toast.success("System toolchain approved");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to approve toolchain"),
+  });
+
+  const rejectToolChainMutation = useMutation({
+    mutationFn: (id: string) => api.toolchains.reject(id, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+      toast.success("System toolchain rejected");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to reject toolchain"),
+  });
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -167,6 +196,12 @@ export default function ToolChainsPage() {
       </div>
 
       <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ToolChains" className="max-w-sm" />
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "user" | "system")}>
+        <TabsList variant="line">
+          <TabsTrigger value="user">User Toolchains</TabsTrigger>
+          <TabsTrigger value="system">System Toolchains</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       <Table>
         <TableHeader>
@@ -188,7 +223,19 @@ export default function ToolChainsPage() {
             >
               <TableCell className="font-medium">{row.name}</TableCell>
               <TableCell>
-                {row.publishedVersion ? (
+                {activeTab === "system" ? (
+                  <span
+                    className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${
+                      String(row.approvalStatus || "").toLowerCase() === "approved"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : String(row.approvalStatus || "").toLowerCase() === "rejected"
+                        ? "border-rose-200 bg-rose-50 text-rose-700"
+                        : "border-amber-200 bg-amber-50 text-amber-700"
+                    }`}
+                  >
+                    {toTitleCase(String(row.approvalStatus || "pending"))}
+                  </span>
+                ) : row.publishedVersion ? (
                   <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
                     Published v{row.publishedVersion}
                   </span>
@@ -228,14 +275,41 @@ export default function ToolChainsPage() {
                       Runs
                     </DropdownMenuItem>
                     <DropdownMenuItem
+                      disabled={activeTab === "system" && String(row.approvalStatus || "").toLowerCase() !== "approved"}
                       onClick={(event) => {
                         event.stopPropagation();
+                        if (activeTab === "system" && String(row.approvalStatus || "").toLowerCase() !== "approved") {
+                          toast.error("Approve this system toolchain once before running it.");
+                          return;
+                        }
                         setRunToolChainId(row.id);
                         setRunDialogOpen(true);
                       }}
                     >
                       Run
                     </DropdownMenuItem>
+                    {activeTab === "system" ? (
+                      <>
+                        <DropdownMenuItem
+                          disabled={String(row.approvalStatus || "").toLowerCase() === "approved"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            approveToolChainMutation.mutate(row.id);
+                          }}
+                        >
+                          Approve
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={String(row.approvalStatus || "").toLowerCase() === "rejected"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            rejectToolChainMutation.mutate(row.id);
+                          }}
+                        >
+                          Reject
+                        </DropdownMenuItem>
+                      </>
+                    ) : null}
                     <DropdownMenuItem
                       disabled={!runtimeSupportedByToolChainId.get(row.id)}
                       onClick={(event) => {
@@ -259,9 +333,11 @@ export default function ToolChainsPage() {
                       Configure Runtime Llm
                     </DropdownMenuItem>
                     <DropdownMenuItem
+                      disabled={activeTab === "system"}
                       variant="destructive"
                       onClick={(event) => {
                         event.stopPropagation();
+                        if (activeTab === "system") return;
                         const confirmed = window.confirm(
                           `Delete "${row.name}"? This will permanently remove all versions, runs, approvals, and config sessions.`
                         );

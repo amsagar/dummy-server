@@ -83,6 +83,14 @@ function parseMetadata(raw: any): Record<string, any> {
   }
 }
 
+function toTitleCase(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function parseSchemaObject(raw: any): { type?: string; properties?: Record<string, any>; required?: string[] } | null {
   if (!raw) return null;
   if (typeof raw === "object") {
@@ -315,6 +323,15 @@ export default function ToolChainDesignerPage() {
     const modelID = String((modelRef as any).modelID || "").trim();
     if (!providerID || !modelID) return null;
     return { providerID, modelID };
+  }, [currentToolChain]);
+
+  const systemSuggestionInfo = useMemo(() => {
+    const origin = String(currentToolChain?.origin || "").toLowerCase();
+    if (origin !== "system_suggested") return null;
+    const approvalStatus = String(currentToolChain?.approvalStatus || "pending");
+    const metadata = parseMetadata(currentToolChain?.metadataJson);
+    const mappingConfidence = String(metadata.mappingConfidence || "inferred");
+    return { approvalStatus, mappingConfidence };
   }, [currentToolChain]);
 
   const latest = useMemo(() => (Array.isArray(versions) && versions.length > 0 ? versions[0] : null), [versions]);
@@ -1200,6 +1217,11 @@ export default function ToolChainDesignerPage() {
           </Button>
           <h2 className="text-xl font-semibold text-[#123262]">ToolChain Designer</h2>
           <p className="text-sm text-slate-600">AI-driven workflow designer.</p>
+          {systemSuggestionInfo ? (
+            <p className="text-xs text-amber-700">
+              System Suggested • Approval: {toTitleCase(systemSuggestionInfo.approvalStatus)} • Mapping confidence: {toTitleCase(systemSuggestionInfo.mappingConfidence)}
+            </p>
+          ) : null}
         </div>
         <div className="relative flex min-w-[560px] flex-col items-end gap-2">
           <div className="flex items-center gap-2">

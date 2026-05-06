@@ -35,6 +35,8 @@ public class ToolChainVersionRepository {
                 .addValue("responseMode", version.getResponseMode())
                 .addValue("synthesisPrompt", version.getSynthesisPrompt())
                 .addValue("intentsJson", version.getIntentsJson())
+                .addValue("intentSignature", version.getIntentSignature())
+                .addValue("structureSignature", version.getStructureSignature())
                 .addValue("ragConfigJson", version.getRagConfigJson())
                 .addValue("published", version.isPublished())
                 .addValue("createdBy", version.getCreatedBy())
@@ -74,6 +76,15 @@ public class ToolChainVersionRepository {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
+    public Optional<ToolChainVersion> findBySignatures(String intentSignature, String structureSignature) {
+        var rows = namedJdbc.query(sql.getQuery("TOOL_CHAIN_VERSION.FIND_BY_SIGNATURES"),
+                new MapSqlParameterSource()
+                        .addValue("intentSignature", intentSignature)
+                        .addValue("structureSignature", structureSignature),
+                (rs, n) -> map(rs));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
     /**
      * Update an unpublished version row in place. No-op if the row is published —
      * the WHERE clause guards against accidental mutation of immutable releases.
@@ -87,6 +98,8 @@ public class ToolChainVersionRepository {
                 .addValue("responseMode", version.getResponseMode())
                 .addValue("synthesisPrompt", version.getSynthesisPrompt())
                 .addValue("intentsJson", version.getIntentsJson())
+                .addValue("intentSignature", version.getIntentSignature())
+                .addValue("structureSignature", version.getStructureSignature())
                 .addValue("ragConfigJson", version.getRagConfigJson()));
     }
 
@@ -108,6 +121,8 @@ public class ToolChainVersionRepository {
                 .responseMode(rs.getString("response_mode"))
                 .synthesisPrompt(rs.getString("synthesis_prompt"))
                 .intentsJson(rs.getString("intents_json"))
+                .intentSignature(rs.getString("intent_signature"))
+                .structureSignature(rs.getString("structure_signature"))
                 .ragConfigJson(rs.getString("rag_config_json"))
                 .published(rs.getBoolean("is_published"))
                 .createdBy(rs.getString("created_by"))

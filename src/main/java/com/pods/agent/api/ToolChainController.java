@@ -46,8 +46,8 @@ public class ToolChainController {
 
     @GetMapping("/toolchains")
     @Operation(summary = "List all ToolChains")
-    public ResponseEntity<?> listToolChains() {
-        var rows = toolChainService.listAll().stream().map(chain -> {
+    public ResponseEntity<?> listToolChains(@RequestParam(required = false) String origin) {
+        var rows = toolChainService.listAll(origin).stream().map(chain -> {
             java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
             row.put("id", chain.getId());
             row.put("name", chain.getName());
@@ -55,6 +55,12 @@ public class ToolChainController {
             row.put("status", chain.getStatus());
             row.put("enabled", chain.isEnabled());
             row.put("currentVersion", chain.getCurrentVersion());
+            row.put("origin", chain.getOrigin());
+            row.put("approvalStatus", chain.getApprovalStatus());
+            row.put("approvedBy", chain.getApprovedBy());
+            row.put("approvedAt", chain.getApprovedAt());
+            row.put("intentSignature", chain.getIntentSignature());
+            row.put("structureSignature", chain.getStructureSignature());
             row.put("metadataJson", chain.getMetadataJson());
             row.put("createdBy", chain.getCreatedBy());
             row.put("createdAt", chain.getCreatedAt());
@@ -301,23 +307,59 @@ public class ToolChainController {
     public ResponseEntity<?> execute(@PathVariable String id,
                                      @RequestBody(required = false) ToolChainDtos.ToolChainExecuteRequest request) {
         ToolChainDtos.ToolChainExecuteRequest payload = request == null ? new ToolChainDtos.ToolChainExecuteRequest() : request;
-        var run = toolChainRuntimeService.execute(
-                id,
-                payload.getVersion(),
-                payload.getTriggerSource() == null ? "api" : payload.getTriggerSource(),
-                securityContextService.currentUserIdOrThrow(),
-                payload.getInput(),
-                payload.getOptions(),
-                null
-        );
-        return ResponseEntity.ok(Map.of(
-                "runId", run.getId(),
-                "toolChainId", run.getToolChainId(),
-                "version", run.getVersion(),
-                "status", run.getStatus(),
-                "statusUrl", "/api/v1/runs/" + run.getId() + "/status",
-                "runUrl", "/api/v1/runs/" + run.getId()
-        ));
+        try {
+            var run = toolChainRuntimeService.execute(
+                    id,
+                    payload.getVersion(),
+                    payload.getTriggerSource() == null ? "api" : payload.getTriggerSource(),
+                    securityContextService.currentUserIdOrThrow(),
+                    payload.getInput(),
+                    payload.getOptions(),
+                    null
+            );
+            return ResponseEntity.ok(Map.of(
+                    "runId", run.getId(),
+                    "toolChainId", run.getToolChainId(),
+                    "version", run.getVersion(),
+                    "status", run.getStatus(),
+                    "statusUrl", "/api/v1/runs/" + run.getId() + "/status",
+                    "runUrl", "/api/v1/runs/" + run.getId()
+            ));
+        } catch (IllegalStateException e) {
+            return ResponseEntityFactory.resourceConflict(e.getMessage());
+        }
+    }
+
+    @PostMapping("/toolchains/{id}/approve")
+    @Operation(summary = "Approve a system-suggested ToolChain")
+    public ResponseEntity<?> approveToolChain(@PathVariable String id,
+                                              @RequestBody(required = false) ToolChainDtos.ToolChainApprovalDecisionRequest request) {
+        String comment = request == null ? null : request.getComment();
+        try {
+            return ResponseEntity.ok(toolChainService.approveSystemToolChain(
+                    id,
+                    securityContextService.currentUserIdOrThrow(),
+                    comment
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntityFactory.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/toolchains/{id}/reject")
+    @Operation(summary = "Reject a system-suggested ToolChain")
+    public ResponseEntity<?> rejectToolChain(@PathVariable String id,
+                                             @RequestBody(required = false) ToolChainDtos.ToolChainApprovalDecisionRequest request) {
+        String comment = request == null ? null : request.getComment();
+        try {
+            return ResponseEntity.ok(toolChainService.rejectSystemToolChain(
+                    id,
+                    securityContextService.currentUserIdOrThrow(),
+                    comment
+            ));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntityFactory.badRequest(e.getMessage());
+        }
     }
 
     @GetMapping("/toolchains/{id}/runs")

@@ -77,6 +77,7 @@ public class ChatService {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final SessionWorkspaceService sessionWorkspaceService;
     private final WorkspaceSkillSyncService workspaceSkillSyncService;
+    private final ToolChainSuggestionService toolChainSuggestionService;
     private final ObjectMapper objectMapper;
 
     public ChatService(AgentSessionManager sessionManager,
@@ -94,6 +95,7 @@ public class ChatService {
                        RuntimeTuningProperties runtimeTuningProperties,
                        SessionWorkspaceService sessionWorkspaceService,
                        WorkspaceSkillSyncService workspaceSkillSyncService,
+                       ToolChainSuggestionService toolChainSuggestionService,
                        ObjectMapper objectMapper) {
         this.sessionManager = sessionManager;
         this.agentRuntimeService = agentRuntimeService;
@@ -110,6 +112,7 @@ public class ChatService {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.sessionWorkspaceService = sessionWorkspaceService;
         this.workspaceSkillSyncService = workspaceSkillSyncService;
+        this.toolChainSuggestionService = toolChainSuggestionService;
         this.objectMapper = objectMapper;
     }
 
@@ -206,6 +209,12 @@ public class ChatService {
                                 agentRuntimeService.runTurn(session, finalUserMessage, state, sender, turnId))
                 );
                 long elapsed = System.currentTimeMillis() - turnStart;
+
+                // Build system-suggested toolchains from successful tool-call patterns.
+                try {
+                    toolChainSuggestionService.createSuggestionFromTurn(sessionId, turnId, request.getMessage(), userId);
+                } catch (Exception ignored) {
+                }
 
                 saveMessage(sessionId, "assistant", response, turnId);
 
