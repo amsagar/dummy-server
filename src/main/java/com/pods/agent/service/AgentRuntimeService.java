@@ -73,6 +73,7 @@ public class AgentRuntimeService {
     private final EmbeddingAutoRouterService embeddingAutoRouterService;
     private final ToolChainRuntimeService toolChainRuntimeService;
     private final ToolChainService toolChainService;
+    private final ChainParameterExtractor chainParameterExtractor;
     private final Map<String, Map<String, Double>> toolMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> toolDomainMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> skillMemorySignals = new ConcurrentHashMap<>();
@@ -98,7 +99,8 @@ public class AgentRuntimeService {
                                ToolEmbeddingIndexService toolEmbeddingIndexService,
                                EmbeddingAutoRouterService embeddingAutoRouterService,
                                ToolChainRuntimeService toolChainRuntimeService,
-                               ToolChainService toolChainService) {
+                               ToolChainService toolChainService,
+                               ChainParameterExtractor chainParameterExtractor) {
         this.orchestrator = orchestrator;
         this.toolRegistryService = toolRegistryService;
         this.policyEngine = policyEngine;
@@ -121,6 +123,7 @@ public class AgentRuntimeService {
         this.embeddingAutoRouterService = embeddingAutoRouterService;
         this.toolChainRuntimeService = toolChainRuntimeService;
         this.toolChainService = toolChainService;
+        this.chainParameterExtractor = chainParameterExtractor;
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender) {
@@ -144,11 +147,29 @@ public class AgentRuntimeService {
         if (shouldExecuteToolChain(state)) {
             transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "toolchain-execution");
             try {
-                Map<String, Object> tcInput = new LinkedHashMap<>();
-                tcInput.put("message", normalizedUserText);
-                tcInput.put("sessionId", session.getSessionId());
-                toolChainService.resolveVersion(state.getToolChainId(), state.getToolChainVersion())
-                        .ifPresent(v -> tcInput.putAll(extractToolChainParams(normalizedUserText, v, state)));
+                // Resolve chain version + perform the single message→typed-params LLM hop.
+                // The chain only sees the structured params it declared. Free-form prose stops here.
+                ToolChainVersion version = toolChainService.resolveVersion(state.getToolChainId(), state.getToolChainVersion())
+                        .orElseThrow(() -> new IllegalStateException("ToolChain version not found"));
+                Map<String, Object> tcInput;
+                try {
+                    tcInput = new LinkedHashMap<>(chainParameterExtractor.extract(
+                            normalizedUserText,
+                            version.getInputSchema(),
+                            extractionHintsForChain(state.getToolChainId()),
+                            state.getModel() != null ? state.getModel()
+                                    : resolveDefaultModelRefForChain(state.getToolChainId())));
+                } catch (ChainParameterExtractor.ExtractionFailed extractionFailure) {
+                    log.info("[AgentRuntime] Chain param extraction failed ({}); falling back to dynamic flow",
+                            extractionFailure.getMessage());
+                    if (state.isToolChainSelectedByUser() || "strict".equalsIgnoreCase(runtimeMode)) {
+                        throw extractionFailure;
+                    }
+                    state.setToolChainId(null);
+                    state.setToolChainVersion(null);
+                    transitionState(session.getSessionId(), turnId, sender, PlannerState.PLAN, "param-extraction-failed-falling-back");
+                    return runTurn(session, userText, state, sender, turnId);
+                }
                 var run = toolChainRuntimeService.execute(
                         state.getToolChainId(),
                         state.getToolChainVersion(),
@@ -1347,40 +1368,47 @@ You are in ToolChain designer creation mode.
         return text;
     }
 
+    /**
+     * Reads the chain's metadata for `paramExtractionHints` (LLM-authored examples of how a
+     * user phrase maps to typed params). Returned to the extractor as the "hints" payload.
+     */
     @SuppressWarnings("unchecked")
-    private Map<String, Object> extractToolChainParams(String userText, ToolChainVersion version, ChatState state) {
-        String rawSchema = version == null ? null : version.getInputSchema();
-        if (rawSchema == null || rawSchema.isBlank()) return Map.of();
-        Map<String, Object> schema;
+    private String extractionHintsForChain(String toolChainId) {
+        if (toolChainId == null || toolChainId.isBlank()) return null;
         try {
-            schema = objectMapper.readValue(rawSchema, Map.class);
+            var chain = toolChainService.getRequired(toolChainId);
+            String raw = chain.getMetadataJson();
+            if (raw == null || raw.isBlank()) return null;
+            Map<String, Object> meta = objectMapper.readValue(raw, Map.class);
+            Object hints = meta.get("paramExtractionHints");
+            return hints == null ? null : String.valueOf(hints);
         } catch (Exception e) {
-            log.warn("[AgentRuntime] bad inputSchema JSON: {}", e.getMessage());
-            return Map.of();
+            return null;
         }
-        Object propsObj = schema.get("properties");
-        if (!(propsObj instanceof Map<?, ?> propsMap) || propsMap.isEmpty()) return Map.of();
+    }
 
+    /**
+     * Falls back to the chain's stored default model when the chat session doesn't have one
+     * (e.g., the chain was matched without an active state.model). Mirrors
+     * ToolChainRuntimeService.resolveModelRefForSynthesis.
+     */
+    @SuppressWarnings("unchecked")
+    private ModelRef resolveDefaultModelRefForChain(String toolChainId) {
+        if (toolChainId == null || toolChainId.isBlank()) return null;
         try {
-            Map<String, Object> schemaForPrompt = Map.of(
-                    "properties", propsMap,
-                    "required", schema.getOrDefault("required", List.of()));
-            String prompt = "User message:\n" + userText + "\n\nJSON schema:\n"
-                    + objectMapper.writeValueAsString(schemaForPrompt)
-                    + "\n\nReturn ONLY a JSON object with the extracted fields. Omit fields you cannot extract confidently.";
-            // disableThinking=true: structured-JSON output (mirrors ToolChainConfigChatService).
-            ModelProviderRouter.Spec spec = modelProviderRouter.resolve(state != null ? state.getModel() : null, true);
-            String raw = spec.client().prompt()
-                    .system("Extract parameters from the user message that match the given JSON schema. Output JSON only.")
-                    .user(prompt)
-                    .call()
-                    .content();
-            if (raw == null || raw.isBlank()) return Map.of();
-            Map<String, Object> parsed = objectMapper.readValue(extractJsonObject(raw), Map.class);
-            return coerceToSchema(parsed, propsMap);
+            var chain = toolChainService.getRequired(toolChainId);
+            String raw = chain.getMetadataJson();
+            if (raw == null || raw.isBlank()) return null;
+            Map<String, Object> meta = objectMapper.readValue(raw, Map.class);
+            Object refObj = meta.get("runtimeModelRef");
+            if (!(refObj instanceof Map<?, ?>)) refObj = meta.get("defaultModelRef");
+            if (!(refObj instanceof Map<?, ?> refMap)) return null;
+            Object pid = refMap.get("providerID");
+            Object mid = refMap.get("modelID");
+            if (pid == null || mid == null) return null;
+            return new ModelRef(String.valueOf(pid), String.valueOf(mid));
         } catch (Exception e) {
-            log.warn("[AgentRuntime] param extraction failed: {}", e.getMessage());
-            return Map.of();
+            return null;
         }
     }
 
@@ -1432,33 +1460,6 @@ You are in ToolChain designer creation mode.
             }
         }
         return null;
-    }
-
-    private Map<String, Object> coerceToSchema(Map<String, Object> parsed, Map<?, ?> propsMap) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> e : parsed.entrySet()) {
-            Object v = e.getValue();
-            if (v == null) continue;
-            Object propDef = propsMap.get(e.getKey());
-            String type = (propDef instanceof Map<?, ?> pm && pm.get("type") != null)
-                    ? String.valueOf(pm.get("type"))
-                    : "";
-            try {
-                switch (type) {
-                    case "integer" -> out.put(e.getKey(),
-                            v instanceof Number n ? n.longValue() : Long.parseLong(String.valueOf(v).trim()));
-                    case "number" -> out.put(e.getKey(),
-                            v instanceof Number n ? n.doubleValue() : Double.parseDouble(String.valueOf(v).trim()));
-                    case "boolean" -> out.put(e.getKey(),
-                            v instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(v).trim()));
-                    case "string" -> out.put(e.getKey(), v instanceof String s ? s : String.valueOf(v));
-                    default -> out.put(e.getKey(), v);
-                }
-            } catch (NumberFormatException nfe) {
-                // drop bad coercion; the existing validator will surface "Missing required input fields"
-            }
-        }
-        return out;
     }
 
     private PendingInteractionService.QuestionMetadata textQuestionMetadata() {

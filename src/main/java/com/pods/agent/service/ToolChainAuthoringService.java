@@ -81,12 +81,16 @@ public class ToolChainAuthoringService {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private AuthoringResult buildResult(Map<String, Object> parsed) {
         String name = stringOrNull(parsed.get("name"));
         String description = stringOrNull(parsed.get("description"));
         List<String> intents = readStringList(parsed.get("intents"));
         Map<String, Map<String, Object>> nodeMappings = readNodeMappings(parsed.get("nodeMappings"));
-        return new AuthoringResult(name, description, intents, nodeMappings);
+        Map<String, Object> paramSchema = parsed.get("paramSchema") instanceof Map<?, ?> ps
+                ? (Map<String, Object>) ps : null;
+        String paramExtractionHints = stringOrNull(parsed.get("paramExtractionHints"));
+        return new AuthoringResult(name, description, intents, nodeMappings, paramSchema, paramExtractionHints);
     }
 
     private List<RecordedToolCall> pairCallsAndResults(List<RuntimeEvent> events) {
@@ -255,11 +259,25 @@ public class ToolChainAuthoringService {
             either a single tool call or an iterator group (same tool called multiple times in
             a row, one call per item).
 
+            CRITICAL: You must declare the chain's typed input parameters. The chat layer will
+            run a separate small LLM call to extract these params from a user's message before
+            invoking the chain. Tool argMappings then reference $.chainInput.<paramName> directly
+            — NOT $.chainInput.message. This is the whole point of the chain: free-form prose
+            stops at the chain entry, and structured params flow through deterministically.
+
             Return ONLY valid JSON, no prose, no code fences:
             {
               "name": "<2-8 word business-purpose name, no implementation jargon>",
               "description": "<one or two sentences describing what the chain does>",
               "intents": ["<paraphrase of likely user prompts that should match this chain>"],
+              "paramSchema": {
+                "type": "object",
+                "properties": {
+                  "<paramName>": { "type": "string|integer|number|boolean|array|object", "description": "<what this param represents>" }
+                },
+                "required": ["<paramName>", ...]
+              },
+              "paramExtractionHints": "<one short sentence with concrete examples mapping a likely user phrase to the param object>",
               "nodeMappings": {
                 "tool_<N>": {
                   "<argName>": { "expr": "<JSONata>", "policy": "strict" | "llm_assisted", "fallback": <optional> }
@@ -274,13 +292,26 @@ public class ToolChainAuthoringService {
               //     "referenceDate": { "expr": "$item.ScheduledDate", "policy": "strict" },
               //     "siteIdentity":  { "expr": "$item.AssignedSiteId",  "policy": "strict" }
               //   }
+
+            Rules for paramSchema:
+            - Look at the FIRST tool's input in the recorded run AND the user's prompt. The "real"
+              params are the structured values the user implicitly provided.
+              Example: prompt "validate order 5038081" + first tool input {ORD_ID: "5038081"} -->
+              paramSchema: { type:object, properties:{orderId:{type:string,description:"order ID"}}, required:["orderId"] }
+            - Use camelCase param names (orderId, customerId, postalCode), even if the underlying
+              tools use other casing. Tool argMappings handle the rename.
+            - Required = every param the chain genuinely needs to function. Optional params go in
+              properties without being listed in required.
+            - Do not add a "message" param. The chain receives typed params, not free-form prose.
             }
 
             Rules for argMappings (single-tool nodes):
             - The runtime context exposes:
-                $.chainInput.<key>            — the original user-level input passed to the chain
+                $.chainInput.<paramName>      — the typed params extracted at chain entry (per paramSchema)
                 $.tool_<N>.input.<key>        — the resolved arguments sent to step N
                 $.tool_<N>.output.<key>       — the response from step N
+            - Prefer $.chainInput.<paramName> over any other source for top-level inputs.
+              Example: ORD_ID for Get_OrderID -> { "expr": "$.chainInput.orderId", "policy": "strict" }
             - Use JSONata expressions starting with "$". For static literals, use a literal expression
               like "'WEB'" (quoted string) or "1" (number) or "false".
             - When a value can be derived deterministically from prior outputs/inputs, set
@@ -312,9 +343,14 @@ public class ToolChainAuthoringService {
     public record AuthoringResult(String name,
                                   String description,
                                   List<String> intents,
-                                  Map<String, Map<String, Object>> nodeMappings) {
+                                  Map<String, Map<String, Object>> nodeMappings,
+                                  Map<String, Object> paramSchema,
+                                  String paramExtractionHints) {
         public boolean hasName() { return name != null && !name.isBlank(); }
         public boolean hasDescription() { return description != null && !description.isBlank(); }
+        public boolean hasParamSchema() {
+            return paramSchema != null && paramSchema.get("properties") instanceof Map<?, ?> p && !p.isEmpty();
+        }
     }
 
     public record RecordedToolCall(String toolName, Object input, Object output) {}

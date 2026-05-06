@@ -109,6 +109,12 @@ public class ToolChainSuggestionService {
                     "providerID", modelRef.providerID(),
                     "modelID", modelRef.modelID()));
         }
+        // Stash extraction hints so the chat-layer parameter extractor has concrete examples
+        // of how a user phrase maps to the chain's typed params.
+        if (authored.isPresent() && authored.get().paramExtractionHints() != null
+                && !authored.get().paramExtractionHints().isBlank()) {
+            metadata.put("paramExtractionHints", authored.get().paramExtractionHints());
+        }
 
         ToolChain chain = toolChainService.createSystemSuggested(
                 chainName,
@@ -123,9 +129,16 @@ public class ToolChainSuggestionService {
                 .filter(list -> list != null && !list.isEmpty())
                 .orElseGet(() -> List.of(normalizeIntentText(userPrompt, calls)));
 
+        // Resolve the chain's typed input schema. Prefer LLM-authored paramSchema; if absent,
+        // fall back to the legacy free-form {message: string} so old behavior is preserved.
+        String inputSchemaJson = authored
+                .filter(ToolChainAuthoringService.AuthoringResult::hasParamSchema)
+                .map(r -> toJson(r.paramSchema()))
+                .orElse("{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}");
+
         ToolChainDtos.ToolChainVersionRequest req = new ToolChainDtos.ToolChainVersionRequest();
         req.setGraphJson(graphJson);
-        req.setInputSchema("{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}");
+        req.setInputSchema(inputSchemaJson);
         req.setOutputSchema("{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"data\":{\"type\":\"object\"}}}");
         req.setResponseMode("hybrid");
         req.setSynthesisPrompt("Summarize the outputs from each tool step and produce an actionable final response.");
