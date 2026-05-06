@@ -466,6 +466,10 @@ public class ToolChainRuntimeService {
             return StepResult.failed("Tool is not enabled: " + toolName);
         }
         Map<String, Object> resolvedInput = resolveNodeInput(node, context);
+        // JSONata predicates return arrays. When the LLM-authored mapping forgets the [0]
+        // unwrap and the tool's schema expects a scalar, coerce single-element lists to their
+        // sole element. Belt-and-suspenders against authoring bugs that slip past validation.
+        coerceScalarArgs(resolvedInput, tool);
         // Fill in any args that are marked policy=llm_assisted but came back null from the
         // deterministic JSONata path. Best-effort; missing values stay missing if the LLM
         // is unavailable or the model can't determine a value.
@@ -487,6 +491,42 @@ public class ToolChainRuntimeService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put(node.id(), step);
         return StepResult.success(out, null);
+    }
+
+    /**
+     * For each arg in resolvedInput where the tool's schema declares a scalar type
+     * (string/integer/number/boolean), if the value is a List of length 1, replace it with
+     * its sole element. Catches the common JSONata-predicate-returns-array bug where the
+     * LLM-authored expression forgot [0]. Multi-element lists are left alone because that
+     * almost certainly indicates a deeper authoring bug — surfacing them via the tool's
+     * own schema validation is more useful than silently picking the first element.
+     */
+    @SuppressWarnings("unchecked")
+    private void coerceScalarArgs(Map<String, Object> resolvedInput, AgentTool tool) {
+        if (resolvedInput == null || resolvedInput.isEmpty() || tool == null) return;
+        String schemaJson = tool.getRequestSchema();
+        if (schemaJson == null || schemaJson.isBlank()) return;
+        Map<String, Object> schemaProps;
+        try {
+            Map<String, Object> schema = objectMapper.readValue(schemaJson, Map.class);
+            Object props = schema.get("properties");
+            if (!(props instanceof Map<?, ?>)) return;
+            schemaProps = (Map<String, Object>) props;
+        } catch (Exception e) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : new java.util.ArrayList<>(resolvedInput.entrySet())) {
+            Object value = entry.getValue();
+            if (!(value instanceof List<?> list) || list.size() != 1) continue;
+            Object propDef = schemaProps.get(entry.getKey());
+            if (!(propDef instanceof Map<?, ?> propMap)) continue;
+            Object type = propMap.get("type");
+            if (!(type instanceof String t)) continue;
+            switch (t.toLowerCase(Locale.ROOT)) {
+                case "string", "integer", "number", "boolean" -> resolvedInput.put(entry.getKey(), list.get(0));
+                default -> { /* leave arrays/objects alone */ }
+            }
+        }
     }
 
     private void applyLlmAssistedArgs(NodeModel node,
@@ -1004,6 +1044,7 @@ public class ToolChainRuntimeService {
         ArgMappingResolver.ResolutionResult res = argMappingResolver.resolveAll(
                 argMappings, itemContext, key -> resolvePath(itemContext, key));
         Map<String, Object> resolvedInput = new LinkedHashMap<>(res.resolved());
+        coerceScalarArgs(resolvedInput, tool);
         if (modelRef != null) {
             for (ArgMappingResolver.DeferredArg deferred : res.deferred()) {
                 if (resolvedInput.containsKey(deferred.argName())) continue;

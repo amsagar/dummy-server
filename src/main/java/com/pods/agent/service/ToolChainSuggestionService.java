@@ -5,6 +5,7 @@ import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
 import com.pods.agent.domain.ToolChain;
 import com.pods.agent.repository.RuntimeEventRepository;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
@@ -21,6 +22,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 @Service
+@Slf4j
 public class ToolChainSuggestionService {
     private static final Pattern TOKEN_SPLIT = Pattern.compile("[^a-z0-9]+");
 
@@ -28,17 +30,20 @@ public class ToolChainSuggestionService {
     private final ToolChainService toolChainService;
     private final ToolChainAuthoringService authoringService;
     private final ToolRegistryService toolRegistryService;
+    private final MappingValidator mappingValidator;
     private final ObjectMapper objectMapper;
 
     public ToolChainSuggestionService(RuntimeEventRepository runtimeEventRepository,
                                       ToolChainService toolChainService,
                                       ToolChainAuthoringService authoringService,
                                       ToolRegistryService toolRegistryService,
+                                      MappingValidator mappingValidator,
                                       ObjectMapper objectMapper) {
         this.runtimeEventRepository = runtimeEventRepository;
         this.toolChainService = toolChainService;
         this.authoringService = authoringService;
         this.toolRegistryService = toolRegistryService;
+        this.mappingValidator = mappingValidator;
         this.objectMapper = objectMapper;
     }
 
@@ -70,15 +75,46 @@ public class ToolChainSuggestionService {
                 authoringService.author(userPrompt, events, modelRef);
 
         Map<String, Object> graph = buildGraph(userPrompt, calls);
+        MappingValidator.ValidationReport finalReport = new MappingValidator.ValidationReport(List.of());
         if (authored.isPresent()) {
             applyAuthoredMappings(graph, authored.get().nodeMappings());
+            // One round of validate-and-retry. If the LLM-authored expressions resolve to
+            // the wrong values when replayed against the recorded turn, ask the LLM to fix
+            // the failures and re-author. Bounded to a single retry to cap cost — bigger
+            // gains come from the upgraded prompt (skillContexts + JSONata gotchas) at
+            // attempt #1.
+            finalReport = runValidator(graph, calls, authored.get(), userPrompt);
+            if (finalReport.hasFailures() && modelRef != null) {
+                String feedback = finalReport.renderForLlmFeedback();
+                Optional<ToolChainAuthoringService.AuthoringResult> retried =
+                        authoringService.author(userPrompt, events, modelRef, feedback);
+                if (retried.isPresent()) {
+                    Map<String, Object> retriedGraph = buildGraph(userPrompt, calls);
+                    applyAuthoredMappings(retriedGraph, retried.get().nodeMappings());
+                    MappingValidator.ValidationReport retryReport =
+                            runValidator(retriedGraph, calls, retried.get(), userPrompt);
+                    if (retryReport.size() < finalReport.size()) {
+                        graph = retriedGraph;
+                        authored = retried;
+                        finalReport = retryReport;
+                    }
+                }
+            }
+            if (finalReport.hasFailures()) {
+                log.info("[ToolChainSuggestionService] Authored chain has {} unresolved validation "
+                        + "failures after retry; persisting with mappingConfidence=ai_authored_with_failures",
+                        finalReport.size());
+            }
         }
         // Final safety net: any required arg on a tool node that still has no mapping (neither
         // inferred from key matches nor authored by the LLM) gets policy=llm_assisted. The runtime
         // will resolve it via LlmArgResolver on first execution and self-heal a deterministic
-        // JSONata afterward. Without this, a chain like Get_OrderID would receive the entire
-        // context as its payload and the tool would reject it for missing required fields.
+        // JSONata afterward.
         ensureRequiredArgsHaveFallback(graph);
+        // Iterator nodes need a deterministic items expression. If the LLM produced an
+        // llm_assisted items mapping, downgrade it to strict — the iterator can't produce
+        // a different number of iterations on each run without becoming non-cacheable.
+        promoteIteratorItemsToStrict(graph);
         String graphJson = toJson(graph);
 
         String intentSignature = hashHex(buildIntentSignatureSeed(userPrompt, calls));
@@ -94,13 +130,23 @@ public class ToolChainSuggestionService {
                 .map(ToolChainAuthoringService.AuthoringResult::description)
                 .orElse("System suggested from repeated tool-call pattern");
         boolean authoredByLlm = authored.isPresent();
+        boolean validationFailed = finalReport.hasFailures();
+        String confidence = !authoredByLlm ? "inferred"
+                : (validationFailed ? "ai_authored_with_failures" : "ai_authored");
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("source", "runtime_suggestion");
-        metadata.put("mappingConfidence", authoredByLlm ? "ai_authored" : "inferred");
+        metadata.put("mappingConfidence", confidence);
         metadata.put("requiresMappingReview", true);
         metadata.put("authoredByLlm", authoredByLlm);
         metadata.put("sessionId", sessionId == null ? "" : sessionId);
         metadata.put("turnId", turnId);
+        if (validationFailed) {
+            List<String> summaries = new ArrayList<>();
+            for (MappingValidator.Failure f : finalReport.failures()) {
+                summaries.add(f.summary());
+            }
+            metadata.put("validationFailures", summaries);
+        }
         // Persist the model used during the recorded turn so the runtime can call
         // LlmArgResolver for llm_assisted mappings even when the chain is invoked
         // without an explicit model in the run options (e.g. matched-chain dialog).
@@ -148,6 +194,119 @@ public class ToolChainSuggestionService {
         req.setRagConfig(Map.of());
         toolChainService.createVersion(chain.getId(), req, createdBy);
         return Optional.of(chain);
+    }
+
+    /**
+     * Run the validator against the freshly authored graph. Synthesizes a chainInput by
+     * walking tool_1's argMappings: any expr of the form "$.chainInput.<paramName>" implies
+     * chainInput.<paramName> should equal the recorded tool_1 input field with the same
+     * argName. Returns an empty report if no recorded calls or no usable tool_1 mappings.
+     */
+    @SuppressWarnings("unchecked")
+    private MappingValidator.ValidationReport runValidator(Map<String, Object> graph,
+                                                           List<ToolCallRow> calls,
+                                                           ToolChainAuthoringService.AuthoringResult authored,
+                                                           String userPrompt) {
+        if (calls == null || calls.isEmpty()) return new MappingValidator.ValidationReport(List.of());
+        List<MappingValidator.RecordedCall> recorded = new ArrayList<>();
+        for (ToolCallRow row : calls) {
+            // We don't carry the recorded output at this layer (the suggestion service only
+            // captures inputs). The validator can still check argMapping resolution against
+            // chainInput + previously-recorded tool inputs — which is enough for the common
+            // "ORD_ID = $.chainInput.orderId" style failures we want to catch.
+            recorded.add(new MappingValidator.RecordedCall(row.toolName(), row.input(), Map.of()));
+        }
+        Map<String, Object> chainInput = synthesizeChainInputForValidation(graph, calls.get(0));
+        if (chainInput.isEmpty()) {
+            log.debug("[ToolChainSuggestionService] Skipping validation — no $.chainInput.* refs in tool_1 mappings");
+            return new MappingValidator.ValidationReport(List.of());
+        }
+        try {
+            return mappingValidator.validate(graph, recorded, chainInput);
+        } catch (Exception e) {
+            log.warn("[ToolChainSuggestionService] Mapping validation crashed: {}", e.getMessage());
+            return new MappingValidator.ValidationReport(List.of());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> synthesizeChainInputForValidation(Map<String, Object> graph,
+                                                                  ToolCallRow firstCall) {
+        Map<String, Object> chainInput = new LinkedHashMap<>();
+        Object nodesObj = graph.get("nodes");
+        if (!(nodesObj instanceof List<?> nodes)) return chainInput;
+        for (Object nodeObj : nodes) {
+            if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
+            if (!"tool_1".equals(String.valueOf(nodeMap.get("id")))) continue;
+            Object configObj = nodeMap.get("config");
+            if (!(configObj instanceof Map<?, ?> cfg)) break;
+            Object mappingsObj = ((Map<String, Object>) cfg).get("argMappings");
+            if (!(mappingsObj instanceof Map<?, ?> mappings)) break;
+            for (Map.Entry<?, ?> e : mappings.entrySet()) {
+                String argName = String.valueOf(e.getKey());
+                String expr = extractExpr(e.getValue());
+                if (expr == null) continue;
+                String paramName = paramNameFromChainInputExpr(expr);
+                if (paramName == null) continue;
+                Object recordedValue = firstCall.input().get(argName);
+                if (recordedValue != null) chainInput.put(paramName, recordedValue);
+            }
+            break;
+        }
+        return chainInput;
+    }
+
+    private String extractExpr(Object mapping) {
+        if (mapping instanceof String s) return s;
+        if (mapping instanceof Map<?, ?> m && m.get("expr") != null) return String.valueOf(m.get("expr"));
+        return null;
+    }
+
+    /** Returns "orderId" for "$.chainInput.orderId", null otherwise. */
+    private String paramNameFromChainInputExpr(String expr) {
+        if (expr == null) return null;
+        String trimmed = expr.trim();
+        String prefix = "$.chainInput.";
+        if (!trimmed.startsWith(prefix)) return null;
+        String tail = trimmed.substring(prefix.length());
+        // Strip anything past the first dot/bracket — we only want the top-level param name.
+        int cut = tail.length();
+        for (int i = 0; i < tail.length(); i++) {
+            char c = tail.charAt(i);
+            if (c == '.' || c == '[' || c == '(' || Character.isWhitespace(c)) { cut = i; break; }
+        }
+        String name = tail.substring(0, cut);
+        return name.isEmpty() ? null : name;
+    }
+
+    /**
+     * Iterator nodes must produce a deterministic, cacheable iteration list. If the LLM
+     * authored `items.policy: "llm_assisted"`, force it back to strict — the runtime LLM
+     * fallback path is per-arg and isn't safe for "what items to iterate over". A bad
+     * items expression should fail loud at first execution, not silently call the LLM
+     * to produce a different list per run.
+     */
+    @SuppressWarnings("unchecked")
+    private void promoteIteratorItemsToStrict(Map<String, Object> graph) {
+        Object nodesObj = graph.get("nodes");
+        if (!(nodesObj instanceof List<?> nodes)) return;
+        for (Object nodeObj : nodes) {
+            if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
+            String type = String.valueOf(nodeMap.get("type"));
+            if (!"iterator".equalsIgnoreCase(type)) continue;
+            Object configObj = nodeMap.get("config");
+            if (!(configObj instanceof Map<?, ?> cfg)) continue;
+            Object mappingsObj = ((Map<String, Object>) cfg).get("argMappings");
+            if (!(mappingsObj instanceof Map<?, ?> mappings)) continue;
+            Object itemsMapping = ((Map<String, Object>) mappings).get("items");
+            if (itemsMapping instanceof Map<?, ?> itemsMap) {
+                Map<String, Object> mutable = (Map<String, Object>) itemsMap;
+                Object policy = mutable.get("policy");
+                if (policy != null && "llm_assisted".equalsIgnoreCase(String.valueOf(policy))) {
+                    mutable.put("policy", "strict");
+                }
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

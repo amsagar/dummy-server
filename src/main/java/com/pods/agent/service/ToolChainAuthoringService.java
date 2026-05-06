@@ -53,13 +53,38 @@ public class ToolChainAuthoringService {
     public Optional<AuthoringResult> author(String userPrompt,
                                             List<RuntimeEvent> turnEvents,
                                             ModelRef modelRef) {
+        return author(userPrompt, turnEvents, modelRef, null);
+    }
+
+    /**
+     * Re-author the chain with corrective feedback from {@link MappingValidator}. The feedback
+     * string lists each failed mapping (expected vs. resolved) and tells the LLM to fix them.
+     * Returns Optional.empty() on any failure — the caller should keep the previous attempt.
+     */
+    public Optional<AuthoringResult> author(String userPrompt,
+                                            List<RuntimeEvent> turnEvents,
+                                            ModelRef modelRef,
+                                            String corrective) {
         if (modelRef == null) return Optional.empty();
         List<RecordedToolCall> calls = pairCallsAndResults(turnEvents);
         if (calls.size() < 2) return Optional.empty();
 
+        // The skill tool is filtered out of the chain's tool calls (it's agent-loop
+        // infrastructure), but its OUTPUT — the loaded skill markdown — is the authoritative
+        // rules sheet for transformations the chain needs to do downstream. Capture it
+        // separately and feed to the LLM as context so it doesn't have to re-derive things
+        // like "IDEL → ID for serviceType" from JSON Schema alone.
+        List<Map<String, Object>> skillContexts = extractSkillContexts(turnEvents);
+
         Map<String, Object> userPayload = new LinkedHashMap<>();
         userPayload.put("userPrompt", userPrompt == null ? "" : userPrompt);
         userPayload.put("toolCalls", calls.stream().map(this::renderCall).toList());
+        if (!skillContexts.isEmpty()) {
+            userPayload.put("skillContexts", skillContexts);
+        }
+        if (corrective != null && !corrective.isBlank()) {
+            userPayload.put("correctiveFeedback", corrective);
+        }
 
         try {
             ChatClient client = modelProviderRouter.resolve(modelRef, true).client();
@@ -92,6 +117,51 @@ public class ToolChainAuthoringService {
         String paramExtractionHints = stringOrNull(parsed.get("paramExtractionHints"));
         return new AuthoringResult(name, description, intents, nodeMappings, paramSchema, paramExtractionHints);
     }
+
+    /**
+     * Walk the recorded turn for `skill` tool.call/tool.done pairs and capture the
+     * loaded skill markdown. Returned as [{skillName, content}], one entry per skill
+     * loaded during the turn. Output is truncated per skill to stay inside the LLM's
+     * context window.
+     */
+    private List<Map<String, Object>> extractSkillContexts(List<RuntimeEvent> events) {
+        List<Map<String, Object>> contexts = new ArrayList<>();
+        Map<String, String> nameByCallId = new LinkedHashMap<>();
+        for (RuntimeEvent event : events) {
+            if (event == null || event.getEventType() == null) continue;
+            String type = event.getEventType().toLowerCase(Locale.ROOT);
+            Map<String, Object> payload = readMap(event.getPayload());
+            String toolName = stringOrNull(payload.get("toolName"));
+            if (toolName == null || !"skill".equalsIgnoreCase(toolName)) continue;
+            String callId = stringOrNull(payload.get("callId"));
+            if (callId == null) continue;
+            if ("tool.call".equals(type)) {
+                Object input = parseFlexible(payload.get("input"));
+                String skillName = "";
+                if (input instanceof Map<?, ?> m) {
+                    Object n = m.get("name");
+                    if (n != null) skillName = String.valueOf(n);
+                }
+                nameByCallId.put(callId, skillName);
+            } else if ("tool.done".equals(type)) {
+                String status = stringOrNull(payload.get("status"));
+                if ("error".equalsIgnoreCase(status) || "denied".equalsIgnoreCase(status)) continue;
+                Object output = payload.get("output");
+                if (output == null) continue;
+                String content = output instanceof String s ? s : output.toString();
+                if (content.length() > MAX_SKILL_CONTENT_CHARS) {
+                    content = content.substring(0, MAX_SKILL_CONTENT_CHARS) + "…[truncated]";
+                }
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("skillName", nameByCallId.getOrDefault(callId, ""));
+                entry.put("content", content);
+                contexts.add(entry);
+            }
+        }
+        return contexts;
+    }
+
+    private static final int MAX_SKILL_CONTENT_CHARS = 8000;
 
     private List<RecordedToolCall> pairCallsAndResults(List<RuntimeEvent> events) {
         List<RecordedToolCall> calls = new ArrayList<>();
@@ -255,9 +325,28 @@ public class ToolChainAuthoringService {
 
     private static final String SYSTEM_PROMPT = """
             You design a reusable workflow ("toolchain") from one recorded execution.
-            You will receive: the user's original prompt and an ordered list of nodes, each
-            either a single tool call or an iterator group (same tool called multiple times in
-            a row, one call per item).
+            You will receive: the user's original prompt, an ordered list of nodes (each either
+            a single tool call or an iterator group), and OPTIONALLY the markdown content of
+            any skills the recorded turn loaded.
+
+            If the input includes a `correctiveFeedback` field, your previous attempt at this
+            chain failed validation. Each failed mapping is listed with expected vs. resolved
+            value. Fix EVERY listed failure in your new output — do not regress on the rest.
+
+            HIGHEST-PRIORITY INPUT: skillContexts
+            If the input includes a `skillContexts` array, that markdown is the authoritative
+            rules sheet for this workflow. It contains lookup tables, decision logic, address
+            filtering rules, and field-mapping rules that are NOT derivable from JSON Schema or
+            sample I/O alone. Mine these rules and translate them into JSONata expressions for
+            argMappings. Examples of what skill markdown typically encodes:
+              - "IDEL → ID" lookups: produce a chained ternary or a $lookup() call
+              - "Filter Lines where ServiceCode in [list] AND ScheduledDate is not null":
+                fold every condition into the JSONata predicate
+              - "Use IsCustomerAddress=true": include this filter in every address lookup
+              - Decision tables with N>2 cases (e.g. journey types): write a chained ternary
+                that covers EVERY case the markdown lists, or set policy:"llm_assisted" with
+                the table content as a hint
+            When skill rules exist, your inferred mappings MUST match them exactly.
 
             CRITICAL: You must declare the chain's typed input parameters. The chat layer will
             run a separate small LLM call to extract these params from a user's message before
@@ -312,6 +401,43 @@ public class ToolChainAuthoringService {
                 $.tool_<N>.output.<key>       — the response from step N
             - Prefer $.chainInput.<paramName> over any other source for top-level inputs.
               Example: ORD_ID for Get_OrderID -> { "expr": "$.chainInput.orderId", "policy": "strict" }
+
+            JSONata gotchas you MUST account for (these cause silent runtime failures):
+            1) Predicates return arrays, NOT scalars.
+               WRONG: `$.tool_1.output.Lines[ServiceCode='WRT'].Addresses[IsCustomerAddress=true].PostalCode`
+                      — this returns ["89011"] (an array), and a tool expecting `zip: string` rejects it.
+               RIGHT: `$.tool_1.output.Lines[ServiceCode='WRT'][0].Addresses[IsCustomerAddress=true][0].PostalCode`
+                      — uses `[0]` after each predicate to get the scalar.
+               When the schema for an arg is type:string|integer|number|boolean, ALWAYS wrap
+               every predicate-walk with `[0]` (or use `$first(...)`).
+
+            2) "First match" needs to be intentional.
+               If the recorded turn shows the tool was called with the customer's zip (89011) and
+               not the storage center's zip (89030), the JSONata MUST filter to the customer
+               address, not just take Addresses[0]. Look at the recorded input to identify which
+               specific predicate (IsCustomerAddress=true, AddressType='Origination', etc.)
+               narrows to the right value.
+
+            3) Some PODS-style data has a canonical code in ItemCode and a sequence-friendly
+               variant in ServiceCode. For an "IDEL" leg, the row has ItemCode='IDEL' and
+               ServiceCode='NEW'. A filter `Lines[ServiceCode='IDEL']` matches ZERO rows.
+               WRONG: `Lines[ServiceCode in ['IDEL','WRT','WTW','RDL','FPU']]`
+               RIGHT: `Lines[(ServiceCode in ['IDEL','WRT','WTW','RDL','FPU']) or (ItemCode in ['IDEL','WRT','WTW','RDL','FPU'])]`
+               Only use this dual-filter pattern when you've inspected the recorded data and
+               confirmed the canonical code lives in ItemCode for some rows.
+
+            4) For iterator `items`: ALWAYS exclude rows where required-by-the-tool fields are null.
+               The tool's request schema lists required fields; for each one whose source field
+               can be null in the data, add an `X != null` clause to the predicate.
+               Example for ContainerAvailability (requires referenceDate):
+                 `Lines[(ServiceCode in [...]) and ScheduledDate != null]`
+
+            5) For decision trees with N>2 outcomes (e.g. journeyType with 11 cases from a
+               decision-table-style rule sheet), do NOT collapse to a binary ternary. Either:
+               (a) write a chained ternary that covers EVERY documented case, or
+               (b) set policy:"llm_assisted" and put the rule sheet text in a comment-style
+                   "hint" key so the runtime LLM has the rules at fallback time.
+               Never silently drop documented cases — that produces wrong-but-plausible output.
             - Use JSONata expressions starting with "$". For static literals, use a literal expression
               like "'WEB'" (quoted string) or "1" (number) or "false".
             - When a value can be derived deterministically from prior outputs/inputs, set

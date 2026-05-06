@@ -162,11 +162,20 @@ public class ChainParameterExtractor {
 
             Rules:
             - Match the schema's property names and types exactly (string/integer/number/boolean).
+            - Each property may carry a "description" field — read it carefully. It tells you
+              what the property represents and what kind of phrase in the message to look for.
+              Example: property "orderId" with description "the order identity number to validate"
+              means scan the message for an order ID number, even if the user phrases it as
+              "validate order 5038081" or "check 5038081" or "is order #5038081 ok?".
+            - Read the optional "hints" field if present — it often contains concrete examples
+              of how a likely user phrase maps to the param object.
             - Fill EVERY required property. If a required value cannot be determined from the
               user message, return null for that property — the caller will detect this and
               fall back to a different code path.
             - Do NOT invent values. Only extract what's in the message.
             - Do NOT include a "message" key unless the schema explicitly asks for one.
+            - Coerce numeric strings appropriately: if the schema says integer/number and the
+              message has digits, return them as the right JSON type, not as a string.
             - No explanation, no commentary, only the JSON object.
             """;
 
