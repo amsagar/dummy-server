@@ -1,14 +1,18 @@
 spring:
   application:
     name: pods-ai-agent
+  mvc:
+    async:
+      # Do not auto-timeout streaming chat responses while model is still generating.
+      request-timeout: -1
   autoconfigure:
     exclude:
       - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
       - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
   datasource:
-    url: jdbc:postgresql://ep-little-bird-apd16p3k-pooler.c-7.us-east-1.aws.neon.tech/pods_ai_agent
-    username: neondb_owner
-    password: npg_u8zSPQ2TtYpw
+    url: jdbc:postgresql://psql-server-eus-ivoyant-global-spoke-nprd.postgres.database.azure.com:5432/pods_ai
+    username: psqladminuser
+    password: pU9_hvM2XRyDHTVRdeAd
     driver-class-name: org.postgresql.Driver
   ai:
     openai:
@@ -28,7 +32,7 @@ pods:
   encryption:
     key: "d13b66074da5bb8e7db8a52c4a968e813a8407fee56d5549f932e4c1e80e0355"
   models:
-    allowed-providers: openai, azure, azure_openai, anthropic, google-vertex, ollama
+    allowed-providers: openai, azure, azure_openai, azure_claude, anthropic, google-vertex, ollama
   runtime:
     enable-anthropic-thinking: true
     base-only-default-tool-injection-enabled: true
@@ -45,6 +49,7 @@ pods:
     skill-shortlist-fallback-to-catalog-on-miss: true
     quality-expansion-max-retries: 1
     max-tool-callbacks-per-turn: 120
+    tool-output-vfs-spill-threshold-chars: 16384
     max-output-tokens: 8192
     summary-token-threshold: 6000
     auto-routing-low-threshold: 400
