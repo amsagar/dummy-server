@@ -202,6 +202,68 @@ public class ToolChainService {
         return toolChainRepository.update(chain);
     }
 
+    /**
+     * Self-heal entry point: persist a learned JSONata expression for a single argument on a
+     * specific node within an existing version. Idempotent — last-write-wins under concurrent
+     * runs. Returns true when the graph was actually updated.
+     *
+     * The change is purely additive (it strengthens a previously llm_assisted expression with a
+     * verified deterministic one), so we mutate graph_json in place without bumping the version
+     * or changing approval state.
+     */
+    public boolean persistLearnedExpression(String versionId,
+                                            String nodeId,
+                                            String argName,
+                                            String learnedExpr) {
+        if (versionId == null || nodeId == null || argName == null || learnedExpr == null) return false;
+        if (learnedExpr.isBlank()) return false;
+        Optional<ToolChainVersion> versionOpt = toolChainVersionRepository.findById(versionId);
+        if (versionOpt.isEmpty()) return false;
+        ToolChainVersion version = versionOpt.get();
+        try {
+            Map<String, Object> graph = objectMapper.readValue(version.getGraphJson(), Map.class);
+            if (!applyLearnedExpressionToGraph(graph, nodeId, argName, learnedExpr)) return false;
+            String updated = objectMapper.writeValueAsString(graph);
+            toolChainVersionRepository.updateGraphJson(versionId, updated);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean applyLearnedExpressionToGraph(Map<String, Object> graph,
+                                                  String nodeId,
+                                                  String argName,
+                                                  String learnedExpr) {
+        Object nodesObj = graph.get("nodes");
+        if (!(nodesObj instanceof List<?> nodes)) return false;
+        for (Object nodeObj : nodes) {
+            if (!(nodeObj instanceof Map<?, ?> node)) continue;
+            if (!nodeId.equals(String.valueOf(node.get("id")))) continue;
+            Object configObj = node.get("config");
+            if (!(configObj instanceof Map<?, ?> config)) return false;
+            Object mappingsObj = config.get("argMappings");
+            if (!(mappingsObj instanceof Map<?, ?> mappings)) return false;
+            Object existing = mappings.get(argName);
+            Map<String, Object> nextMapping = new LinkedHashMap<>();
+            if (existing instanceof Map<?, ?> em) {
+                em.forEach((k, v) -> nextMapping.put(String.valueOf(k), v));
+            } else if (existing instanceof String s && !s.isBlank()) {
+                nextMapping.put("expr", s);
+                nextMapping.put("policy", "strict");
+            }
+            nextMapping.put("expr", learnedExpr);
+            // Once we've verified a deterministic expression, downgrade policy to strict so the
+            // runtime stops invoking the LLM for this arg on subsequent runs.
+            nextMapping.put("policy", "strict");
+            nextMapping.put("learnedAt", System.currentTimeMillis());
+            ((Map<String, Object>) mappings).put(argName, nextMapping);
+            return true;
+        }
+        return false;
+    }
+
     public Optional<ToolChain> findBySignatures(String intentSignature, String structureSignature) {
         if (intentSignature == null || intentSignature.isBlank() || structureSignature == null || structureSignature.isBlank()) {
             return Optional.empty();

@@ -8,6 +8,7 @@ import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
 import com.pods.agent.service.SecurityContextService;
 import com.pods.agent.service.ToolChainConfigChatService;
+import com.pods.agent.service.ToolChainMappingEditorService;
 import com.pods.agent.service.ToolChainRuntimeService;
 import com.pods.agent.service.ToolChainService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -26,6 +27,7 @@ public class ToolChainController {
     private final ToolChainService toolChainService;
     private final ToolChainRuntimeService toolChainRuntimeService;
     private final ToolChainConfigChatService toolChainConfigChatService;
+    private final ToolChainMappingEditorService toolChainMappingEditorService;
     private final ToolChainRunRepository toolChainRunRepository;
     private final ToolChainRunStepRepository toolChainRunStepRepository;
     private final SecurityContextService securityContextService;
@@ -33,12 +35,14 @@ public class ToolChainController {
     public ToolChainController(ToolChainService toolChainService,
                                ToolChainRuntimeService toolChainRuntimeService,
                                ToolChainConfigChatService toolChainConfigChatService,
+                               ToolChainMappingEditorService toolChainMappingEditorService,
                                ToolChainRunRepository toolChainRunRepository,
                                ToolChainRunStepRepository toolChainRunStepRepository,
                                SecurityContextService securityContextService) {
         this.toolChainService = toolChainService;
         this.toolChainRuntimeService = toolChainRuntimeService;
         this.toolChainConfigChatService = toolChainConfigChatService;
+        this.toolChainMappingEditorService = toolChainMappingEditorService;
         this.toolChainRunRepository = toolChainRunRepository;
         this.toolChainRunStepRepository = toolChainRunStepRepository;
         this.securityContextService = securityContextService;
@@ -360,6 +364,27 @@ public class ToolChainController {
         } catch (IllegalArgumentException e) {
             return ResponseEntityFactory.badRequest(e.getMessage());
         }
+    }
+
+    @PostMapping("/toolchains/{id}/mappings/test")
+    @Operation(summary = "Evaluate a JSONata expression against this chain's recorded turn")
+    public ResponseEntity<?> testMapping(@PathVariable String id,
+                                         @RequestBody Map<String, Object> body) {
+        if (body == null || !body.containsKey("expr")) {
+            return ResponseEntityFactory.badRequest("Body must include 'expr'");
+        }
+        return ResponseEntity.ok(toolChainMappingEditorService.testMapping(id, body.get("expr")));
+    }
+
+    @PatchMapping("/toolchains/{id}/mappings/{nodeId}/{argName}")
+    @Operation(summary = "Update a single argMapping on a node within the chain's current version")
+    public ResponseEntity<?> updateMapping(@PathVariable String id,
+                                           @PathVariable String nodeId,
+                                           @PathVariable String argName,
+                                           @RequestBody Map<String, Object> mapping) {
+        boolean ok = toolChainMappingEditorService.updateMapping(id, nodeId, argName, mapping);
+        if (!ok) return ResponseEntityFactory.badRequest("Mapping not updated. Verify nodeId and argName exist on the chain's current version.");
+        return ResponseEntity.ok(Map.of("ok", true));
     }
 
     @GetMapping("/toolchains/{id}/runs")

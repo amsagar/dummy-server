@@ -173,6 +173,11 @@ export const api = {
     configSessionLayout: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { headers: getHeaders() }).then(handleResponse),
     saveConfigSessionLayout: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     deleteConfigSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
+    testMapping: (id: string, expr: any) =>
+      fetch(`${BASE_URL}/toolchains/${id}/mappings/test`, { method: 'POST', headers: getHeaders(), body: JSON.stringify({ expr }) }).then(handleResponse),
+    updateMapping: (id: string, nodeId: string, argName: string, mapping: any) =>
+      fetch(`${BASE_URL}/toolchains/${id}/mappings/${encodeURIComponent(nodeId)}/${encodeURIComponent(argName)}`,
+        { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(mapping) }).then(handleResponse),
   },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),

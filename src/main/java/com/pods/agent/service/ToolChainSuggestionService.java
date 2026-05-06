@@ -1,6 +1,7 @@
 package com.pods.agent.service;
 
 import com.pods.agent.api.dto.ToolChainDtos;
+import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
 import com.pods.agent.domain.ToolChain;
 import com.pods.agent.repository.RuntimeEventRepository;
@@ -25,13 +26,16 @@ public class ToolChainSuggestionService {
 
     private final RuntimeEventRepository runtimeEventRepository;
     private final ToolChainService toolChainService;
+    private final ToolChainAuthoringService authoringService;
     private final ObjectMapper objectMapper;
 
     public ToolChainSuggestionService(RuntimeEventRepository runtimeEventRepository,
                                       ToolChainService toolChainService,
+                                      ToolChainAuthoringService authoringService,
                                       ObjectMapper objectMapper) {
         this.runtimeEventRepository = runtimeEventRepository;
         this.toolChainService = toolChainService;
+        this.authoringService = authoringService;
         this.objectMapper = objectMapper;
     }
 
@@ -39,6 +43,14 @@ public class ToolChainSuggestionService {
                                                         String turnId,
                                                         String userPrompt,
                                                         String createdBy) {
+        return createSuggestionFromTurn(sessionId, turnId, userPrompt, createdBy, null);
+    }
+
+    public Optional<ToolChain> createSuggestionFromTurn(String sessionId,
+                                                        String turnId,
+                                                        String userPrompt,
+                                                        String createdBy,
+                                                        ModelRef modelRef) {
         if (turnId == null || turnId.isBlank()) return Optional.empty();
         List<RuntimeEvent> events = runtimeEventRepository.findByTurnId(turnId);
         if (events == null || events.isEmpty()) return Optional.empty();
@@ -48,28 +60,51 @@ public class ToolChainSuggestionService {
             return Optional.empty();
         }
 
+        // LLM authoring is best-effort. On any failure, fall back to deterministic name/description
+        // and the literal-key argMappings produced by inferMappings(). This keeps suggestions
+        // working even when the model is unreachable.
+        Optional<ToolChainAuthoringService.AuthoringResult> authored =
+                authoringService.author(userPrompt, events, modelRef);
+
+        Map<String, Object> graph = buildGraph(userPrompt, calls);
+        if (authored.isPresent()) {
+            applyAuthoredMappings(graph, authored.get().nodeMappings());
+        }
+        String graphJson = toJson(graph);
+
         String intentSignature = hashHex(buildIntentSignatureSeed(userPrompt, calls));
-        String graphJson = toJson(buildGraph(userPrompt, calls));
         String structureSignature = hashHex(graphJson);
         Optional<ToolChain> existing = toolChainService.findBySignatures(intentSignature, structureSignature);
         if (existing.isPresent()) return existing;
 
         String signatureSuffix = structureSignature.substring(0, Math.min(6, structureSignature.length()));
-        String chainName = buildName(calls, signatureSuffix);
+        String chainName = authored.filter(ToolChainAuthoringService.AuthoringResult::hasName)
+                .map(ToolChainAuthoringService.AuthoringResult::name)
+                .orElseGet(() -> buildName(calls, signatureSuffix));
+        String description = authored.filter(ToolChainAuthoringService.AuthoringResult::hasDescription)
+                .map(ToolChainAuthoringService.AuthoringResult::description)
+                .orElse("System suggested from repeated tool-call pattern");
+        boolean authoredByLlm = authored.isPresent();
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("source", "runtime_suggestion");
+        metadata.put("mappingConfidence", authoredByLlm ? "ai_authored" : "inferred");
+        metadata.put("requiresMappingReview", true);
+        metadata.put("authoredByLlm", authoredByLlm);
+        metadata.put("sessionId", sessionId == null ? "" : sessionId);
+        metadata.put("turnId", turnId);
+
         ToolChain chain = toolChainService.createSystemSuggested(
                 chainName,
-                "System suggested from repeated tool-call pattern",
+                description,
                 createdBy,
                 intentSignature,
                 structureSignature,
-                Map.of(
-                        "source", "runtime_suggestion",
-                        "mappingConfidence", "inferred",
-                        "requiresMappingReview", true,
-                        "sessionId", sessionId == null ? "" : sessionId,
-                        "turnId", turnId
-                )
+                metadata
         );
+
+        List<String> intents = authored.map(ToolChainAuthoringService.AuthoringResult::intents)
+                .filter(list -> list != null && !list.isEmpty())
+                .orElseGet(() -> List.of(normalizeIntentText(userPrompt, calls)));
 
         ToolChainDtos.ToolChainVersionRequest req = new ToolChainDtos.ToolChainVersionRequest();
         req.setGraphJson(graphJson);
@@ -77,12 +112,30 @@ public class ToolChainSuggestionService {
         req.setOutputSchema("{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"data\":{\"type\":\"object\"}}}");
         req.setResponseMode("hybrid");
         req.setSynthesisPrompt("Summarize the outputs from each tool step and produce an actionable final response.");
-        req.setIntents(List.of(normalizeIntentText(userPrompt, calls)));
+        req.setIntents(intents);
         req.setIntentSignature(intentSignature);
         req.setStructureSignature(structureSignature);
         req.setRagConfig(Map.of());
         toolChainService.createVersion(chain.getId(), req, createdBy);
         return Optional.of(chain);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyAuthoredMappings(Map<String, Object> graph,
+                                       Map<String, Map<String, Object>> nodeMappings) {
+        if (nodeMappings == null || nodeMappings.isEmpty()) return;
+        Object nodesObj = graph.get("nodes");
+        if (!(nodesObj instanceof List<?> list)) return;
+        for (Object nodeObj : list) {
+            if (!(nodeObj instanceof Map<?, ?> nodeMap)) continue;
+            String nodeId = String.valueOf(nodeMap.get("id"));
+            Map<String, Object> overrides = nodeMappings.get(nodeId);
+            if (overrides == null || overrides.isEmpty()) continue;
+            Object configObj = nodeMap.get("config");
+            if (!(configObj instanceof Map<?, ?> cfg)) continue;
+            ((Map<String, Object>) cfg).put("argMappings", overrides);
+            ((Map<String, Object>) cfg).put("mappingStatus", "ai_authored");
+        }
     }
 
     private List<ToolCallRow> extractToolCalls(List<RuntimeEvent> events) {

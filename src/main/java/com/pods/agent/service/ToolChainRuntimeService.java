@@ -54,6 +54,8 @@ public class ToolChainRuntimeService {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final DecisionTableService decisionTableService;
     private final ObjectMapper objectMapper;
+    private final ArgMappingResolver argMappingResolver;
+    private final LlmArgResolver llmArgResolver;
     private final ExecutorService runExecutor = Executors.newFixedThreadPool(6);
     private final ExecutorService branchExecutor = Executors.newFixedThreadPool(8);
     private final ConcurrentHashMap<String, CompletableFuture<ApprovalDecision>> pendingApprovals = new ConcurrentHashMap<>();
@@ -69,7 +71,9 @@ public class ToolChainRuntimeService {
                                    SkillRegistryService skillRegistryService,
                                    RuntimeTuningProperties runtimeTuningProperties,
                                    DecisionTableService decisionTableService,
-                                   ObjectMapper objectMapper) {
+                                   ObjectMapper objectMapper,
+                                   ArgMappingResolver argMappingResolver,
+                                   LlmArgResolver llmArgResolver) {
         this.toolChainService = toolChainService;
         this.toolRegistryService = toolRegistryService;
         this.toolExecutionService = toolExecutionService;
@@ -82,6 +86,8 @@ public class ToolChainRuntimeService {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.decisionTableService = decisionTableService;
         this.objectMapper = objectMapper;
+        this.argMappingResolver = argMappingResolver;
+        this.llmArgResolver = llmArgResolver;
     }
 
     public ToolChainRun execute(String toolChainId,
@@ -198,7 +204,17 @@ public class ToolChainRuntimeService {
         Map<String, NodeModel> nodes = graph.nodesById();
         Map<String, List<String>> outgoing = graph.outgoing();
         Map<String, Integer> indegree = graph.indegree();
+        // Resolve runtime model once per run so llm_assisted argMappings can fall back without
+        // rediscovering the model on every step. Stored on a mutable runOptions copy under an
+        // internal underscore key that never reaches tools.
+        // Build a mutable per-run options map without reassigning the parameter — the lambda
+        // below captures the variable used in this method, and Java requires effective finality.
+        Map<String, Object> runOptions = options == null ? new LinkedHashMap<>() : new LinkedHashMap<>(options);
+        ModelRef runtimeModelRef = resolveModelRefForSynthesis(runOptions, run.getToolChainId());
+        if (runtimeModelRef != null) runOptions.put("_runtime_modelRef", runtimeModelRef);
+        runOptions.put("_runtime_versionId", version.getId());
         Map<String, Object> context = new LinkedHashMap<>(input);
+        context.put("chainInput", new LinkedHashMap<>(input));
         Queue<String> ready = new ArrayDeque<>();
         indegree.forEach((k, v) -> {
             if (v == 0) ready.offer(k);
@@ -209,7 +225,7 @@ public class ToolChainRuntimeService {
             List<String> batch = new ArrayList<>();
             while (!ready.isEmpty()) batch.add(ready.poll());
             List<CompletableFuture<StepResult>> futures = batch.stream()
-                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender, effectiveSessionId, options), branchExecutor))
+                    .map(nodeId -> CompletableFuture.supplyAsync(() -> executeNode(runId, nodes.get(nodeId), context, sender, effectiveSessionId, runOptions), branchExecutor))
                     .toList();
             for (int i = 0; i < batch.size(); i++) {
                 String nodeId = batch.get(i);
@@ -232,7 +248,7 @@ public class ToolChainRuntimeService {
             }
         }
 
-        String output = finalizeResponse(run.getToolChainId(), version, context, runId, options, sender, effectiveSessionId);
+        String output = finalizeResponse(run.getToolChainId(), version, context, runId, runOptions, sender, effectiveSessionId);
         completeRun(runId, "success", Map.of("result", output, "context", context), null, effectiveSessionId);
         return runRepository.findById(runId).orElse(run);
     }
@@ -322,7 +338,7 @@ public class ToolChainRuntimeService {
                 case "wait" -> executeWait(node);
                 case "subchain" -> executeSubchain(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "iterator" -> executeIterator(node, context, runId, sender, effectiveSessionId, runOptions);
-                case "tool", "mcp_tool" -> executeToolNode(node, context);
+                case "tool", "mcp_tool" -> executeToolNode(node, context, runOptions);
                 case "decision_table" -> executeDecisionTableNode(node, context);
                 case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
                 case "skill" -> StepResult.failed("Skill nodes are no longer supported as graph steps; use synthesisPrompt to invoke skills in the final LLM stage.");
@@ -440,7 +456,7 @@ public class ToolChainRuntimeService {
         }
     }
 
-    private StepResult executeToolNode(NodeModel node, Map<String, Object> context) {
+    private StepResult executeToolNode(NodeModel node, Map<String, Object> context, Map<String, Object> runOptions) {
         String toolName = node.toolRef();
         if (toolName == null || toolName.isBlank()) {
             return StepResult.failed("Tool node is missing tool reference");
@@ -449,14 +465,82 @@ public class ToolChainRuntimeService {
         if (tool == null) {
             return StepResult.failed("Tool is not enabled: " + toolName);
         }
-        String payload = toJson(resolveNodeInput(node, context));
+        Map<String, Object> resolvedInput = resolveNodeInput(node, context);
+        // Fill in any args that are marked policy=llm_assisted but came back null from the
+        // deterministic JSONata path. Best-effort; missing values stay missing if the LLM
+        // is unavailable or the model can't determine a value.
+        Object modelRefObj = runOptions == null ? null : runOptions.get("_runtime_modelRef");
+        ModelRef modelRef = modelRefObj instanceof ModelRef m ? m : null;
+        Object versionIdObj = runOptions == null ? null : runOptions.get("_runtime_versionId");
+        String versionId = versionIdObj instanceof String s ? s : null;
+        if (modelRef != null) {
+            applyLlmAssistedArgs(node, context, resolvedInput, toolName, modelRef, versionId);
+        }
+        String payload = toJson(resolvedInput);
         ToolExecutionService.ExecutionResult result = toolExecutionService.execute(tool, payload);
         if (!result.success()) {
             return StepResult.failed(result.error());
         }
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("input", resolvedInput);
+        step.put("output", parseFlexibleBody(result.body()));
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put(node.id(), parseFlexibleBody(result.body()));
+        out.put(node.id(), step);
         return StepResult.success(out, null);
+    }
+
+    private void applyLlmAssistedArgs(NodeModel node,
+                                      Map<String, Object> context,
+                                      Map<String, Object> resolvedInput,
+                                      String toolName,
+                                      ModelRef modelRef,
+                                      String versionId) {
+        Map<String, Object> argMappings = node.configMap("argMappings");
+        if (argMappings == null || argMappings.isEmpty()) return;
+        ArgMappingResolver.ResolutionResult res = argMappingResolver.resolveAll(
+                argMappings, context, key -> resolvePath(context, key));
+        for (ArgMappingResolver.DeferredArg deferred : res.deferred()) {
+            String argName = deferred.argName();
+            if (resolvedInput.containsKey(argName)) continue;
+            Object hint = deferred.mapping() == null ? null : deferred.mapping().expr();
+            String hintExpr = hint instanceof String s ? s : null;
+            llmArgResolver.resolve(toolName, argName, context, modelRef, hintExpr).ifPresent(resolved -> {
+                if (resolved.value() != null) {
+                    resolvedInput.put(argName, resolved.value());
+                }
+                // Self-heal: if the LLM also proposed a JSONata expression and that expression,
+                // evaluated against the same context, produces the same value, persist it back
+                // to the version's graphJson so future runs are fully deterministic.
+                if (versionId != null && resolved.learnedExpr() != null && resolved.value() != null) {
+                    Object evaluated = argMappingResolver.evaluateJsonata(resolved.learnedExpr(), context);
+                    if (deepEquals(evaluated, resolved.value())) {
+                        try {
+                            boolean persisted = toolChainService.persistLearnedExpression(
+                                    versionId, node.id(), argName, resolved.learnedExpr());
+                            if (persisted) {
+                                log.info("[ToolChainRuntimeService] Self-healed mapping {}#{} arg='{}' expr='{}'",
+                                        versionId, node.id(), argName, resolved.learnedExpr());
+                            }
+                        } catch (Exception e) {
+                            log.warn("[ToolChainRuntimeService] Failed to persist learned expression for {}#{} arg='{}': {}",
+                                    versionId, node.id(), argName, e.getMessage());
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    private boolean deepEquals(Object a, Object b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+        try {
+            // Both go through Jackson 3 round-trip so number/string coercions converge
+            // (e.g. "5038081" vs 5038081 from JSONata become equal once normalized).
+            return objectMapper.writeValueAsString(a).equals(objectMapper.writeValueAsString(b));
+        } catch (Exception e) {
+            return a.equals(b);
+        }
     }
 
     private StepResult executeDecisionTableNode(NodeModel node, Map<String, Object> context) {
@@ -957,17 +1041,11 @@ public class ToolChainRuntimeService {
             }
         }
         Map<String, Object> argMappings = node.configMap("argMappings");
-        for (Map.Entry<String, Object> entry : argMappings.entrySet()) {
-            String targetArg = entry.getKey();
-            if (targetArg == null || targetArg.isBlank()) continue;
-            Object source = entry.getValue();
-            Object value = source instanceof String
-                    ? resolvePath(context, String.valueOf(source))
-                    : source;
-            if (value != null) {
-                payload.put(targetArg, value);
-            }
-        }
+        Map<String, Object> resolved = argMappingResolver.resolve(
+                argMappings,
+                context,
+                key -> resolvePath(context, key));
+        payload.putAll(resolved);
         return payload;
     }
 
@@ -978,17 +1056,35 @@ public class ToolChainRuntimeService {
         Object current = context;
         for (String part : parts) {
             if (!(current instanceof Map<?, ?> map)) return null;
-            Object next = null;
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (entry.getKey() != null && String.valueOf(entry.getKey()).equalsIgnoreCase(part)) {
-                    next = entry.getValue();
-                    break;
+            Object next = lookupKey(map, part);
+            // Back-compat: legacy mappings reference "tool_N.field" while the new shape
+            // stores tool nodes as {input, output}. If a direct match fails and the map
+            // looks like a step record, try resolving inside its output before giving up.
+            if (next == null && isStepRecord(map) && !"input".equalsIgnoreCase(part) && !"output".equalsIgnoreCase(part)) {
+                Object output = lookupKey(map, "output");
+                if (output instanceof Map<?, ?> outMap) {
+                    next = lookupKey(outMap, part);
                 }
             }
             if (next == null) return null;
             current = next;
         }
         return current;
+    }
+
+    private Object lookupKey(Map<?, ?> map, String part) {
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() != null && String.valueOf(entry.getKey()).equalsIgnoreCase(part)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private boolean isStepRecord(Map<?, ?> map) {
+        return map.size() == 2
+                && (map.containsKey("input") || map.containsKey("Input"))
+                && (map.containsKey("output") || map.containsKey("Output"));
     }
 
     private void completeRun(String runId, String status, Map<String, Object> output, String error, String effectiveSessionId) {

@@ -212,7 +212,8 @@ public class ChatService {
 
                 // Build system-suggested toolchains from successful tool-call patterns.
                 try {
-                    toolChainSuggestionService.createSuggestionFromTurn(sessionId, turnId, request.getMessage(), userId);
+                    toolChainSuggestionService.createSuggestionFromTurn(
+                            sessionId, turnId, request.getMessage(), userId, state.getModel());
                 } catch (Exception ignored) {
                 }
 

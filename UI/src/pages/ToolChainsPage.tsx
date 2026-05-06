@@ -11,6 +11,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import ToolChainRunInputDialog from "@/components/toolchain/ToolChainRunInputDialog";
+import { MappingEditorDialog } from "@/components/toolchain/MappingEditorDialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { modelRefKey, parseModelRefKey } from "@/types";
 
@@ -48,6 +49,8 @@ export default function ToolChainsPage() {
   const [runtimeProvider, setRuntimeProvider] = useState("");
   const [runtimeModel, setRuntimeModel] = useState("");
   const [activeTab, setActiveTab] = useState<"user" | "system">("user");
+  const [mappingEditorOpen, setMappingEditorOpen] = useState(false);
+  const [mappingEditorChain, setMappingEditorChain] = useState<{ id: string; name: string } | null>(null);
 
   const { data: userToolchains = [] } = useQuery<any[]>({
     queryKey: ["toolchains", "user"],
@@ -221,7 +224,36 @@ export default function ToolChainsPage() {
               className="cursor-pointer"
               onClick={() => navigate(`/toolchains/${row.id}/designer`)}
             >
-              <TableCell className="font-medium">{row.name}</TableCell>
+              <TableCell className="font-medium">
+                <div className="flex items-center gap-2">
+                  <span>{row.name}</span>
+                  {(() => {
+                    const meta = parseMetadata(row.metadataJson);
+                    if (!meta.requiresMappingReview) return null;
+                    const aiAuthored = String(meta.mappingConfidence || "").toLowerCase() === "ai_authored";
+                    return (
+                      <button
+                        type="button"
+                        title={aiAuthored
+                          ? "AI-authored argument mappings — click to review and test"
+                          : "Inferred argument mappings — click to review and test"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setMappingEditorChain({ id: row.id, name: row.name });
+                          setMappingEditorOpen(true);
+                        }}
+                        className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium transition-colors hover:opacity-80 ${
+                          aiAuthored
+                            ? "border-violet-200 bg-violet-50 text-violet-700"
+                            : "border-amber-200 bg-amber-50 text-amber-700"
+                        }`}
+                      >
+                        Review mappings
+                      </button>
+                    );
+                  })()}
+                </div>
+              </TableCell>
               <TableCell>
                 {activeTab === "system" ? (
                   <span
@@ -389,6 +421,16 @@ export default function ToolChainsPage() {
             navigate(`/toolchains/runs/${result.runId}`);
           }
         }}
+      />
+
+      <MappingEditorDialog
+        open={mappingEditorOpen}
+        onOpenChange={(value) => {
+          setMappingEditorOpen(value);
+          if (!value) setMappingEditorChain(null);
+        }}
+        toolChainId={mappingEditorChain?.id || null}
+        toolChainName={mappingEditorChain?.name}
       />
 
       <Dialog open={runtimeDialogOpen} onOpenChange={setRuntimeDialogOpen}>

@@ -103,6 +103,19 @@ public class ToolChainVersionRepository {
                 .addValue("ragConfigJson", version.getRagConfigJson()));
     }
 
+    /**
+     * Replace the graph_json column on a single version row in place. Used by the runtime's
+     * self-heal path to persist learned JSONata expressions for previously-llm_assisted args.
+     * Allowed on published rows: the change is purely additive (it strengthens an expression
+     * that was already present as a hint), so no version bump is required.
+     */
+    public void updateGraphJson(String versionId, String graphJson) {
+        namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.UPDATE_GRAPH_JSON"),
+                new MapSqlParameterSource()
+                        .addValue("id", versionId)
+                        .addValue("graphJson", graphJson));
+    }
+
     public void publish(String versionId, String toolChainId) {
         namedJdbc.update(sql.getQuery("TOOL_CHAIN_VERSION.UNPUBLISH_CHAIN"),
                 new MapSqlParameterSource().addValue("toolChainId", toolChainId));
