@@ -171,6 +171,11 @@ export default function ChatPage() {
           );
         }
       }
+      const eventInstanceId =
+        eventPayload?.callId ||
+        eventPayload?.taskId ||
+        eventPayload?.requestId ||
+        undefined;
       const last = prev[prev.length - 1];
       const duplicateInWindow = prev
         .slice(-20)
@@ -179,9 +184,16 @@ export default function ChatPage() {
             m.type === "system" &&
             m.eventType === eventType &&
             m.content === content &&
-            (!requestId || m.requestId === requestId)
+            (!requestId || m.requestId === requestId) &&
+            (!eventInstanceId || m.eventPayload?.callId === eventInstanceId || m.eventPayload?.taskId === eventInstanceId || m.eventPayload?.requestId === eventInstanceId)
         );
-      if ((last?.type === "system" && last.eventType === eventType && last.content === content && last.requestId === requestId) || duplicateInWindow) {
+      const isExactLast =
+        last?.type === "system" &&
+        last.eventType === eventType &&
+        last.content === content &&
+        last.requestId === requestId &&
+        (!eventInstanceId || last.eventPayload?.callId === eventInstanceId || last.eventPayload?.taskId === eventInstanceId || last.eventPayload?.requestId === eventInstanceId);
+      if (isExactLast || duplicateInWindow) {
         return prev;
       }
       return [...prev, { id: genId(), type: "system", eventType, content, requestId, eventPayload }];

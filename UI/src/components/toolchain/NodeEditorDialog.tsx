@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,8 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   node: GraphNode | null;
+  allNodes?: GraphNode[];
+  onSave?: (nextNode: GraphNode) => void;
 };
 
 function FieldRow({
@@ -49,13 +51,60 @@ function FieldRow({
   );
 }
 
-export default function NodeEditorDialog({ open, onOpenChange, node }: Props) {
+export default function NodeEditorDialog({ open, onOpenChange, node, allNodes = [], onSave }: Props) {
   const config = node?.config || {};
+  const [label, setLabel] = useState("");
+  const [draftConfig, setDraftConfig] = useState<Record<string, any>>({});
+  const [validationError, setValidationError] = useState("");
+
+  useEffect(() => {
+    setLabel(String(node?.label || ""));
+    setDraftConfig({ ...(node?.config || {}) });
+    setValidationError("");
+  }, [node?.id, node?.label, node?.config]);
+
   const argMappings = useMemo(() => {
-    const raw = config.argMappings;
+    const raw = draftConfig.argMappings;
     if (!raw || typeof raw !== "object") return [] as Array<{ target: string; source: string }>;
     return Object.entries(raw).map(([target, source]) => ({ target, source: String(source ?? "") }));
-  }, [config]);
+  }, [draftConfig.argMappings]);
+  const branchTargets = useMemo(
+    () => allNodes.filter((candidate) => candidate.id !== node?.id).map((candidate) => candidate.id),
+    [allNodes, node?.id]
+  );
+
+  const save = () => {
+    if (!node) return;
+    const type = String(node.type || "").toLowerCase();
+    if (type === "decision") {
+      if (!String(draftConfig.sourceKey || "").trim()) return setValidationError("Decision sourceKey is required.");
+      if (!String(draftConfig.trueBranch || "").trim()) return setValidationError("Decision trueBranch is required.");
+      if (!String(draftConfig.falseBranch || "").trim()) return setValidationError("Decision falseBranch is required.");
+    }
+    if (type === "switch") {
+      const cases = Array.isArray(draftConfig.cases) ? draftConfig.cases : [];
+      if (!String(draftConfig.sourceKey || "").trim()) return setValidationError("Switch sourceKey is required.");
+      if (cases.length === 0) return setValidationError("Switch must define at least one case.");
+    }
+    if (type === "iterator") {
+      const hasTool = !!String(draftConfig.toolName || "").trim();
+      const hasSubchain = !!String(draftConfig.subChainId || "").trim();
+      if (!hasTool && !hasSubchain) return setValidationError("Iterator requires toolName or subChainId.");
+      if (hasTool && !draftConfig?.argMappings?.items) {
+        return setValidationError("Iterator inline tool mode requires argMappings.items.");
+      }
+    }
+    if (type === "subchain" && !String(draftConfig.chainId || "").trim()) {
+      return setValidationError("Subchain chainId is required.");
+    }
+    setValidationError("");
+    onSave?.({
+      ...node,
+      label: label.trim() || node.label,
+      config: { ...draftConfig },
+    });
+    onOpenChange(false);
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -64,10 +113,7 @@ export default function NodeEditorDialog({ open, onOpenChange, node }: Props) {
           <DialogTitle className="text-sm font-semibold text-[#123262]">
             Edit node {node ? <span className="font-mono">{node.id}</span> : ""}
           </DialogTitle>
-          <DialogDescription className="text-[11px] text-slate-500">
-            Read-only preview. Direct node editing lands in the next iteration; for now ask the AI to refine the
-            graph via the chat panel.
-          </DialogDescription>
+          <DialogDescription className="text-[11px] text-slate-500">Capability-aware node configuration.</DialogDescription>
         </DialogHeader>
 
         {node ? (
@@ -79,19 +125,34 @@ export default function NodeEditorDialog({ open, onOpenChange, node }: Props) {
               <Input value={node.type} disabled className="h-8 font-mono text-xs" />
             </FieldRow>
             <FieldRow label="Label" hint="Display name shown on the flow board.">
-              <Input value={node.label || ""} disabled className="h-8 text-xs sm:col-span-2" />
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} className="h-8 text-xs sm:col-span-2" />
             </FieldRow>
 
             {(node.type === "tool" || node.type === "mcp_tool") && (
               <>
                 <FieldRow label="Tool name" hint="Catalog entry the runtime will invoke.">
-                  <Input value={String(config.toolName || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    value={String(draftConfig.toolName || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, toolName: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
                 <FieldRow
                   label="Input key"
                   hint="If set, runtime takes context[<inputKey>] (dotted path) as the base payload."
                 >
-                  <Input value={String(config.inputKey || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    value={String(draftConfig.inputKey || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, inputKey: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Approval mode" hint="required / required_if_sensitive / empty">
+                  <Input
+                    value={String(draftConfig.approvalMode || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, approvalMode: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
               </>
             )}
@@ -99,16 +160,163 @@ export default function NodeEditorDialog({ open, onOpenChange, node }: Props) {
             {node.type === "decision" && (
               <>
                 <FieldRow label="Source key" hint="Context path to read for the boolean comparison.">
-                  <Input value={String(config.sourceKey || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    value={String(draftConfig.sourceKey || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, sourceKey: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
                 <FieldRow label="Equals" hint="Value the source must equal to take the true branch.">
-                  <Input value={String(config.equals || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    value={String(draftConfig.equals || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, equals: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
                 <FieldRow label="True branch" hint="Node id taken when the condition is true.">
-                  <Input value={String(config.trueBranch || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    list={`branch-targets-${node.id}`}
+                    value={String(draftConfig.trueBranch || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, trueBranch: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
                 <FieldRow label="False branch" hint="Node id taken when the condition is false.">
-                  <Input value={String(config.falseBranch || "")} disabled className="h-8 font-mono text-xs" />
+                  <Input
+                    list={`branch-targets-${node.id}`}
+                    value={String(draftConfig.falseBranch || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, falseBranch: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+              </>
+            )}
+            {node.type === "switch" && (
+              <>
+                <FieldRow label="Source key" hint="Context path used to match switch cases.">
+                  <Input
+                    value={String(draftConfig.sourceKey || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, sourceKey: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Default target" hint="Fallback branch node id.">
+                  <Input
+                    list={`branch-targets-${node.id}`}
+                    value={String(draftConfig.default || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, default: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <div className="sm:col-span-2 rounded border border-slate-200 p-2">
+                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Cases</p>
+                  {(Array.isArray(draftConfig.cases) ? draftConfig.cases : []).map((row: any, idx: number) => (
+                    <div key={`${idx}`} className="mb-2 grid grid-cols-[1fr_1fr_auto] gap-2">
+                      <Input
+                        value={String(row?.when || "")}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => {
+                            const cases = Array.isArray(prev.cases) ? [...prev.cases] : [];
+                            cases[idx] = { ...(cases[idx] || {}), when: e.target.value };
+                            return { ...prev, cases };
+                          })
+                        }
+                        placeholder="when"
+                        className="h-8 font-mono text-xs"
+                      />
+                      <Input
+                        list={`branch-targets-${node.id}`}
+                        value={String(row?.to || "")}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => {
+                            const cases = Array.isArray(prev.cases) ? [...prev.cases] : [];
+                            cases[idx] = { ...(cases[idx] || {}), to: e.target.value };
+                            return { ...prev, cases };
+                          })
+                        }
+                        placeholder="to node id"
+                        className="h-8 font-mono text-xs"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-8 px-2 text-xs"
+                        onClick={() =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            cases: (Array.isArray(prev.cases) ? prev.cases : []).filter((_: any, i: number) => i !== idx),
+                          }))
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    onClick={() =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        cases: [...(Array.isArray(prev.cases) ? prev.cases : []), { when: "", to: "" }],
+                      }))
+                    }
+                  >
+                    Add case
+                  </Button>
+                </div>
+              </>
+            )}
+            {node.type === "iterator" && (
+              <>
+                <FieldRow label="Alias (as)" hint="Iterator item variable alias.">
+                  <Input
+                    value={String(draftConfig.as || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, as: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Loop source (over)" hint="Path or expression producing loop items.">
+                  <Input
+                    value={String(draftConfig.over || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, over: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Tool name" hint="Inline loop tool mode (optional).">
+                  <Input
+                    value={String(draftConfig.toolName || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, toolName: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Subchain id" hint="Subchain loop mode (optional).">
+                  <Input
+                    value={String(draftConfig.subChainId || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, subChainId: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+              </>
+            )}
+            {node.type === "subchain" && (
+              <>
+                <FieldRow label="Chain id" hint="Target subchain id.">
+                  <Input
+                    value={String(draftConfig.chainId || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, chainId: e.target.value }))}
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Version" hint="Optional fixed version number.">
+                  <Input
+                    value={String(draftConfig.version || "")}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({ ...prev, version: e.target.value ? Number(e.target.value) : undefined }))
+                    }
+                    className="h-8 font-mono text-xs"
+                  />
                 </FieldRow>
               </>
             )}
@@ -146,20 +354,33 @@ export default function NodeEditorDialog({ open, onOpenChange, node }: Props) {
               <div className="sm:col-span-2">
                 <FieldRow label="Synthesis prompt" hint="System prompt for the synthesis LLM (Stage 2).">
                   <textarea
-                    value={String(config.prompt || "")}
-                    disabled
+                    value={String(draftConfig.prompt || "")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, prompt: e.target.value }))}
                     rows={8}
                     className="w-full rounded border border-slate-200 bg-slate-50 p-2 font-mono text-[11px] leading-snug text-slate-700"
                   />
                 </FieldRow>
               </div>
             )}
+            {validationError ? (
+              <div className="sm:col-span-2 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
+                {validationError}
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="text-xs text-slate-500">No node selected.</div>
         )}
+        <datalist id={`branch-targets-${node?.id || "node"}`}>
+          {branchTargets.map((target) => (
+            <option key={target} value={target} />
+          ))}
+        </datalist>
 
         <DialogFooter>
+          <Button size="sm" className="h-8 px-3 text-xs" onClick={save} disabled={!node}>
+            Save
+          </Button>
           <Button size="sm" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenChange(false)}>
             Close
           </Button>

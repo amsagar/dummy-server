@@ -358,6 +358,34 @@ CREATE INDEX IF NOT EXISTS idx_hitl_interactions_session_id ON agent.hitl_intera
 CREATE INDEX IF NOT EXISTS idx_hook_mappings_hook_point ON agent.hook_mappings (hook_point);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_id ON agent.runtime_traces (session_id);
 
+CREATE TABLE IF NOT EXISTS agent.system_toolchain_proposals (
+                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    session_id        TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
+    turn_id           TEXT NOT NULL,
+    user_id           TEXT,
+    status            TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'materialized', 'failed')),
+    reason            TEXT,
+    confidence        TEXT,
+    trace_path        TEXT,
+    durable_trace_json JSONB,
+    user_prompt       TEXT,
+    assistant_response TEXT,
+    model_provider_id TEXT,
+    model_id          TEXT,
+    decision_comment  TEXT,
+    decided_by        TEXT,
+    decided_at        BIGINT,
+    tool_chain_id     TEXT REFERENCES agent.tool_chains (id) ON DELETE SET NULL,
+    error_message     TEXT,
+    created_at        BIGINT NOT NULL,
+    updated_at        BIGINT NOT NULL,
+    UNIQUE (session_id, turn_id)
+    );
+ALTER TABLE agent.system_toolchain_proposals ADD COLUMN IF NOT EXISTS durable_trace_json JSONB;
+
+CREATE INDEX IF NOT EXISTS idx_system_toolchain_proposals_user_status
+    ON agent.system_toolchain_proposals (user_id, status, created_at DESC);
+
 -- ── Embedding model registrations + tool vector index ─────────────────────────
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS model_kind TEXT NOT NULL DEFAULT 'chat';
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;
@@ -538,6 +566,19 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_config_layouts (
     );
 
 CREATE INDEX IF NOT EXISTS idx_tool_chain_config_layouts_scope ON agent.tool_chain_config_layouts (tool_chain_id, session_id, user_id);
+
+CREATE TABLE IF NOT EXISTS agent.tool_chain_user_layouts (
+                                                             id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
+    user_id          TEXT NOT NULL,
+    positions_json   TEXT,
+    viewport_json    TEXT,
+    created_at       BIGINT NOT NULL,
+    updated_at       BIGINT NOT NULL,
+    UNIQUE (tool_chain_id, user_id)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_tool_chain_user_layouts_scope ON agent.tool_chain_user_layouts (tool_chain_id, user_id);
 
 CREATE TABLE IF NOT EXISTS agent.decision_tables (
                                                      id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

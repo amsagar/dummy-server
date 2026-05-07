@@ -77,7 +77,7 @@ public class ChatService {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final SessionWorkspaceService sessionWorkspaceService;
     private final WorkspaceSkillSyncService workspaceSkillSyncService;
-    private final ToolChainSuggestionService toolChainSuggestionService;
+    private final SystemToolChainAsyncService systemToolChainAsyncService;
     private final ObjectMapper objectMapper;
 
     public ChatService(AgentSessionManager sessionManager,
@@ -95,7 +95,7 @@ public class ChatService {
                        RuntimeTuningProperties runtimeTuningProperties,
                        SessionWorkspaceService sessionWorkspaceService,
                        WorkspaceSkillSyncService workspaceSkillSyncService,
-                       ToolChainSuggestionService toolChainSuggestionService,
+                       SystemToolChainAsyncService systemToolChainAsyncService,
                        ObjectMapper objectMapper) {
         this.sessionManager = sessionManager;
         this.agentRuntimeService = agentRuntimeService;
@@ -112,7 +112,7 @@ public class ChatService {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.sessionWorkspaceService = sessionWorkspaceService;
         this.workspaceSkillSyncService = workspaceSkillSyncService;
-        this.toolChainSuggestionService = toolChainSuggestionService;
+        this.systemToolChainAsyncService = systemToolChainAsyncService;
         this.objectMapper = objectMapper;
     }
 
@@ -210,13 +210,6 @@ public class ChatService {
                 );
                 long elapsed = System.currentTimeMillis() - turnStart;
 
-                // Build system-suggested toolchains from successful tool-call patterns.
-                try {
-                    toolChainSuggestionService.createSuggestionFromTurn(
-                            sessionId, turnId, request.getMessage(), userId, state.getModel());
-                } catch (Exception ignored) {
-                }
-
                 saveMessage(sessionId, "assistant", response, turnId);
 
                 sessionRepository.updateLastActive(sessionId, userId, System.currentTimeMillis());
@@ -227,6 +220,20 @@ public class ChatService {
                 sender.sendCostUpdated(sessionId, costUsageRepository.summarizeBySession(sessionId));
 
                 sender.sendDone(sessionId, response);
+                try {
+                    systemToolChainAsyncService.enqueue(new SystemToolChainAsyncService.Job(
+                            sessionId,
+                            turnId,
+                            request.getMessage(),
+                            response,
+                            userId,
+                            state.getModel(),
+                            workspace
+                    ));
+                } catch (Exception e) {
+                    log.warn("[ChatService] Failed to enqueue async system toolchain job for turn={}: {}",
+                            turnId, e.getMessage());
+                }
                 sender.complete();
                 session.setActiveEmitter(null);
 

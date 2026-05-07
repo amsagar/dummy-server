@@ -190,19 +190,22 @@ public class AgentOrchestrator {
         }
         prompt.append("\n");
 
-        // Skill catalog — lightweight listing so LLM always knows what skills exist
-        List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
-        if (!skills.isEmpty()) {
-            prompt.append("\n## Available Skills\n");
-            for (SkillRegistryService.SkillSnapshot s : skills) {
-                prompt.append("- **").append(s.skill().getName()).append("**");
-                if (s.skill().getDescription() != null && !s.skill().getDescription().isBlank()) {
-                    prompt.append(": ").append(s.skill().getDescription());
+        boolean architectRuntimeMode = state != null && isToolchainArchitectRuntimeMode(state.getRuntimeMode());
+        if (!architectRuntimeMode) {
+            // Skill catalog — lightweight listing so LLM always knows what skills exist
+            List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
+            if (!skills.isEmpty()) {
+                prompt.append("\n## Available Skills\n");
+                for (SkillRegistryService.SkillSnapshot s : skills) {
+                    prompt.append("- **").append(s.skill().getName()).append("**");
+                    if (s.skill().getDescription() != null && !s.skill().getDescription().isBlank()) {
+                        prompt.append(": ").append(s.skill().getDescription());
+                    }
+                    prompt.append("\n");
                 }
-                prompt.append("\n");
             }
         }
-        if (state != null && isToolchainDesignerMode(state.getRuntimeMode())) {
+        if (state != null && isToolchainDesignerMode(state.getRuntimeMode()) && !architectRuntimeMode) {
             appendToolchainDesignerSystemPrompt(prompt);
         }
 
@@ -241,6 +244,10 @@ public class AgentOrchestrator {
 
     private boolean isToolchainDesignerMode(String runtimeMode) {
         return runtimeMode != null && "toolchain_designer".equalsIgnoreCase(runtimeMode.trim());
+    }
+
+    private boolean isToolchainArchitectRuntimeMode(String runtimeMode) {
+        return runtimeMode != null && "toolchain_architect_runtime".equalsIgnoreCase(runtimeMode.trim());
     }
 
     private void appendToolchainDesignerSystemPrompt(StringBuilder prompt) {

@@ -215,6 +215,14 @@ public class AgentToolCallback implements ToolCallback {
                     ? "Tool '" + tool.getName() + "' returned an empty response. The service may be unavailable, the record may not exist, or the query returned no results. Do not mark this as unverifiable without reporting this specific issue to the user."
                     : "Tool '" + tool.getName() + "' failed with no error detail. The service endpoint may be unreachable.";
         }
+
+        // Workflow question bridge:
+        // "question" tool currently returns a marker payload (approval_required:<prompt>).
+        // Convert that marker into a real interactive HITL question card and wait for reply.
+        if (execution.success() && isQuestionWorkflowPrompt(output)) {
+            output = handleWorkflowQuestionPrompt(output);
+        }
+
         String emittedOutput = maybeSpillToolOutput(output, callId, execution.success() ? "success" : "error");
         sender.sendToolResult(sessionId, callId, tool.getName(), emittedOutput,
                 execution.success() ? "success" : "error");
@@ -223,6 +231,34 @@ public class AgentToolCallback implements ToolCallback {
             skillExecutionGate.cacheToolResult(toolCallSignature, emittedOutput);
         }
         return emittedOutput;
+    }
+
+    private boolean isQuestionWorkflowPrompt(String output) {
+        if (output == null || output.isBlank()) return false;
+        String normalizedTool = tool.getName() == null ? "" : tool.getName().trim().toLowerCase();
+        return "question".equals(normalizedTool) && output.startsWith("approval_required:");
+    }
+
+    private String handleWorkflowQuestionPrompt(String output) {
+        String prompt = output.substring("approval_required:".length()).trim();
+        if (prompt.isBlank()) {
+            prompt = "Please provide the required clarification.";
+        }
+        String requestId = pendingInteractionService.create(sessionId, turnId, "question", prompt);
+        sender.sendQuestion(sessionId, requestId, prompt);
+        saveRuntimeEvent("question", "{\"requestId\":" + json(requestId) + ",\"question\":" + json(prompt) + "}");
+        try {
+            PendingInteractionService.InteractionReply reply =
+                    pendingInteractionService.awaitReply(requestId, approvalTimeoutMs);
+            if (reply == null || reply.message() == null || reply.message().isBlank()) {
+                return "No clarification received from user.";
+            }
+            return reply.message();
+        } catch (TimeoutException e) {
+            return "Question timed out waiting for user response.";
+        } catch (Exception e) {
+            return "Question handling failed: " + e.getMessage();
+        }
     }
 
     private String maybeSpillToolOutput(String output, String callId, String status) {

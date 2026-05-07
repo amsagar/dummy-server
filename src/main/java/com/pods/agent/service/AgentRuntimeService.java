@@ -139,6 +139,7 @@ public class AgentRuntimeService {
         session.getMessages().add(new UserMessage(normalizedUserText));
 
         if (!isToolChainDesignerMode(runtimeMode)
+                && !isToolChainArchitectRuntimeMode(runtimeMode)
                 && (state.getToolChainId() == null || state.getToolChainId().isBlank())
                 && !normalizedUserText.isBlank()) {
             maybeResolveToolChainByIntent(session, normalizedUserText, state, sender, turnId);
@@ -271,7 +272,7 @@ public class AgentRuntimeService {
 
     private boolean shouldExecuteToolChain(ChatState state) {
         if (state == null) return false;
-        if (isToolChainDesignerMode(state.getRuntimeMode())) return false;
+        if (isToolChainDesignerMode(state.getRuntimeMode()) || isToolChainArchitectRuntimeMode(state.getRuntimeMode())) return false;
         if (state.getToolChainId() != null && !state.getToolChainId().isBlank()) return true;
         String mode = state.getRuntimeMode();
         return mode != null && mode.toLowerCase(Locale.ROOT).contains("toolchain");
@@ -444,11 +445,15 @@ public class AgentRuntimeService {
         // injected as the system prompt, and the gate would otherwise block read/edit/apply_patch
         // calls that VFS-edit mode depends on, returning a "call skill first" string instead of
         // the actual file contents.
-        boolean designerMode = isToolChainDesignerMode(state.getRuntimeMode());
+        boolean designerMode = isToolChainDesignerMode(state.getRuntimeMode())
+                || isToolChainArchitectRuntimeMode(state.getRuntimeMode());
         boolean enforceSkillFirst = !designerMode
                 && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
         String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
+        if (isToolChainArchitectRuntimeMode(state.getRuntimeMode())) {
+            selectedSkillContext = "";
+        }
         if ((selectedSkillContext == null || selectedSkillContext.isBlank()) && enforceSkillFirst) {
             // For execution turns that require skill-first behavior, always inject at least
             // a compact skill catalog so the model has deterministic routing guidance.
@@ -705,6 +710,10 @@ You are in ToolChain designer creation mode.
 
     private boolean isToolChainDesignerMode(String runtimeMode) {
         return runtimeMode != null && "toolchain_designer".equalsIgnoreCase(runtimeMode.trim());
+    }
+
+    private boolean isToolChainArchitectRuntimeMode(String runtimeMode) {
+        return runtimeMode != null && "toolchain_architect_runtime".equalsIgnoreCase(runtimeMode.trim());
     }
 
     private String buildWorkspaceManifest(AgentSession session) {

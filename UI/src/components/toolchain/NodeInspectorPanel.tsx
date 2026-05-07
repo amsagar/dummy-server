@@ -40,6 +40,7 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   node: GraphNode | null;
   graph: { nodes: GraphNode[]; edges: GraphEdge[] } | null;
+  synthesisPrompt?: string | null;
   toolsCatalog?: CatalogToolRow[];
   mcpCatalog?: CatalogToolRow[];
   onEdit?: (nodeId: string) => void;
@@ -109,6 +110,7 @@ export default function NodeInspectorPanel({
   onOpenChange,
   node,
   graph,
+  synthesisPrompt,
   toolsCatalog = [],
   mcpCatalog = [],
   onEdit,
@@ -144,6 +146,7 @@ export default function NodeInspectorPanel({
   if (!node) return null;
 
   const config = node.config || {};
+  const effectiveSynthesisPrompt = String(config.prompt || synthesisPrompt || "").trim();
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -273,9 +276,9 @@ export default function NodeInspectorPanel({
 
           {node.type === "synthesis" && (
             <Section title="Synthesis prompt" defaultOpen={false}>
-              {config.prompt ? (
+              {effectiveSynthesisPrompt ? (
                 <pre className="whitespace-pre-wrap rounded bg-slate-50 p-2 font-mono text-[11px] leading-snug text-slate-700">
-                  {String(config.prompt)}
+                  {effectiveSynthesisPrompt}
                 </pre>
               ) : (
                 <div className="text-[11px] italic text-slate-400">

@@ -117,8 +117,9 @@ public class MappingValidator {
         for (String argName : allArgs) {
             Object source = argMappings.get(argName);
             Object expectedValue = expected.get(argName);
-            // Recorded arg has no mapping → fail loud. This is the fix for the
-            // off-by-one node-indexing bug that the previous validator silently passed.
+            // Recorded arg has no mapping → fail loud. Catches off-by-one node-indexing
+            // and the "LLM forgot half the args" failure mode (e.g., decisionTableEvaluate
+            // authored with only tableName and no inputs).
             if (source == null) {
                 if (expectedValue != null) {
                     failures.add(new Failure(nodeId, argName, expectedValue, null,
@@ -126,10 +127,23 @@ public class MappingValidator {
                 }
                 continue;
             }
-            // Skip llm_assisted args — the LLM is expected to fill them at runtime, so a
-            // null at validation time is acceptable.
+            // For llm_assisted: distinguish two sub-cases instead of skipping all of them.
+            //   (a) {policy: llm_assisted, expr: <something>}: the expr is a hint, the runtime
+            //       LLM will refine. Try resolving it and compare; mismatch is informational
+            //       (downgrade isn't catastrophic — runtime can still fix it).
+            //   (b) {policy: llm_assisted}     (no expr at all): if the recorded value is a
+            //       constant primitive, this is bad authoring — the LLM should have used a
+            //       literal expr. Flag as failure so retry tries again.
             if (source instanceof Map<?, ?> mappingMap
                     && "llm_assisted".equalsIgnoreCase(String.valueOf(mappingMap.get("policy")))) {
+                Object expr = mappingMap.get("expr");
+                if ((expr == null || (expr instanceof String s && s.isBlank()))
+                        && expectedValue != null && isPrimitive(expectedValue)) {
+                    failures.add(new Failure(nodeId, argName, expectedValue, null,
+                            "policy:llm_assisted with no expr — recorded value is a constant ("
+                                    + truncateValue(expectedValue) + "); use a JSONata literal "
+                                    + "with policy:strict instead"));
+                }
                 continue;
             }
             Object resolved = argMappingResolver.resolveOne(source, context, key -> dotPath(context, key));
@@ -138,6 +152,18 @@ public class MappingValidator {
                         describeMappingSource(source)));
             }
         }
+    }
+
+    private boolean isPrimitive(Object value) {
+        return value instanceof String
+                || value instanceof Number
+                || value instanceof Boolean;
+    }
+
+    private String truncateValue(Object value) {
+        if (value == null) return "null";
+        String s = String.valueOf(value);
+        return s.length() > 60 ? s.substring(0, 60) + "…" : s;
     }
 
     private void validateIterator(String nodeId,
@@ -173,16 +199,35 @@ public class MappingValidator {
             Map<String, Object> itemContext = new LinkedHashMap<>(context);
             itemContext.put("item", item);
             itemContext.put("$item", item);
-            for (Map.Entry<String, Object> entry : argMappings.entrySet()) {
-                String argName = entry.getKey();
-                if ("items".equals(argName)) continue;
-                Object source = entry.getValue();
+
+            // Same union-walk as single-node validation: catches missing-arg and the
+            // "llm_assisted with no expr for a constant" failure modes per iteration.
+            java.util.Set<String> allArgs = new java.util.LinkedHashSet<>(argMappings.keySet());
+            allArgs.addAll(sample.keySet());
+            allArgs.remove("items");
+
+            for (String argName : allArgs) {
+                Object source = argMappings.get(argName);
+                Object expected = sample.get(argName);
+                if (source == null) {
+                    if (expected != null) {
+                        failures.add(new Failure(nodeId, "items[" + i + "]." + argName, expected, null,
+                                "no mapping authored for required iterator arg"));
+                    }
+                    continue;
+                }
                 if (source instanceof Map<?, ?> mappingMap
                         && "llm_assisted".equalsIgnoreCase(String.valueOf(mappingMap.get("policy")))) {
+                    Object expr = mappingMap.get("expr");
+                    if ((expr == null || (expr instanceof String s && s.isBlank()))
+                            && expected != null && isPrimitive(expected)) {
+                        failures.add(new Failure(nodeId, "items[" + i + "]." + argName, expected, null,
+                                "policy:llm_assisted with no expr — constant value ("
+                                        + truncateValue(expected) + ") should be a JSONata literal"));
+                    }
                     continue;
                 }
                 Object resolved = argMappingResolver.resolveOne(source, itemContext, key -> dotPath(itemContext, key));
-                Object expected = sample.get(argName);
                 if (!valuesEqual(resolved, expected)) {
                     failures.add(new Failure(nodeId, "items[" + i + "]." + argName, expected, resolved,
                             describeMappingSource(source)));

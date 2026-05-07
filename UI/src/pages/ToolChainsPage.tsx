@@ -60,6 +60,14 @@ export default function ToolChainsPage() {
     queryKey: ["toolchains", "system"],
     queryFn: () => api.toolchains.list("system_suggested"),
   });
+  const { data: pendingSystemApprovalsData } = useQuery<any>({
+    queryKey: ["toolchains", "pending-system-proposals"],
+    queryFn: () => api.toolchains.pendingSystemProposals(),
+  });
+  const pendingSystemApprovals = useMemo(
+    () => (Array.isArray(pendingSystemApprovalsData?.proposals) ? pendingSystemApprovalsData.proposals : []),
+    [pendingSystemApprovalsData]
+  );
   const toolchains = useMemo(
     () => (activeTab === "system" ? systemToolchains : userToolchains),
     [activeTab, systemToolchains, userToolchains]
@@ -184,6 +192,25 @@ export default function ToolChainsPage() {
     onError: (e: any) => toast.error(e.message || "Failed to reject toolchain"),
   });
 
+  const approvePendingSystemProposalMutation = useMutation({
+    mutationFn: (proposalId: string) => api.toolchains.approveSystemProposal(proposalId, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchains", "pending-system-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["toolchains", "system"] });
+      toast.success("System toolchain proposal approved");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to approve system proposal"),
+  });
+
+  const rejectPendingSystemProposalMutation = useMutation({
+    mutationFn: (proposalId: string) => api.toolchains.rejectSystemProposal(proposalId, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["toolchains", "pending-system-proposals"] });
+      toast.success("System toolchain proposal rejected");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to reject system proposal"),
+  });
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -206,6 +233,41 @@ export default function ToolChainsPage() {
         </TabsList>
       </Tabs>
 
+      {activeTab === "system" && pendingSystemApprovals.length > 0 ? (
+        <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <div className="text-sm font-semibold text-amber-800">Pending System Toolchain Approvals</div>
+          {pendingSystemApprovals.map((approval: any) => (
+            <div key={String(approval.id)} className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-white px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm text-slate-800">
+                  {String(approval.reason || "System toolchain approval required.")}
+                </div>
+                <div className="text-xs text-slate-500">
+                  Session {String(approval.sessionId || "").slice(0, 8)} • Turn {String(approval.turnId || "").slice(0, 8)} • Confidence {String(approval.confidence || "low")}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => rejectPendingSystemProposalMutation.mutate(String(approval.id))}
+                  disabled={rejectPendingSystemProposalMutation.isPending}
+                >
+                  Reject
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => approvePendingSystemProposalMutation.mutate(String(approval.id))}
+                  disabled={approvePendingSystemProposalMutation.isPending}
+                >
+                  Approve
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <Table>
         <TableHeader>
           <TableRow>
@@ -227,31 +289,6 @@ export default function ToolChainsPage() {
               <TableCell className="font-medium">
                 <div className="flex items-center gap-2">
                   <span>{row.name}</span>
-                  {(() => {
-                    const meta = parseMetadata(row.metadataJson);
-                    if (!meta.requiresMappingReview) return null;
-                    const aiAuthored = String(meta.mappingConfidence || "").toLowerCase() === "ai_authored";
-                    return (
-                      <button
-                        type="button"
-                        title={aiAuthored
-                          ? "AI-authored argument mappings — click to review and test"
-                          : "Inferred argument mappings — click to review and test"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setMappingEditorChain({ id: row.id, name: row.name });
-                          setMappingEditorOpen(true);
-                        }}
-                        className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium transition-colors hover:opacity-80 ${
-                          aiAuthored
-                            ? "border-violet-200 bg-violet-50 text-violet-700"
-                            : "border-amber-200 bg-amber-50 text-amber-700"
-                        }`}
-                      >
-                        Review mappings
-                      </button>
-                    );
-                  })()}
                 </div>
               </TableCell>
               <TableCell>
@@ -365,13 +402,11 @@ export default function ToolChainsPage() {
                       Configure Runtime Llm
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={activeTab === "system"}
                       variant="destructive"
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (activeTab === "system") return;
                         const confirmed = window.confirm(
-                          `Delete "${row.name}"? This will permanently remove all versions, runs, approvals, and config sessions.`
+                          `Delete "${row.name}"? This will permanently remove this toolchain and all related versions, runs, approvals, and config sessions.`
                         );
                         if (!confirmed) return;
                         deleteMutation.mutate(row.id);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { ReactFlow, Background, Controls, MiniMap, addEdge, applyNodeChanges, useEdgesState, useNodesState } from "@xyflow/react";
+import { ReactFlow, Background, Controls, MiniMap, addEdge, applyEdgeChanges, applyNodeChanges, useEdgesState, useNodesState } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, getAuthToken } from "@/services/api";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,17 @@ import { cn } from "@/lib/utils";
 import { ArrowLeft, Maximize2, Minimize2, PanelRight } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { modelRefKey, parseModelRefKey } from "@/types";
+import CapabilityFlowNode from "@/components/toolchain/CapabilityFlowNode";
+import CapabilityFlowEdge from "@/components/toolchain/CapabilityFlowEdge";
+import {
+  type ToolGraph,
+  type ToolGraphNode,
+  graphToFlow,
+  normalizeGraph,
+  parseGraphJson,
+  flowEdgesToGraph,
+  collectGraphWarnings,
+} from "@/components/toolchain/graphCapabilities";
 
 const starterGraph = {
   nodes: [
@@ -41,6 +52,7 @@ function genId() {
 
 const CHAT_PANEL_WIDTH_STORAGE_KEY = "toolchain-designer.chat-panel-width";
 const CHAT_PANEL_COLLAPSED_STORAGE_KEY = "toolchain-designer.chat-panel-collapsed";
+const LAYOUT_VIEWPORT_GRAPH_KEY = "__draftGraphJson";
 const CHAT_PANEL_WIDTH_MIN = 320;
 const CHAT_PANEL_WIDTH_DEFAULT = 380;
 
@@ -127,95 +139,18 @@ function normalizeLayoutPositions(raw: any): Record<string, { x: number; y: numb
   return normalized;
 }
 
-function buildReadableFallbackPositions(nodes: any[], edges: any[]): Record<string, { x: number; y: number }> {
-  const nodeIds = nodes.map((node) => String(node.id));
-  const inDegree = new Map<string, number>();
-  const outgoing = new Map<string, string[]>();
-  for (const id of nodeIds) {
-    inDegree.set(id, 0);
-    outgoing.set(id, []);
-  }
-  for (const edge of edges || []) {
-    const from = String(edge.from ?? edge.source ?? "");
-    const to = String(edge.to ?? edge.target ?? "");
-    if (!inDegree.has(from) || !inDegree.has(to)) continue;
-    outgoing.get(from)?.push(to);
-    inDegree.set(to, (inDegree.get(to) || 0) + 1);
-  }
-  const queue: string[] = nodeIds.filter((nodeId) => (inDegree.get(nodeId) || 0) === 0);
-  const level = new Map<string, number>();
-  for (const id of queue) level.set(id, 0);
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const currentLevel = level.get(current) || 0;
-    for (const next of outgoing.get(current) || []) {
-      level.set(next, Math.max(level.get(next) || 0, currentLevel + 1));
-      inDegree.set(next, (inDegree.get(next) || 0) - 1);
-      if ((inDegree.get(next) || 0) === 0) queue.push(next);
-    }
-  }
-  const maxKnownLevel = Math.max(0, ...Array.from(level.values(), (v) => v || 0));
-  let fallbackLevel = maxKnownLevel;
-  for (const id of nodeIds) {
-    if (!level.has(id)) {
-      fallbackLevel += 1;
-      level.set(id, fallbackLevel);
-    }
-  }
-  const grouped = new Map<number, string[]>();
-  for (const id of nodeIds) {
-    const depth = level.get(id) || 0;
-    if (!grouped.has(depth)) grouped.set(depth, []);
-    grouped.get(depth)!.push(id);
-  }
-  const positions: Record<string, { x: number; y: number }> = {};
-  for (const [depth, ids] of Array.from(grouped.entries()).sort((a, b) => a[0] - b[0])) {
-    ids.forEach((id, idx) => {
-      positions[id] = { x: 100 + depth * 260, y: 80 + idx * 130 };
-    });
-  }
-  return positions;
+function readGraphFromLayoutViewport(raw: any): ToolGraph | null {
+  const embedded = raw && typeof raw === "object" ? (raw as any)[LAYOUT_VIEWPORT_GRAPH_KEY] : null;
+  if (typeof embedded !== "string" || !embedded.trim()) return null;
+  return parseGraphJson(embedded);
 }
 
-function graphToFlow(parsed: any, layoutPositions: Record<string, { x: number; y: number }>, fallbackY: number) {
-  const graphNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
-  const graphEdges = Array.isArray(parsed?.edges) ? parsed.edges : [];
-  const autoPositions = buildReadableFallbackPositions(graphNodes, graphEdges);
-  const rfNodes = graphNodes.map((node: any, idx: number) => {
-    const id = String(node.id);
-    const rawX = toFiniteNumber(node?.position?.x);
-    const rawY = toFiniteNumber(node?.position?.y);
-    const config = node.config || {};
-    const approvalMode = String(config?.approvalMode || "").toLowerCase();
-    const needsApproval =
-      node.type === "approval" || approvalMode === "required" || approvalMode === "required_if_sensitive";
-    const baseLabel = node.label || node.id;
-    return {
-      id,
-      type: node.type === "start" ? "input" : node.type === "end" ? "output" : "default",
-      data: { label: needsApproval ? `🔒 ${baseLabel}` : baseLabel, config },
-      style: needsApproval
-        ? {
-            background: "#ede9fe",
-            border: "2px solid #7c3aed",
-            color: "#4c1d95",
-            fontWeight: 500,
-          }
-        : undefined,
-      position:
-        layoutPositions[id] ||
-        (rawX !== null && rawY !== null
-          ? { x: rawX, y: rawY }
-          : autoPositions[id] || { x: 80 + idx * 220, y: fallbackY }),
-    };
-  });
-  const rfEdges = graphEdges.map((edge: any, idx: number) => ({
-    id: edge.id || `e-${idx}-${edge.from || edge.source}-${edge.to || edge.target}`,
-    source: edge.from || edge.source,
-    target: edge.to || edge.target,
-    label: edge.condition || edge.data?.label || undefined,
-  }));
-  return { rfNodes, rfEdges };
+function shouldHideSystemEventForDesigner(message: any): boolean {
+  const eventType = String(message?.eventType || "").toLowerCase();
+  return eventType.startsWith("task.")
+    || eventType.startsWith("tool.")
+    || eventType.startsWith("step.")
+    || eventType === "model_step";
 }
 
 function shouldRenderDraftGraph(stateLike: any): boolean {
@@ -239,8 +174,9 @@ export default function ToolChainDesignerPage() {
   const [viewedVersionNumber, setViewedVersionNumber] = useState<number | null>(null);
   // Whole-page fullscreen was removed in favour of the board-only fullscreen icon
   // on the React Flow surface — kept boardOnlyFullscreen below as the single mode.
-  const [nodes, setNodes] = useNodesState(starterGraph.nodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(starterGraph.edges);
+  const [nodes, setNodes] = useNodesState<any>(starterGraph.nodes as any);
+  const [edges, setEdges] = useEdgesState<any>(starterGraph.edges as any);
+  const [draftGraph, setDraftGraph] = useState<ToolGraph>(normalizeGraph(starterGraph));
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<any | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -274,6 +210,7 @@ export default function ToolChainDesignerPage() {
   const activeSessionRef = useRef<string | null>(null);
   const activeToolChainRef = useRef<string>("");
   const layoutPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+  const layoutViewportRef = useRef<Record<string, any>>({});
   const layoutSaveTimerRef = useRef<number | null>(null);
   const modelInitializedRef = useRef<string>("");
   const streamedAssistantIdRef = useRef<string | null>(null);
@@ -286,6 +223,8 @@ export default function ToolChainDesignerPage() {
   // so cancelStream knows which sessionId to send to /stop.
   const streamSessionIdRef = useRef<string | null>(null);
   const hasHydratedWidthRef = useRef(false);
+  const nodeTypes = useMemo(() => ({ capabilityNode: CapabilityFlowNode }), []);
+  const edgeTypes = useMemo(() => ({ capabilityEdge: CapabilityFlowEdge }), []);
 
   useEffect(() => {
     setToolChainId(routeToolChainId);
@@ -349,8 +288,9 @@ export default function ToolChainDesignerPage() {
     if (activeSessionId) return;
     if (!latest?.graphJson) return;
     try {
-      const parsed = JSON.parse(latest.graphJson);
+      const parsed = normalizeGraph(JSON.parse(latest.graphJson));
       if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+        setDraftGraph(parsed);
         const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
         setNodes(rfNodes);
         setEdges(rfEdges);
@@ -370,8 +310,9 @@ export default function ToolChainDesignerPage() {
     );
     if (!target?.graphJson) return;
     try {
-      const parsed = JSON.parse(target.graphJson);
+      const parsed = normalizeGraph(JSON.parse(target.graphJson));
       if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+        setDraftGraph(parsed);
         const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
         setNodes(rfNodes);
         setEdges(rfEdges);
@@ -532,26 +473,25 @@ export default function ToolChainDesignerPage() {
     enabled: !!toolChainId && !!activeSessionId,
   });
 
-  useEffect(() => {
-    layoutPositionsRef.current = normalizeLayoutPositions(sessionLayout?.positions);
-  }, [sessionLayout]);
+  const { data: userLayout } = useQuery<any>({
+    queryKey: ["toolchain-user-layout", toolChainId],
+    queryFn: () => api.toolchains.userLayout(toolChainId),
+    enabled: !!toolChainId,
+  });
 
-  // Parsed graph derived from sessionDetail.graphJson — drives the node inspector.
-  // We can't read directly from React Flow's `nodes` because that array carries the
-  // stripped/styled shape, not the underlying config (argMappings, inputKey, etc.).
+  useEffect(() => {
+    const userPositions = normalizeLayoutPositions(userLayout?.positions);
+    const sessionPositions = normalizeLayoutPositions(sessionLayout?.positions);
+    layoutPositionsRef.current =
+      Object.keys(userPositions).length > 0 ? userPositions : sessionPositions;
+    layoutViewportRef.current =
+      sessionLayout?.viewport && typeof sessionLayout.viewport === "object" ? sessionLayout.viewport : {};
+  }, [sessionLayout, userLayout]);
+
   const parsedGraph = useMemo<{ nodes: any[]; edges: any[] } | null>(() => {
-    const raw = sessionDetail?.graphJson;
-    if (!raw || typeof raw !== "string" || !raw.trim()) return null;
-    try {
-      const parsed = JSON.parse(raw);
-      return {
-        nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
-        edges: Array.isArray(parsed?.edges) ? parsed.edges : [],
-      };
-    } catch {
-      return null;
-    }
-  }, [sessionDetail?.graphJson]);
+    if (!draftGraph?.nodes?.length) return null;
+    return draftGraph;
+  }, [draftGraph]);
 
   const inspectedNode = useMemo(() => {
     if (!parsedGraph || !inspectedNodeId) return null;
@@ -584,6 +524,16 @@ export default function ToolChainDesignerPage() {
     return parseSchemaObject(latest?.inputSchema);
   }, [viewedVersionNumber, versions, sessionDetail?.contextBundle?.latestInputSchema, latest?.inputSchema]);
 
+  const workflowSynthesisPrompt = useMemo(() => {
+    if (viewedVersionNumber != null) {
+      const target = (Array.isArray(versions) ? versions : []).find((v: any) => v.version === viewedVersionNumber);
+      return String(target?.synthesisPrompt || "").trim();
+    }
+    const fromSession = String(sessionDetail?.synthesisPrompt || "").trim();
+    if (fromSession) return fromSession;
+    return String(latest?.synthesisPrompt || "").trim();
+  }, [viewedVersionNumber, versions, sessionDetail?.synthesisPrompt, latest?.synthesisPrompt]);
+
   useEffect(() => {
     return () => {
       if (layoutSaveTimerRef.current !== null) {
@@ -607,9 +557,12 @@ export default function ToolChainDesignerPage() {
     }
     if (shouldRenderDraftGraph(sessionDetail)) {
       try {
-        const parsed = JSON.parse(sessionDetail.graphJson);
+        const parsed =
+          readGraphFromLayoutViewport(sessionLayout?.viewport) ||
+          normalizeGraph(JSON.parse(sessionDetail.graphJson));
         const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
         if (rfNodes.length > 0) {
+          setDraftGraph(parsed);
           setNodes(rfNodes);
           setEdges(rfEdges);
         }
@@ -621,7 +574,9 @@ export default function ToolChainDesignerPage() {
     // graphJson — a stale post-stream refetch would otherwise wipe the graph
     // the SSE handler just rendered. New-session reset goes through
     // startNewConfigSession() instead.
-    const hydrated: ChatMessage[] = (sessionDetail.messages || []).map((m: any) => ({
+    const hydrated: ChatMessage[] = (sessionDetail.messages || [])
+      .filter((m: any) => !shouldHideSystemEventForDesigner(m))
+      .map((m: any) => ({
       id: String(m.id ?? genId()),
       type: (m.type ?? m.role ?? "assistant") as ChatMessage["type"],
       content: String(m.content ?? ""),
@@ -632,7 +587,7 @@ export default function ToolChainDesignerPage() {
       hitlStatus: m.hitlStatus,
       hitlResponse: m.hitlResponse,
       eventPayload: m.eventPayload,
-    }));
+      }));
     setChatMessages(hydrated);
     // Seed pendingInteractions from any hydrated question rows still in
     // "pending" state so the inline answer UI works after a reload.
@@ -647,17 +602,34 @@ export default function ToolChainDesignerPage() {
     setPendingInteractions(hydratedPending);
     setInteractionDrafts({});
     setInteractionSelections({});
-  }, [sessionDetail, setEdges, setNodes, isConfigStreaming, nodes.length]);
+  }, [sessionDetail, setEdges, setNodes, isConfigStreaming, nodes.length, sessionLayout?.viewport]);
 
   const saveLayoutMutation = useMutation({
-    mutationFn: ({ sessionId, positions }: { sessionId: string; positions: Record<string, { x: number; y: number }> }) =>
-      api.toolchains.saveConfigSessionLayout(toolChainId, sessionId, { positions }),
+    mutationFn: ({
+      sessionId,
+      positions,
+      viewport,
+    }: {
+      sessionId: string;
+      positions: Record<string, { x: number; y: number }>;
+      viewport?: Record<string, any>;
+    }) =>
+      api.toolchains.saveConfigSessionLayout(toolChainId, sessionId, { positions, viewport: viewport || {} }),
+    onError: (e: any) => toast.error(e.message || "Failed to save board layout"),
+  });
+
+  const saveUserLayoutMutation = useMutation({
+    mutationFn: ({
+      positions,
+    }: {
+      positions: Record<string, { x: number; y: number }>;
+    }) => api.toolchains.saveUserLayout(toolChainId, { positions }),
     onError: (e: any) => toast.error(e.message || "Failed to save board layout"),
   });
 
   const persistNodeLayout = useCallback(
     (nextNodes: any[]) => {
-      if (!toolChainId || !activeSessionId) return;
+      if (!toolChainId) return;
       const positions = nextNodes.reduce((acc, node) => {
         const x = toFiniteNumber(node?.position?.x);
         const y = toFiniteNumber(node?.position?.y);
@@ -671,8 +643,31 @@ export default function ToolChainDesignerPage() {
         window.clearTimeout(layoutSaveTimerRef.current);
       }
       layoutSaveTimerRef.current = window.setTimeout(() => {
-        saveLayoutMutation.mutate({ sessionId: activeSessionId, positions });
+        saveUserLayoutMutation.mutate({ positions });
+        if (activeSessionId) {
+          saveLayoutMutation.mutate({
+            sessionId: activeSessionId,
+            positions,
+            viewport: layoutViewportRef.current || {},
+          });
+        }
       }, 450);
+    },
+    [activeSessionId, saveLayoutMutation, saveUserLayoutMutation, toolChainId]
+  );
+
+  const persistGraphDraft = useCallback(
+    (graph: ToolGraph) => {
+      setDraftGraph(graph);
+      if (!toolChainId || !activeSessionId) return;
+      const graphJson = JSON.stringify(graph);
+      const nextViewport = { ...(layoutViewportRef.current || {}), [LAYOUT_VIEWPORT_GRAPH_KEY]: graphJson };
+      layoutViewportRef.current = nextViewport;
+      saveLayoutMutation.mutate({
+        sessionId: activeSessionId,
+        positions: layoutPositionsRef.current || {},
+        viewport: nextViewport,
+      });
     },
     [activeSessionId, saveLayoutMutation, toolChainId]
   );
@@ -682,11 +677,54 @@ export default function ToolChainDesignerPage() {
       setNodes((current) => {
         const next = applyNodeChanges(changes, current);
         const shouldPersist = changes.some((change: any) => change?.type === "position" && change?.dragging === false);
-        if (shouldPersist) persistNodeLayout(next);
+        if (shouldPersist) {
+          persistNodeLayout(next);
+          setDraftGraph((prev) => {
+            const byId = new Map(next.map((node: any) => [String(node.id), node.position]));
+            const updated = normalizeGraph(prev);
+            updated.nodes = updated.nodes.map((node) => {
+              const position = byId.get(String(node.id));
+              return position ? { ...node, position: { x: position.x, y: position.y } } : node;
+            });
+            return updated;
+          });
+        }
         return next;
       });
     },
     [persistNodeLayout, setNodes]
+  );
+
+  const handleEdgesChange = useCallback(
+    (changes: any[]) => {
+      setEdges((current) => {
+        const next = applyEdgeChanges(changes, current);
+        setDraftGraph((prev) => {
+          const updated = normalizeGraph(prev);
+          updated.edges = flowEdgesToGraph(next);
+          persistGraphDraft(updated);
+          return updated;
+        });
+        return next;
+      });
+    },
+    [persistGraphDraft, setEdges]
+  );
+
+  const handleConnect = useCallback(
+    (params: any) => {
+      setEdges((current) => {
+        const next = addEdge({ ...params, id: `e-${params.source}-${params.target}-${Date.now()}` }, current);
+        setDraftGraph((prev) => {
+          const updated = normalizeGraph(prev);
+          updated.edges = flowEdgesToGraph(next);
+          persistGraphDraft(updated);
+          return updated;
+        });
+        return next;
+      });
+    },
+    [persistGraphDraft, setEdges]
   );
 
   const appendSystemMessage = (
@@ -879,45 +917,15 @@ export default function ToolChainDesignerPage() {
                 return [...prev, { id: nextId, type: "assistant", content: "", reasoning: delta, isStreaming: true }];
               });
               break;
-            case "tool.call": {
-              const toolName = String(ev.toolName || ev.tool || "");
-              appendSystemMessage("tool.call", `Calling tool: ${toolName}`, undefined, {
-                toolName,
-                input: ev.input ?? ev.arguments,
-              });
-              break;
-            }
-            case "tool.done": {
-              const toolName = String(ev.toolName || ev.tool || "");
-              appendSystemMessage("tool.done", `Tool completed: ${toolName}`, undefined, {
-                toolName,
-                output: ev.output ?? ev.result,
-              });
-              break;
-            }
-            case "tool.result": {
-              const toolName = String(ev.toolName || ev.tool || "");
-              appendSystemMessage("tool.result", `Tool completed: ${toolName}`, undefined, {
-                toolName,
-                output: ev.output ?? ev.result,
-              });
-              break;
-            }
+            case "tool.call":
+            case "tool.done":
+            case "tool.result":
             case "tool.match":
-              appendSystemMessage(
-                "tool.match",
-                ev.needsClarification
-                  ? `Tool clarification needed (${String(ev.reason || "ambiguous")})`
-                  : `Tool matched${ev.selectedTool ? `: ${String(ev.selectedTool)}` : ""}`,
-                undefined,
-                {
-                  reason: ev.reason,
-                  needsClarification: ev.needsClarification,
-                  selectedTool: ev.selectedTool,
-                  score: ev.score,
-                  candidates: ev.candidates,
-                }
-              );
+            case "task.started":
+            case "task.done":
+            case "step.started":
+            case "step.finished":
+              // Suppress low-level runtime events in ToolChain designer transcript UX.
               break;
             case "question": {
               const requestId = String(ev.requestId || genId());
@@ -981,9 +989,10 @@ export default function ToolChainDesignerPage() {
               }
               if (shouldRenderDraftGraph(state)) {
                 try {
-                  const parsed = JSON.parse(state.graphJson);
+                  const parsed = normalizeGraph(JSON.parse(state.graphJson));
                   const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
                   if (rfNodes.length > 0) {
+                    setDraftGraph(parsed);
                     setNodes(rfNodes);
                     setEdges(rfEdges);
                   }
@@ -1116,6 +1125,7 @@ export default function ToolChainDesignerPage() {
     setInteractionSelections({});
     setSessionStatus("draft");
     setChatMessages([]);
+    setDraftGraph(normalizeGraph({ nodes: [], edges: [] }));
     setNodes(starterGraph.nodes);
     setEdges(starterGraph.edges);
     setActiveSessionId(null);
@@ -1197,6 +1207,27 @@ export default function ToolChainDesignerPage() {
     },
     onError: (e: any) => toast.error(e.message || "Failed to publish version"),
   });
+
+  const handleNodeSave = useCallback(
+    (nextNode: ToolGraphNode) => {
+      setDraftGraph((prev) => {
+        const graph = normalizeGraph(prev);
+        graph.nodes = graph.nodes.map((node) => (String(node.id) === String(nextNode.id) ? { ...nextNode } : node));
+        const warnings = collectGraphWarnings(graph);
+        if (warnings.length > 0) {
+          toast.warning("Saved with validation warnings. Check node inspector for details.");
+        } else {
+          toast.success("Node updated");
+        }
+        persistGraphDraft(graph);
+        const { rfNodes, rfEdges } = graphToFlow(graph, layoutPositionsRef.current, 140);
+        setNodes(rfNodes);
+        setEdges(rfEdges);
+        return graph;
+      });
+    },
+    [persistGraphDraft, setEdges, setNodes]
+  );
 
   return (
     <div
@@ -1348,14 +1379,16 @@ export default function ToolChainDesignerPage() {
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={handleNodesChange}
-                onEdgesChange={onEdgesChange}
-                onConnect={(params) => setEdges((eds) => addEdge({ ...params, id: `e-${params.source}-${params.target}-${Date.now()}` }, eds))}
+                onEdgesChange={handleEdgesChange}
+                onConnect={handleConnect}
                 onNodeClick={(_, n) => setInspectedNodeId(String(n.id))}
                 onNodeDoubleClick={(_, n) => {
                   setInspectedNodeId(String(n.id));
                   setEditingNodeId(String(n.id));
                 }}
                 onPaneClick={() => setInspectedNodeId(null)}
+                nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
                 fitView
                 proOptions={{ hideAttribution: true }}
                 style={{ width: "100%", height: "100%" }}
@@ -1372,6 +1405,7 @@ export default function ToolChainDesignerPage() {
               }}
               node={inspectedNode}
               graph={parsedGraph}
+              synthesisPrompt={workflowSynthesisPrompt}
               inputSchema={workflowInputSchema}
               toolsCatalog={catalogTools}
               mcpCatalog={catalogMcp}
@@ -1610,6 +1644,8 @@ export default function ToolChainDesignerPage() {
           if (!o) setEditingNodeId(null);
         }}
         node={editingNode}
+        allNodes={parsedGraph?.nodes || []}
+        onSave={handleNodeSave}
       />
     </div>
   );

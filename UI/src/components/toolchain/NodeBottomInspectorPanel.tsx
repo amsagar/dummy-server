@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight, Minus, X } from "lucide-react";
+import { capabilitySummary, collectGraphWarnings } from "@/components/toolchain/graphCapabilities";
 
 type GraphNode = {
   id: string;
@@ -34,6 +35,7 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   node: GraphNode | null;
   graph: { nodes: GraphNode[]; edges: GraphEdge[] } | null;
+  synthesisPrompt?: string | null;
   inputSchema?: {
     type?: string;
     properties?: Record<string, { type?: string; description?: string; default?: any }>;
@@ -71,6 +73,9 @@ const NODE_TYPE_COLORS: Record<string, string> = {
   tool: "bg-sky-100 text-sky-800 border-sky-300",
   mcp_tool: "bg-indigo-100 text-indigo-800 border-indigo-300",
   decision: "bg-amber-100 text-amber-800 border-amber-300",
+  switch: "bg-orange-100 text-orange-800 border-orange-300",
+  iterator: "bg-cyan-100 text-cyan-800 border-cyan-300",
+  subchain: "bg-indigo-100 text-indigo-800 border-indigo-300",
   synthesis: "bg-violet-100 text-violet-800 border-violet-300",
   approval: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-300",
 };
@@ -167,6 +172,7 @@ export default function NodeBottomInspectorPanel({
   onOpenChange,
   node,
   graph,
+  synthesisPrompt,
   inputSchema,
   toolsCatalog = [],
   mcpCatalog = [],
@@ -208,6 +214,10 @@ export default function NodeBottomInspectorPanel({
       source: String(source ?? ""),
     }));
   }, [node]);
+  const nodeWarnings = useMemo(() => {
+    if (!graph || !node) return [];
+    return collectGraphWarnings(graph as any).filter((warning) => warning.nodeId === String(node.id));
+  }, [graph, node]);
   const upstreamSourceNodes = useMemo(() => {
     if (!graph || !node) return [] as Array<{ id: string; label: string; type: string }>;
     const incoming = new Map<string, Set<string>>();
@@ -298,6 +308,7 @@ export default function NodeBottomInspectorPanel({
   if (!open || !node) return null;
 
   const config = node.config || {};
+  const effectiveSynthesisPrompt = String(config.prompt || synthesisPrompt || "").trim();
 
   return (
     <div
@@ -368,6 +379,28 @@ export default function NodeBottomInspectorPanel({
             </TabsList>
 
             <TabsContent value="configuration" className="mt-3 space-y-2">
+              <Section title="Capability summary">
+                <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
+                  {capabilitySummary(node as any)}
+                </div>
+                {nodeWarnings.length > 0 ? (
+                  <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                    <p className="mb-1 font-medium">Validation warnings</p>
+                    <ul className="list-disc pl-4">
+                      {nodeWarnings.map((warning, idx) => (
+                        <li key={`${warning.message}-${idx}`}>{warning.message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {onEdit ? (
+                  <div className="mt-2">
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onEdit(node.id)}>
+                      Edit Capability
+                    </Button>
+                  </div>
+                ) : null}
+              </Section>
               <Section title="Identity">
                 <MetaRow label="Node id" mono>
                   {node.id}
@@ -429,12 +462,46 @@ export default function NodeBottomInspectorPanel({
                   </MetaRow>
                 </Section>
               )}
+              {node.type === "switch" && (
+                <Section title="Switch routing">
+                  <MetaRow label="Source key" mono>
+                    {String(config.sourceKey || "")}
+                  </MetaRow>
+                  <MetaRow label="Default" mono>
+                    {String(config.default || "—")}
+                  </MetaRow>
+                  <div className="mt-2 space-y-1 text-xs">
+                    {Array.isArray(config.cases) && config.cases.length > 0 ? (
+                      config.cases.map((row: any, idx: number) => (
+                        <div key={`case-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 font-mono">
+                          when={String(row?.when || "")} → {String(row?.to || "")}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-[11px] italic text-slate-400">No switch cases configured.</div>
+                    )}
+                  </div>
+                </Section>
+              )}
+              {node.type === "iterator" && (
+                <Section title="Loop routing">
+                  <MetaRow label="Alias" mono>
+                    {String(config.as || "item")}
+                  </MetaRow>
+                  <MetaRow label="Over" mono>
+                    {String(config.over || "—")}
+                  </MetaRow>
+                  <MetaRow label="Mode" mono>
+                    {config.toolName ? `Inline tool (${String(config.toolName)})` : `Subchain (${String(config.subChainId || "—")})`}
+                  </MetaRow>
+                </Section>
+              )}
 
               {node.type === "synthesis" && (
                 <Section title="Synthesis prompt" defaultOpen={false}>
-                  {config.prompt ? (
+                  {effectiveSynthesisPrompt ? (
                     <pre className="whitespace-pre-wrap rounded bg-slate-50 p-2 font-mono text-[11px] leading-snug text-slate-700">
-                      {String(config.prompt)}
+                      {effectiveSynthesisPrompt}
                     </pre>
                   ) : (
                     <div className="text-[11px] italic text-slate-400">

@@ -321,6 +321,37 @@ public class ToolChainService {
                 .toList();
     }
 
+    public Optional<IntentMatch> findBestIntentMatchForDedup(String userText, double threshold) {
+        if (userText == null || userText.isBlank()) return Optional.empty();
+        Set<String> userTokens = tokenize(userText);
+        IntentMatch best = null;
+        for (ToolChain chain : toolChainRepository.findAll()) {
+            Optional<ToolChainVersion> versionOpt = toolChainVersionRepository.findPublished(chain.getId())
+                    .or(() -> toolChainVersionRepository.findByChain(chain.getId()).stream().findFirst());
+            if (versionOpt.isEmpty()) continue;
+            ToolChainVersion version = versionOpt.get();
+            List<String> intents = readIntents(chain, version);
+            double score = scoreIntent(userText, userTokens, chain, intents);
+            if (score < threshold) continue;
+            List<String> matched = intents.stream()
+                    .filter(i -> overlap(userTokens, tokenize(i)) > 0
+                            || userText.toLowerCase(Locale.ROOT).contains(i.toLowerCase(Locale.ROOT)))
+                    .limit(5)
+                    .toList();
+            IntentMatch candidate = new IntentMatch(
+                    chain.getId(),
+                    version.getVersion(),
+                    chain.getName(),
+                    score,
+                    matched
+            );
+            if (best == null || candidate.score() > best.score()) {
+                best = candidate;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
     public String generateDraftGraph(String prompt) {
         Map<String, Object> draft = Map.of(
                 "nodes", List.of(

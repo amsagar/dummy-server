@@ -77,6 +77,22 @@ export const api = {
     return fetch(`${BASE_URL}${path}`, { method: 'POST', body: form, headers: token ? { Authorization: `Bearer ${token}` } : undefined }).then(handleResponse);
   },
   getChatStreamUrl: () => `${BASE_URL}/chat`,
+  chat: {
+    pendingSystemToolchainApprovals: () =>
+      fetch(`${BASE_URL}/chat/pending/system-toolchains`, { headers: getHeaders() }).then(handleResponse),
+    approveInteraction: (requestId: string, message?: string) =>
+      fetch(`${BASE_URL}/chat/approve`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ requestId, message: message || "" }),
+      }).then(handleResponse),
+    rejectInteraction: (requestId: string, message?: string) =>
+      fetch(`${BASE_URL}/chat/reject`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ requestId, message: message || "" }),
+      }).then(handleResponse),
+  },
   embeddingModels: {
     list: () => fetch(`${BASE_URL}/embedding-models`, { headers: getHeaders() }).then(handleResponse),
     upsert: (payload: {
@@ -147,6 +163,19 @@ export const api = {
     runApprovals: (runId: string) => fetch(`${BASE_URL}/runs/${runId}/approvals`, { headers: getHeaders() }).then(handleResponse),
     approveStep: (runId: string, nodeId: string, payload?: any) => fetch(`${BASE_URL}/runs/${runId}/steps/${encodeURIComponent(nodeId)}/approve`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
     rejectStep: (runId: string, nodeId: string, payload?: any) => fetch(`${BASE_URL}/runs/${runId}/steps/${encodeURIComponent(nodeId)}/reject`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
+    pendingSystemProposals: () => fetch(`${BASE_URL}/toolchains/system-proposals`, { headers: getHeaders() }).then(handleResponse),
+    approveSystemProposal: (proposalId: string, payload?: any) =>
+      fetch(`${BASE_URL}/toolchains/system-proposals/${encodeURIComponent(proposalId)}/approve`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload || {}),
+      }).then(handleResponse),
+    rejectSystemProposal: (proposalId: string, payload?: any) =>
+      fetch(`${BASE_URL}/toolchains/system-proposals/${encodeURIComponent(proposalId)}/reject`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload || {}),
+      }).then(handleResponse),
     analytics: () => fetch(`${BASE_URL}/toolchains/analytics`, { headers: getHeaders() }).then(handleResponse),
     configSessions: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions`, { headers: getHeaders() }).then(handleResponse),
     configSessionsGlobal: () => fetch(`${BASE_URL}/toolchains/config-sessions`, { headers: getHeaders() }).then(handleResponse),
@@ -172,6 +201,8 @@ export const api = {
     updateConfigSession: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     configSessionLayout: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { headers: getHeaders() }).then(handleResponse),
     saveConfigSessionLayout: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
+    userLayout: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/layout`, { headers: getHeaders() }).then(handleResponse),
+    saveUserLayout: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     deleteConfigSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
     testMapping: (id: string, expr: any) =>
       fetch(`${BASE_URL}/toolchains/${id}/mappings/test`, { method: 'POST', headers: getHeaders(), body: JSON.stringify({ expr }) }).then(handleResponse),

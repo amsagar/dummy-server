@@ -14,6 +14,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import CapabilityFlowNode from "@/components/toolchain/CapabilityFlowNode";
+import CapabilityFlowEdge from "@/components/toolchain/CapabilityFlowEdge";
+import { graphToFlow, normalizeGraph } from "@/components/toolchain/graphCapabilities";
 
 type RuntimeEventRow = {
   id: string;
@@ -147,47 +150,6 @@ function toFiniteNumber(value: any): number | null {
   return Number.isFinite(out) ? out : null;
 }
 
-function buildReadableFallbackPositions(nodes: any[], edges: any[]) {
-  const nodeIds = nodes.map((node) => String(node.id));
-  const inDegree = new Map<string, number>();
-  const outgoing = new Map<string, string[]>();
-  for (const id of nodeIds) {
-    inDegree.set(id, 0);
-    outgoing.set(id, []);
-  }
-  for (const edge of edges || []) {
-    const from = String(edge.from ?? edge.source ?? "");
-    const to = String(edge.to ?? edge.target ?? "");
-    if (!inDegree.has(from) || !inDegree.has(to)) continue;
-    outgoing.get(from)?.push(to);
-    inDegree.set(to, (inDegree.get(to) || 0) + 1);
-  }
-  const queue = nodeIds.filter((nodeId) => (inDegree.get(nodeId) || 0) === 0);
-  const level = new Map<string, number>();
-  queue.forEach((id) => level.set(id, 0));
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const currentLevel = level.get(current) || 0;
-    for (const next of outgoing.get(current) || []) {
-      level.set(next, Math.max(level.get(next) || 0, currentLevel + 1));
-      inDegree.set(next, (inDegree.get(next) || 0) - 1);
-      if ((inDegree.get(next) || 0) === 0) queue.push(next);
-    }
-  }
-  const grouped = new Map<number, string[]>();
-  nodeIds.forEach((id) => {
-    const depth = level.get(id) || 0;
-    if (!grouped.has(depth)) grouped.set(depth, []);
-    grouped.get(depth)!.push(id);
-  });
-  const positions: Record<string, { x: number; y: number }> = {};
-  for (const [depth, ids] of Array.from(grouped.entries()).sort((a, b) => a[0] - b[0])) {
-    ids.forEach((id, idx) => {
-      positions[id] = { x: 80 + depth * 260, y: 80 + idx * 120 };
-    });
-  }
-  return positions;
-}
 
 function statusStyles(status: string) {
   const normalized = String(status || "").toLowerCase();
@@ -261,6 +223,11 @@ export default function ToolChainRunDetailPage() {
     queryFn: () => api.toolchains.versions(run.toolChainId),
     enabled: !!run?.toolChainId,
   });
+  const { data: userLayout } = useQuery<any>({
+    queryKey: ["toolchain-user-layout", run?.toolChainId],
+    queryFn: () => api.toolchains.userLayout(run.toolChainId),
+    enabled: !!run?.toolChainId,
+  });
 
   const runEvents = useMemo(
     () => [...persistedEvents].sort((a, b) => a.createdAt - b.createdAt),
@@ -274,50 +241,42 @@ export default function ToolChainRunDetailPage() {
   );
 
   const graph = useMemo(() => {
-    const parsed = parsePayload(selectedVersion?.graphJson);
-    const graphNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
-    const graphEdges = Array.isArray(parsed?.edges) ? parsed.edges : [];
-    const fallbackPositions = buildReadableFallbackPositions(graphNodes, graphEdges);
-    const nodes = graphNodes.map((node: any, idx: number) => {
+    const parsed = normalizeGraph(parsePayload(selectedVersion?.graphJson));
+    const layoutPositions: Record<string, { x: number; y: number }> = {};
+    const rawPositions = userLayout?.positions;
+    if (rawPositions && typeof rawPositions === "object") {
+      for (const [nodeId, coords] of Object.entries(rawPositions as Record<string, any>)) {
+        const x = Number((coords as any)?.x);
+        const y = Number((coords as any)?.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          layoutPositions[String(nodeId)] = { x, y };
+        }
+      }
+    }
+    const { rfNodes, rfEdges } = graphToFlow(parsed as any, layoutPositions, 100);
+    const nodes = rfNodes.map((node: any) => {
       const id = String(node.id);
       const step = stepMap.get(id);
       const status = step ? stepDerivedStatus(step) : "queued";
       const { bg, border } = statusStyles(status);
-      const rawX = toFiniteNumber(node?.position?.x);
-      const rawY = toFiniteNumber(node?.position?.y);
-      const config = node.config || {};
-      const approvalMode = String(config?.approvalMode || "").toLowerCase();
-      const needsApproval =
-        node.type === "approval" || approvalMode === "required" || approvalMode === "required_if_sensitive";
-      const baseLabel = node.label || id;
       return {
-        id,
-        type: node.type === "start" ? "input" : node.type === "end" ? "output" : "default",
-        position:
-          rawX !== null && rawY !== null
-            ? { x: rawX, y: rawY }
-            : fallbackPositions[id] || { x: 80 + idx * 220, y: 100 },
+        ...node,
         data: {
-          label: `${needsApproval ? "🔒 " : ""}${baseLabel}${step ? ` (${status})` : ""}`,
+          ...(node.data || {}),
+          label: `${String(node?.data?.label || id)}${step ? ` (${status})` : ""}`,
         },
         style: {
           backgroundColor: bg,
-          border: `2px solid ${needsApproval ? "#7c3aed" : border}`,
+          border: `2px solid ${String(node?.data?.needsApproval ? "#7c3aed" : border)}`,
           borderRadius: 10,
-          minWidth: 160,
+          minWidth: 190,
           fontSize: 12,
         },
       };
     });
-    const edges = graphEdges.map((edge: any, idx: number) => ({
-      id: edge.id || `e-${idx}-${edge.from || edge.source}-${edge.to || edge.target}`,
-      source: String(edge.from || edge.source),
-      target: String(edge.to || edge.target),
-      label: edge.condition || edge.data?.label || undefined,
-      animated: false,
-    }));
+    const edges = rfEdges.map((edge: any) => ({ ...edge, animated: false }));
     return { nodes, edges };
-  }, [selectedVersion?.graphJson, stepMap]);
+  }, [selectedVersion?.graphJson, stepMap, userLayout?.positions]);
 
   const selectedStep = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -376,6 +335,8 @@ export default function ToolChainRunDetailPage() {
               nodes={graph.nodes}
               edges={graph.edges}
               onNodeClick={(_, node) => setSelectedNodeId(String(node.id))}
+              nodeTypes={{ capabilityNode: CapabilityFlowNode }}
+              edgeTypes={{ capabilityEdge: CapabilityFlowEdge }}
               fitView
               proOptions={{ hideAttribution: true }}
             >

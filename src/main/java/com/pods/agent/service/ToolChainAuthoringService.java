@@ -494,6 +494,34 @@ public class ToolChainAuthoringService {
                (b) set policy:"llm_assisted" and put the rule sheet text in a comment-style
                    "hint" key so the runtime LLM has the rules at fallback time.
                Never silently drop documented cases — that produces wrong-but-plausible output.
+
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            llm_assisted IS NOT A "GIVE UP" BUTTON.
+
+            policy:"llm_assisted" without an expr is INVALID. Never emit it. The runtime
+            LLM resolver may not be reachable, may return null, and even when it works it
+            costs a per-arg LLM call on every chain execution until self-heal kicks in.
+
+            Mandatory checklist before using llm_assisted on any arg:
+              a. The recorded value is NOT a constant string/number/bool. Constants
+                 (like tableName="Leg Sequences" for every run) MUST be authored as
+                 {"expr": "'Leg Sequences'", "policy": "strict"} — never llm_assisted.
+              b. The recorded value is NOT a direct field of an upstream output. Direct
+                 lookups (custTrackingId from chainInput.orderId, zip from a leg's address)
+                 MUST be authored as JSONata with policy:"strict".
+              c. You have actually attempted a JSONata expression and the value genuinely
+                 requires runtime reasoning (e.g. an 11-case decision tree with rules in
+                 the skill markdown).
+
+            If (c) is true, you STILL provide your best-guess JSONata in `expr` so the
+            verify-and-self-heal path can promote to strict over time. {policy:"llm_assisted",
+            expr: <your best attempt>} is OK. {policy:"llm_assisted"} alone is never OK.
+
+            Most importantly: cover EVERY arg that appears in the recorded tool input. If
+            the recorded call shows {tableName, inputs}, your nodeMappings must have BOTH
+            tableName and inputs. Missing one means the chain calls the tool without that
+            field and the tool rejects the request — same effect as authoring nothing at all.
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             - Use JSONata expressions starting with "$". For static literals, use a literal expression
               like "'WEB'" (quoted string) or "1" (number) or "false".
             - When a value can be derived deterministically from prior outputs/inputs, set

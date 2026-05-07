@@ -1,15 +1,18 @@
 package com.pods.agent.api;
 
 import com.pods.agent.api.dto.ToolChainDtos;
+import com.pods.agent.domain.SystemToolChainProposal;
 import com.pods.agent.domain.ToolChain;
 import com.pods.agent.domain.ToolChainVersion;
 import com.pods.agent.exceptions.ResponseEntityFactory;
+import com.pods.agent.repository.SystemToolChainProposalRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
 import com.pods.agent.service.SecurityContextService;
 import com.pods.agent.service.ToolChainConfigChatService;
 import com.pods.agent.service.ToolChainMappingEditorService;
 import com.pods.agent.service.ToolChainRuntimeService;
+import com.pods.agent.service.SystemToolChainAsyncService;
 import com.pods.agent.service.ToolChainService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -30,6 +33,8 @@ public class ToolChainController {
     private final ToolChainMappingEditorService toolChainMappingEditorService;
     private final ToolChainRunRepository toolChainRunRepository;
     private final ToolChainRunStepRepository toolChainRunStepRepository;
+    private final SystemToolChainProposalRepository systemToolChainProposalRepository;
+    private final SystemToolChainAsyncService systemToolChainAsyncService;
     private final SecurityContextService securityContextService;
 
     public ToolChainController(ToolChainService toolChainService,
@@ -38,6 +43,8 @@ public class ToolChainController {
                                ToolChainMappingEditorService toolChainMappingEditorService,
                                ToolChainRunRepository toolChainRunRepository,
                                ToolChainRunStepRepository toolChainRunStepRepository,
+                               SystemToolChainProposalRepository systemToolChainProposalRepository,
+                               SystemToolChainAsyncService systemToolChainAsyncService,
                                SecurityContextService securityContextService) {
         this.toolChainService = toolChainService;
         this.toolChainRuntimeService = toolChainRuntimeService;
@@ -45,6 +52,8 @@ public class ToolChainController {
         this.toolChainMappingEditorService = toolChainMappingEditorService;
         this.toolChainRunRepository = toolChainRunRepository;
         this.toolChainRunStepRepository = toolChainRunStepRepository;
+        this.systemToolChainProposalRepository = systemToolChainProposalRepository;
+        this.systemToolChainAsyncService = systemToolChainAsyncService;
         this.securityContextService = securityContextService;
     }
 
@@ -273,6 +282,31 @@ public class ToolChainController {
         }
     }
 
+    @GetMapping("/toolchains/{id}/layout")
+    @Operation(summary = "Get user-specific ToolChain layout (per-toolchain, per-user)")
+    public ResponseEntity<?> userLayout(@PathVariable String id) {
+        try {
+            return ResponseEntity.ok(
+                    toolChainConfigChatService.getUserLayout(id, securityContextService.currentUserIdOrThrow())
+            );
+        } catch (IllegalArgumentException e) {
+            return ResponseEntityFactory.notFound(e.getMessage());
+        }
+    }
+
+    @PatchMapping("/toolchains/{id}/layout")
+    @Operation(summary = "Save user-specific ToolChain layout (per-toolchain, per-user)")
+    public ResponseEntity<?> updateUserLayout(@PathVariable String id,
+                                              @RequestBody ToolChainDtos.ToolChainConfigSessionLayoutRequest request) {
+        try {
+            return ResponseEntity.ok(
+                    toolChainConfigChatService.upsertUserLayout(id, request, securityContextService.currentUserIdOrThrow())
+            );
+        } catch (IllegalArgumentException e) {
+            return ResponseEntityFactory.notFound(e.getMessage());
+        }
+    }
+
     @PostMapping("/toolchains/{id}/config-sessions/{sessionId}/truncate")
     @Operation(summary = "Truncate config-session messages from the given message id onward (used by edit & resend)")
     public ResponseEntity<?> truncateConfigSession(@PathVariable String id,
@@ -451,6 +485,44 @@ public class ToolChainController {
         return ResponseEntity.ok(Map.of("pending", toolChainRuntimeService.getPendingApprovals()));
     }
 
+    @GetMapping("/toolchains/system-proposals")
+    @Operation(summary = "List pending system toolchain proposals for current user")
+    public ResponseEntity<?> listSystemToolChainProposals() {
+        String userId = securityContextService.currentUserIdOrThrow();
+        var proposals = systemToolChainProposalRepository.findPendingByUser(userId).stream()
+                .map(this::toSystemProposalRow)
+                .toList();
+        return ResponseEntity.ok(Map.of("proposals", proposals));
+    }
+
+    @PostMapping("/toolchains/system-proposals/{proposalId}/approve")
+    @Operation(summary = "Approve a pending system toolchain proposal")
+    public ResponseEntity<?> approveSystemToolChainProposal(@PathVariable String proposalId,
+                                                            @RequestBody(required = false) ToolChainDtos.ToolChainApprovalDecisionRequest request) {
+        String userId = securityContextService.currentUserIdOrThrow();
+        String comment = request == null ? null : request.getComment();
+        var updated = systemToolChainAsyncService.approveProposal(proposalId, userId, comment);
+        if (updated.isEmpty()) return ResponseEntityFactory.notFound("Proposal not found: " + proposalId);
+        return ResponseEntity.ok(Map.of(
+                "ok", true,
+                "proposal", toSystemProposalRow(updated.get())
+        ));
+    }
+
+    @PostMapping("/toolchains/system-proposals/{proposalId}/reject")
+    @Operation(summary = "Reject a pending system toolchain proposal")
+    public ResponseEntity<?> rejectSystemToolChainProposal(@PathVariable String proposalId,
+                                                           @RequestBody(required = false) ToolChainDtos.ToolChainApprovalDecisionRequest request) {
+        String userId = securityContextService.currentUserIdOrThrow();
+        String comment = request == null ? null : request.getComment();
+        var updated = systemToolChainAsyncService.rejectProposal(proposalId, userId, comment);
+        if (updated.isEmpty()) return ResponseEntityFactory.notFound("Proposal not found: " + proposalId);
+        return ResponseEntity.ok(Map.of(
+                "ok", true,
+                "proposal", toSystemProposalRow(updated.get())
+        ));
+    }
+
     @GetMapping("/runs/{runId}/approvals")
     @Operation(summary = "Approvals for a run")
     public ResponseEntity<?> runApprovals(@PathVariable String runId) {
@@ -496,5 +568,17 @@ public class ToolChainController {
                 "stepPerformance", toolChainRunStepRepository.performanceMetrics(),
                 "latestRuns", toolChainRunRepository.findAll(limit, offset)
         ));
+    }
+
+    private Map<String, Object> toSystemProposalRow(SystemToolChainProposal proposal) {
+        java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("id", proposal.getId());
+        row.put("sessionId", proposal.getSessionId());
+        row.put("turnId", proposal.getTurnId());
+        row.put("status", proposal.getStatus());
+        row.put("reason", proposal.getReason() == null ? "" : proposal.getReason());
+        row.put("confidence", proposal.getConfidence() == null ? "" : proposal.getConfidence());
+        row.put("createdAt", proposal.getCreatedAt());
+        return row;
     }
 }

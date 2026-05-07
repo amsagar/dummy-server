@@ -196,6 +196,68 @@ public class ToolChainSuggestionService {
         return Optional.of(chain);
     }
 
+    public Optional<ToolChain> createSuggestionFromArchitectArtifact(SystemToolChainArtifact artifact,
+                                                                     String sessionId,
+                                                                     String turnId,
+                                                                     String tracePath,
+                                                                     String createdBy,
+                                                                     ModelRef modelRef) {
+        if (artifact == null || createdBy == null || createdBy.isBlank()) return Optional.empty();
+        String name = string(artifact.name());
+        String description = string(artifact.description());
+        String graphJson = string(artifact.graphJson());
+        List<String> intents = normalizeIntents(artifact.intents());
+        List<String> referencedSkills = normalizeSkillNames(artifact.referencedSkills());
+        if (name.isBlank() || description.isBlank() || graphJson.isBlank() || intents.isEmpty()) return Optional.empty();
+        if (!isJsonObject(graphJson)) return Optional.empty();
+        if (containsSkillNode(graphJson)) return Optional.empty();
+        if (!isJsonObject(string(artifact.inputSchema())) || !isJsonObject(string(artifact.outputSchema()))) return Optional.empty();
+
+        String intentSeed = String.join("|", intents).toLowerCase(Locale.ROOT)
+                + "|" + name.toLowerCase(Locale.ROOT);
+        String intentSignature = hashHex(intentSeed);
+        String structureSignature = hashHex(graphJson);
+        Optional<ToolChain> existing = toolChainService.findBySignatures(intentSignature, structureSignature);
+        if (existing.isPresent()) return existing;
+
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("source", "runtime_suggestion_async_architect");
+        metadata.put("mappingConfidence", "ai_architect");
+        metadata.put("requiresMappingReview", true);
+        metadata.put("authoredByLlm", true);
+        metadata.put("sessionId", sessionId == null ? "" : sessionId);
+        metadata.put("turnId", turnId == null ? "" : turnId);
+        metadata.put("tracePath", tracePath == null ? "" : tracePath);
+        metadata.put("referencedSkills", referencedSkills);
+        if (modelRef != null) {
+            metadata.put("defaultModelRef", Map.of(
+                    "providerID", modelRef.providerID(),
+                    "modelID", modelRef.modelID()
+            ));
+        }
+
+        ToolChain chain = toolChainService.createSystemSuggested(
+                name,
+                description,
+                createdBy,
+                intentSignature,
+                structureSignature,
+                metadata
+        );
+        ToolChainDtos.ToolChainVersionRequest request = new ToolChainDtos.ToolChainVersionRequest();
+        request.setGraphJson(graphJson);
+        request.setInputSchema(string(artifact.inputSchema()));
+        request.setOutputSchema(string(artifact.outputSchema()));
+        request.setResponseMode(string(artifact.responseMode()).isBlank() ? "hybrid" : string(artifact.responseMode()));
+        request.setSynthesisPrompt(applyReferencedSkillsHint(string(artifact.synthesisPrompt()), referencedSkills));
+        request.setIntents(intents);
+        request.setIntentSignature(intentSignature);
+        request.setStructureSignature(structureSignature);
+        request.setRagConfig(artifact.ragConfig() == null ? Map.of() : artifact.ragConfig());
+        toolChainService.createVersion(chain.getId(), request, createdBy);
+        return Optional.of(chain);
+    }
+
     /**
      * Run the validator against the freshly authored graph. Synthesizes a chainInput by
      * walking tool_1's argMappings: any expr of the form "$.chainInput.<paramName>" implies
@@ -637,6 +699,67 @@ public class ToolChainSuggestionService {
         } catch (Exception e) {
             return Integer.toHexString((value == null ? "" : value).hashCode());
         }
+    }
+
+    private List<String> normalizeIntents(List<String> intents) {
+        if (intents == null) return List.of();
+        return intents.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .map(String::trim)
+                .distinct()
+                .toList();
+    }
+
+    private List<String> normalizeSkillNames(List<String> skills) {
+        if (skills == null) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String skill : skills) {
+            if (skill == null || skill.isBlank()) continue;
+            String normalized = skill.trim();
+            boolean exists = out.stream().anyMatch(existing -> existing.equalsIgnoreCase(normalized));
+            if (!exists) out.add(normalized);
+        }
+        return out;
+    }
+
+    private boolean isJsonObject(String raw) {
+        if (raw == null || raw.isBlank()) return false;
+        try {
+            Object parsed = objectMapper.readValue(raw, Object.class);
+            return parsed instanceof Map<?, ?>;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean containsSkillNode(String graphJson) {
+        if (graphJson == null || graphJson.isBlank()) return false;
+        try {
+            Object parsed = objectMapper.readValue(graphJson, Object.class);
+            if (!(parsed instanceof Map<?, ?> root)) return false;
+            Object nodesRaw = root.get("nodes");
+            if (!(nodesRaw instanceof List<?> nodes)) return false;
+            for (Object nodeRaw : nodes) {
+                if (!(nodeRaw instanceof Map<?, ?> node)) continue;
+                Object typeRaw = node.get("type");
+                if (typeRaw == null) continue;
+                if ("skill".equalsIgnoreCase(String.valueOf(typeRaw).trim())) return true;
+            }
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String applyReferencedSkillsHint(String synthesisPrompt, List<String> referencedSkills) {
+        String base = synthesisPrompt == null ? "" : synthesisPrompt.trim();
+        if (referencedSkills == null || referencedSkills.isEmpty()) return base;
+        String skillsCsv = String.join(", ", referencedSkills);
+        String hint = "Before final synthesis, load these skills using the `skill` tool when relevant: " + skillsCsv + ".";
+        if (base.isBlank()) return hint;
+        if (base.toLowerCase(Locale.ROOT).contains("load these skills using the `skill` tool")) return base;
+        return base + "\n\n" + hint;
     }
 
     private record ToolCallRow(String toolName, Map<String, Object> input) {}

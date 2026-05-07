@@ -15,6 +15,7 @@ import com.pods.agent.domain.ToolChainConfigLayout;
 import com.pods.agent.domain.ToolChainConfigMessage;
 import com.pods.agent.domain.ToolChainConfigSession;
 import com.pods.agent.domain.ToolChainRun;
+import com.pods.agent.domain.ToolChainUserLayout;
 import com.pods.agent.domain.ToolChainVersion;
 import com.pods.agent.repository.AgentToolRepository;
 import com.pods.agent.repository.ChatSessionRepository;
@@ -27,6 +28,7 @@ import com.pods.agent.repository.ToolChainConfigLayoutRepository;
 import com.pods.agent.repository.ToolChainConfigMessageRepository;
 import com.pods.agent.repository.ToolChainConfigSessionRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
+import com.pods.agent.repository.ToolChainUserLayoutRepository;
 import com.pods.agent.service.workspace.SessionWorkspaceService;
 import com.pods.agent.service.workspace.WorkspaceContextHolder;
 import com.pods.agent.service.workspace.WorkspaceSkillSyncService;
@@ -65,6 +67,7 @@ public class ToolChainConfigChatService {
     private final ToolChainRunRepository toolChainRunRepository;
     private final ToolChainApprovalRepository toolChainApprovalRepository;
     private final ToolChainConfigLayoutRepository toolChainConfigLayoutRepository;
+    private final ToolChainUserLayoutRepository toolChainUserLayoutRepository;
     private final AgentToolRepository agentToolRepository;
     private final ChatSessionRepository chatSessionRepository;
     private final SkillRepository skillRepository;
@@ -84,6 +87,7 @@ public class ToolChainConfigChatService {
                                       ToolChainRunRepository toolChainRunRepository,
                                       ToolChainApprovalRepository toolChainApprovalRepository,
                                       ToolChainConfigLayoutRepository toolChainConfigLayoutRepository,
+                                      ToolChainUserLayoutRepository toolChainUserLayoutRepository,
                                       AgentToolRepository agentToolRepository,
                                       ChatSessionRepository chatSessionRepository,
                                       SkillRepository skillRepository,
@@ -102,6 +106,7 @@ public class ToolChainConfigChatService {
         this.toolChainRunRepository = toolChainRunRepository;
         this.toolChainApprovalRepository = toolChainApprovalRepository;
         this.toolChainConfigLayoutRepository = toolChainConfigLayoutRepository;
+        this.toolChainUserLayoutRepository = toolChainUserLayoutRepository;
         this.agentToolRepository = agentToolRepository;
         this.chatSessionRepository = chatSessionRepository;
         this.skillRepository = skillRepository;
@@ -147,6 +152,7 @@ public class ToolChainConfigChatService {
         payload.put("status", session.getStatus());
         payload.put("phase", stringValue(artifact.get("phase")));
         payload.put("requirementsComplete", Boolean.TRUE.equals(artifact.get("requirementsComplete")));
+        payload.put("synthesisPrompt", stringValue(artifact.get("synthesisPrompt")));
         payload.put("artifactSummary", buildArtifactSummary(artifact));
         // For proposal preview (awaiting_approval), surface the graph from pendingArtifactPatch
         // so the flow board renders the proposed nodes/edges next to the Approve/Request Changes card.
@@ -214,6 +220,42 @@ public class ToolChainConfigChatService {
         return Map.of(
                 "toolChainId", toolChainId,
                 "sessionId", session.getId(),
+                "positions", positions,
+                "viewport", viewport
+        );
+    }
+
+    public Map<String, Object> getUserLayout(String toolChainId, String userId) {
+        toolChainService.getRequired(toolChainId);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("toolChainId", toolChainId);
+        payload.put("positions", Map.of());
+        payload.put("viewport", Map.of());
+        toolChainUserLayoutRepository.findByScope(toolChainId, userId).ifPresent(layout -> {
+            payload.put("positions", normalizeLayoutPositions(readMap(layout.getPositionsJson())));
+            payload.put("viewport", readMap(layout.getViewportJson()));
+        });
+        return payload;
+    }
+
+    public Map<String, Object> upsertUserLayout(String toolChainId,
+                                                ToolChainDtos.ToolChainConfigSessionLayoutRequest request,
+                                                String userId) {
+        toolChainService.getRequired(toolChainId);
+        Map<String, Object> positions = normalizeLayoutPositions(readMap(request.getPositions()));
+        Map<String, Object> viewport = readMap(request.getViewport());
+
+        ToolChainUserLayout layout = toolChainUserLayoutRepository.findByScope(toolChainId, userId)
+                .orElse(ToolChainUserLayout.builder()
+                        .toolChainId(toolChainId)
+                        .userId(userId)
+                        .build());
+        layout.setPositionsJson(toJson(positions));
+        layout.setViewportJson(toJson(viewport));
+        toolChainUserLayoutRepository.upsert(layout);
+
+        return Map.of(
+                "toolChainId", toolChainId,
                 "positions", positions,
                 "viewport", viewport
         );
@@ -1523,77 +1565,61 @@ Designer instruction:
 
         @Override
         public void sendToolCall(String sessionId, String toolName, Object input) {
-            String configSessionId = session.getId();
-            super.sendToolCall(configSessionId, toolName, input);
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("toolName", stringValue(toolName));
-            payload.put("input", input);
-            persistSystemMessage(
-                    configSessionId,
-                    "tool.call",
-                    null,
-                    "Calling tool: " + stringValue(toolName),
-                    payload,
-                    null,
-                    null
-            );
+            // Suppressed for ToolChain designer transcript UX:
+            // do not emit low-level tool call events and do not persist them as system cards.
         }
 
         @Override
         public void sendToolCall(String sessionId, String callId, String toolName, Object input) {
-            String configSessionId = session.getId();
-            super.sendToolCall(configSessionId, callId, toolName, input);
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("callId", callId);
-            payload.put("toolName", stringValue(toolName));
-            payload.put("input", input);
-            persistSystemMessage(
-                    configSessionId,
-                    "tool.call",
-                    callId,
-                    "Calling tool: " + stringValue(toolName),
-                    payload,
-                    null,
-                    null
-            );
+            // Suppressed for ToolChain designer transcript UX:
+            // do not emit low-level tool call events and do not persist them as system cards.
         }
 
         @Override
         public void sendToolDone(String sessionId, String toolName, Object output) {
-            String configSessionId = session.getId();
-            super.sendToolDone(configSessionId, toolName, output);
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("toolName", stringValue(toolName));
-            payload.put("output", output);
-            persistSystemMessage(
-                    configSessionId,
-                    "tool.done",
-                    null,
-                    "Tool completed: " + stringValue(toolName),
-                    payload,
-                    null,
-                    null
-            );
+            // Suppressed for ToolChain designer transcript UX:
+            // do not emit low-level tool result events and do not persist them as system cards.
         }
 
         @Override
         public void sendToolResult(String sessionId, String callId, String toolName, Object output, String status) {
-            String configSessionId = session.getId();
-            super.sendToolResult(configSessionId, callId, toolName, output, status);
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("callId", callId);
-            payload.put("toolName", stringValue(toolName));
-            payload.put("output", output);
-            payload.put("status", status);
-            persistSystemMessage(
-                    configSessionId,
-                    "tool.result",
-                    callId,
-                    "Tool completed: " + stringValue(toolName),
-                    payload,
-                    null,
-                    null
-            );
+            // Suppressed for ToolChain designer transcript UX:
+            // do not emit low-level tool result events and do not persist them as system cards.
+        }
+
+        @Override
+        public void sendToolMatch(String sessionId,
+                                  String selectedTool,
+                                  int score,
+                                  boolean needsClarification,
+                                  String reason,
+                                  List<String> candidates) {
+            // Suppressed for ToolChain designer transcript UX:
+            // do not emit low-level tool-match routing events and do not persist them.
+        }
+
+        @Override
+        public void sendTaskStarted(String sessionId, String taskId, String taskName) {
+            // Suppressed for ToolChain designer transcript UX:
+            // no task.started event emission and no persistence.
+        }
+
+        @Override
+        public void sendTaskDone(String sessionId, String taskId, String result) {
+            // Suppressed for ToolChain designer transcript UX:
+            // no task.done event emission and no persistence.
+        }
+
+        @Override
+        public void sendStepStarted(String sessionId, int step, Integer maxSteps) {
+            // Suppressed for ToolChain designer transcript UX:
+            // no step.started event emission and no persistence.
+        }
+
+        @Override
+        public void sendStepFinished(String sessionId, int step, String mode, boolean executedAny) {
+            // Suppressed for ToolChain designer transcript UX:
+            // no step.finished event emission and no persistence.
         }
 
         @Override
