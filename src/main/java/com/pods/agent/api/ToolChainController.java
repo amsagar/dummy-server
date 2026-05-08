@@ -15,6 +15,8 @@ import com.pods.agent.service.ToolChainMappingEditorService;
 import com.pods.agent.service.ToolChainRuntimeService;
 import com.pods.agent.service.SystemToolChainAsyncService;
 import com.pods.agent.service.ToolChainService;
+import com.pods.agent.service.codeexec.CodeExecutionService;
+import com.pods.agent.service.codeexec.CodeExecutionResult;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.MediaType;
@@ -44,6 +46,7 @@ public class ToolChainController {
     private final SystemToolChainAsyncService systemToolChainAsyncService;
     private final SecurityContextService securityContextService;
     private final ExpressionValidator expressionValidator;
+    private final CodeExecutionService codeExecutionService;
     private final ObjectMapper objectMapper;
 
     public ToolChainController(ToolChainService toolChainService,
@@ -56,6 +59,7 @@ public class ToolChainController {
                                SystemToolChainAsyncService systemToolChainAsyncService,
                                SecurityContextService securityContextService,
                                ExpressionValidator expressionValidator,
+                               CodeExecutionService codeExecutionService,
                                ObjectMapper objectMapper) {
         this.toolChainService = toolChainService;
         this.toolChainRuntimeService = toolChainRuntimeService;
@@ -67,6 +71,7 @@ public class ToolChainController {
         this.systemToolChainAsyncService = systemToolChainAsyncService;
         this.securityContextService = securityContextService;
         this.expressionValidator = expressionValidator;
+        this.codeExecutionService = codeExecutionService;
         this.objectMapper = objectMapper;
     }
 
@@ -432,6 +437,27 @@ public class ToolChainController {
                 "valid", result.valid(),
                 "error", result.error()
         ));
+    }
+
+    @PostMapping("/toolchains/code/preview")
+    @Operation(summary = "Execute inline code snippet preview")
+    public ResponseEntity<?> previewCode(@RequestBody ToolChainDtos.ToolChainCodePreviewRequest request) {
+        if (request == null) return ResponseEntityFactory.badRequest("Request body is required.");
+        CodeExecutionResult result = codeExecutionService.execute(
+                request.getLanguage(),
+                request.getCode(),
+                request.getInput(),
+                request.getTimeoutMs(),
+                request.getMemoryLimitMb()
+        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", result.success());
+        payload.put("output", result.output());
+        payload.put("stdout", result.stdout());
+        payload.put("stderr", result.stderr());
+        payload.put("error", result.error());
+        payload.put("timedOut", result.timedOut());
+        return ResponseEntity.ok(payload);
     }
 
     @GetMapping("/toolchains/templates")

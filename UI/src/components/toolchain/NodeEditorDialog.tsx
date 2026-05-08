@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/services/api";
+import MonacoEditor from "@monaco-editor/react";
 
 type GraphNode = {
   id: string;
@@ -58,12 +59,16 @@ export default function NodeEditorDialog({ open, onOpenChange, node, allNodes = 
   const [draftConfig, setDraftConfig] = useState<Record<string, any>>({});
   const [validationError, setValidationError] = useState("");
   const [expressionError, setExpressionError] = useState("");
+  const [codePreviewLoading, setCodePreviewLoading] = useState(false);
+  const [codePreviewResult, setCodePreviewResult] = useState<string>("");
 
   useEffect(() => {
     setLabel(String(node?.label || ""));
     setDraftConfig({ ...(node?.config || {}) });
     setValidationError("");
     setExpressionError("");
+    setCodePreviewLoading(false);
+    setCodePreviewResult("");
   }, [node?.id, node?.label, node?.config]);
 
   useEffect(() => {
@@ -134,6 +139,25 @@ export default function NodeEditorDialog({ open, onOpenChange, node, allNodes = 
       const assignments = Array.isArray(draftConfig.assignments) ? draftConfig.assignments : [];
       if (assignments.length === 0) return setValidationError("Assign node requires at least one assignment.");
     }
+    if (type === "code_execute") {
+      const language = String(draftConfig.language || "").trim().toLowerCase();
+      if (!["javascript", "typescript", "python", "java"].includes(language)) {
+        return setValidationError("Code Execute language must be javascript/typescript/python/java.");
+      }
+      if (!String(draftConfig.code || "").trim()) return setValidationError("Code Execute code cannot be empty.");
+      const timeout = Number(draftConfig.timeoutMs ?? 0);
+      if (Number.isFinite(timeout) && timeout > 0 && (timeout < 250 || timeout > 60000)) {
+        return setValidationError("timeoutMs must be between 250 and 60000.");
+      }
+      const memory = Number(draftConfig.memoryLimitMb ?? 0);
+      if (Number.isFinite(memory) && memory > 0 && (memory < 16 || memory > 1024)) {
+        return setValidationError("memoryLimitMb must be between 16 and 1024.");
+      }
+      const inputs = Array.isArray(draftConfig.inputs) ? draftConfig.inputs : [];
+      if (inputs.some((row: any) => !String(row?.name || "").trim())) {
+        return setValidationError("Each code input row needs a name.");
+      }
+    }
     setValidationError("");
     onSave?.({
       ...node,
@@ -158,7 +182,7 @@ export default function NodeEditorDialog({ open, onOpenChange, node, allNodes = 
             <FieldRow label="Node id" hint="Stable identifier — do not change after edges reference it.">
               <Input value={node.id} disabled className="h-8 font-mono text-xs" />
             </FieldRow>
-            <FieldRow label="Type" hint="One of: start, end, tool, mcp_tool, decision, switch, iterator, parallel, assign, synthesis.">
+            <FieldRow label="Type" hint="One of: start, end, tool, mcp_tool, decision, switch, iterator, parallel, assign, code_execute, synthesis.">
               <Input value={node.type} disabled className="h-8 font-mono text-xs" />
             </FieldRow>
             <FieldRow label="Label" hint="Display name shown on the flow board.">
@@ -508,6 +532,179 @@ export default function NodeEditorDialog({ open, onOpenChange, node, allNodes = 
                   Add assignment
                 </Button>
               </div>
+            )}
+
+            {node.type === "code_execute" && (
+              <>
+                <FieldRow label="Language" hint="javascript | typescript | python | java">
+                  <select
+                    value={String(draftConfig.language || "javascript")}
+                    onChange={(e) => setDraftConfig((prev) => ({ ...prev, language: e.target.value }))}
+                    className="h-8 rounded border border-slate-200 bg-white px-2 text-xs"
+                  >
+                    <option value="javascript">javascript</option>
+                    <option value="typescript">typescript</option>
+                    <option value="python">python</option>
+                    <option value="java">java</option>
+                  </select>
+                </FieldRow>
+                <FieldRow label="Timeout ms" hint="Runtime clamps to safe limits.">
+                  <Input
+                    type="number"
+                    min={250}
+                    max={60000}
+                    value={String(draftConfig.timeoutMs ?? 3000)}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        timeoutMs: e.target.value ? Number(e.target.value) : undefined,
+                      }))
+                    }
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Memory MB" hint="Runtime clamps to safe limits.">
+                  <Input
+                    type="number"
+                    min={16}
+                    max={1024}
+                    value={String(draftConfig.memoryLimitMb ?? 64)}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        memoryLimitMb: e.target.value ? Number(e.target.value) : undefined,
+                      }))
+                    }
+                    className="h-8 font-mono text-xs"
+                  />
+                </FieldRow>
+                <div className="sm:col-span-2">
+                  <FieldRow label="Code" hint="Snippet receives input object and should return one value.">
+                    <MonacoEditor
+                      height="240px"
+                      language={
+                        String(draftConfig.language || "javascript") === "typescript"
+                          ? "typescript"
+                          : String(draftConfig.language || "javascript") === "python"
+                            ? "python"
+                            : String(draftConfig.language || "javascript") === "java"
+                              ? "java"
+                              : "javascript"
+                      }
+                      value={String(draftConfig.code || "")}
+                      onChange={(value) => setDraftConfig((prev) => ({ ...prev, code: value || "" }))}
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 12,
+                        lineNumbersMinChars: 3,
+                        scrollBeyondLastLine: false,
+                      }}
+                    />
+                  </FieldRow>
+                </div>
+                <div className="sm:col-span-2">
+                  <FieldRow label="Inputs" hint="Each expression is resolved against the current workflow context.">
+                    <div className="space-y-1">
+                      {(Array.isArray(draftConfig.inputs) ? draftConfig.inputs : []).map((row: any, idx: number) => (
+                        <div key={`code-input-${idx}`} className="grid grid-cols-[1fr_2fr_auto] gap-1">
+                          <Input
+                            placeholder="name"
+                            value={String(row?.name || "")}
+                            onChange={(e) =>
+                              setDraftConfig((prev) => {
+                                const rows = Array.isArray(prev.inputs) ? [...prev.inputs] : [];
+                                rows[idx] = { ...(rows[idx] || {}), name: e.target.value };
+                                return { ...prev, inputs: rows };
+                              })
+                            }
+                            className="h-8 font-mono text-xs"
+                          />
+                          <Input
+                            placeholder="expression (e.g. $.vars.counter)"
+                            value={String(row?.expression || "")}
+                            onChange={(e) =>
+                              setDraftConfig((prev) => {
+                                const rows = Array.isArray(prev.inputs) ? [...prev.inputs] : [];
+                                rows[idx] = { ...(rows[idx] || {}), expression: e.target.value };
+                                return { ...prev, inputs: rows };
+                              })
+                            }
+                            className="h-8 font-mono text-xs"
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 px-2 text-xs"
+                            onClick={() =>
+                              setDraftConfig((prev) => {
+                                const rows = Array.isArray(prev.inputs) ? [...prev.inputs] : [];
+                                rows.splice(idx, 1);
+                                return { ...prev, inputs: rows };
+                              })
+                            }
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-2 pt-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          onClick={() =>
+                            setDraftConfig((prev) => ({
+                              ...prev,
+                              inputs: [...(Array.isArray(prev.inputs) ? prev.inputs : []), { name: "", expression: "" }],
+                            }))
+                          }
+                        >
+                          Add input
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          disabled={codePreviewLoading || !String(draftConfig.code || "").trim()}
+                          onClick={async () => {
+                            setCodePreviewLoading(true);
+                            try {
+                              const result = await api.toolchains.previewCode({
+                                language: String(draftConfig.language || "javascript"),
+                                code: String(draftConfig.code || ""),
+                                input: {},
+                                timeoutMs: Number(draftConfig.timeoutMs || 3000),
+                                memoryLimitMb: Number(draftConfig.memoryLimitMb || 64),
+                              });
+                              setCodePreviewResult(JSON.stringify(result, null, 2));
+                            } catch (error: any) {
+                              setCodePreviewResult(
+                                JSON.stringify(
+                                  { success: false, error: String(error?.message || "Preview failed") },
+                                  null,
+                                  2
+                                )
+                              );
+                            } finally {
+                              setCodePreviewLoading(false);
+                            }
+                          }}
+                        >
+                          {codePreviewLoading ? "Previewing..." : "Run preview"}
+                        </Button>
+                      </div>
+                      {codePreviewResult ? (
+                        <pre className="max-h-40 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 font-mono text-[11px] text-slate-700">
+                          {codePreviewResult}
+                        </pre>
+                      ) : null}
+                    </div>
+                  </FieldRow>
+                </div>
+              </>
             )}
 
             {(node.type === "tool" || node.type === "mcp_tool") && (

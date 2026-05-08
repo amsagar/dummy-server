@@ -79,4 +79,13 @@ public final class ToolChainDtos {
         private Map<String, Object> positions;
         private Map<String, Object> viewport;
     }
+
+    @Data
+    public static class ToolChainCodePreviewRequest {
+        private String language;
+        private String code;
+        private Map<String, Object> input;
+        private Long timeoutMs;
+        private Integer memoryLimitMb;
+    }
 }

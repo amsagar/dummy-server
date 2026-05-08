@@ -1,0 +1,29 @@
+{
+  "name": "Code Execute",
+  "description": "Start -> code_execute -> end template for inline computation.",
+  "graph": {
+    "nodes": [
+      { "id": "start", "type": "start", "label": "Start", "config": {} },
+      {
+        "id": "code_1",
+        "type": "code_execute",
+        "label": "Compute",
+        "config": {
+          "language": "javascript",
+          "code": "const a = Number(input.a || 0);\\nconst b = Number(input.b || 0);\\nreturn { total: a + b };",
+          "inputs": [
+            { "name": "a", "expression": "$.chainInput.a" },
+            { "name": "b", "expression": "$.chainInput.b" }
+          ],
+          "timeoutMs": 3000,
+          "memoryLimitMb": 64
+        }
+      },
+      { "id": "end", "type": "end", "label": "End", "config": {} }
+    ],
+    "edges": [
+      { "from": "start", "to": "code_1" },
+      { "from": "code_1", "to": "end" }
+    ]
+  }
+}

@@ -58,6 +58,10 @@ public class RuntimeTuningProperties {
     private int toolOutputVfsSpillThresholdChars = 16_384;
     private int maxOutputTokens = 8192;
     private boolean enableAnthropicThinking = false;
+    private long codeExecutionDefaultTimeoutMs = 3_000;
+    private long codeExecutionMaxTimeoutMs = 15_000;
+    private int codeExecutionDefaultMemoryLimitMb = 64;
+    private int codeExecutionMaxMemoryLimitMb = 256;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
     private StrictScope strictScope = new StrictScope();
 
@@ -505,6 +509,38 @@ public class RuntimeTuningProperties {
 
     public void setEnableAnthropicThinking(boolean enableAnthropicThinking) {
         this.enableAnthropicThinking = enableAnthropicThinking;
+    }
+
+    public long getCodeExecutionDefaultTimeoutMs() {
+        return codeExecutionDefaultTimeoutMs;
+    }
+
+    public void setCodeExecutionDefaultTimeoutMs(long codeExecutionDefaultTimeoutMs) {
+        this.codeExecutionDefaultTimeoutMs = codeExecutionDefaultTimeoutMs;
+    }
+
+    public long getCodeExecutionMaxTimeoutMs() {
+        return codeExecutionMaxTimeoutMs;
+    }
+
+    public void setCodeExecutionMaxTimeoutMs(long codeExecutionMaxTimeoutMs) {
+        this.codeExecutionMaxTimeoutMs = codeExecutionMaxTimeoutMs;
+    }
+
+    public int getCodeExecutionDefaultMemoryLimitMb() {
+        return codeExecutionDefaultMemoryLimitMb;
+    }
+
+    public void setCodeExecutionDefaultMemoryLimitMb(int codeExecutionDefaultMemoryLimitMb) {
+        this.codeExecutionDefaultMemoryLimitMb = codeExecutionDefaultMemoryLimitMb;
+    }
+
+    public int getCodeExecutionMaxMemoryLimitMb() {
+        return codeExecutionMaxMemoryLimitMb;
+    }
+
+    public void setCodeExecutionMaxMemoryLimitMb(int codeExecutionMaxMemoryLimitMb) {
+        this.codeExecutionMaxMemoryLimitMb = codeExecutionMaxMemoryLimitMb;
     }
 
 }

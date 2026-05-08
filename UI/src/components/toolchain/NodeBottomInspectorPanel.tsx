@@ -77,6 +77,7 @@ const NODE_TYPE_COLORS: Record<string, string> = {
   iterator: "bg-cyan-100 text-cyan-800 border-cyan-300",
   parallel: "bg-amber-200 text-amber-900 border-amber-400",
   assign: "bg-sky-100 text-sky-900 border-sky-300",
+  code_execute: "bg-teal-100 text-teal-900 border-teal-300",
   subchain: "bg-indigo-100 text-indigo-800 border-indigo-300",
   synthesis: "bg-violet-100 text-violet-800 border-violet-300",
   approval: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-300",
@@ -534,6 +535,28 @@ export default function NodeBottomInspectorPanel({
                 <Section title="Parallel fan-out">
                   <div className="text-xs text-slate-600">
                     Executes all outgoing branches concurrently; downstream merge waits for all incoming branches.
+                  </div>
+                </Section>
+              )}
+              {node.type === "code_execute" && (
+                <Section title="Code execution">
+                  <MetaRow label="Language" mono>
+                    {String(config.language || "javascript")}
+                  </MetaRow>
+                  <MetaRow label="Timeout" mono>
+                    {String(config.timeoutMs || "default")}
+                  </MetaRow>
+                  <MetaRow label="Memory MB" mono>
+                    {String(config.memoryLimitMb || "default")}
+                  </MetaRow>
+                  <MetaRow label="Inputs" mono>
+                    {Array.isArray(config.inputs) ? String(config.inputs.length) : "0"}
+                  </MetaRow>
+                  <div className="mt-2 rounded border border-slate-200 bg-slate-50 p-2">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-500">Snippet</div>
+                    <pre className="mt-1 max-h-44 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-slate-700">
+                      {String(config.code || "") || "// empty"}
+                    </pre>
                   </div>
                 </Section>
               )}

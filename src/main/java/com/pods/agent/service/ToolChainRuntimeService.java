@@ -16,6 +16,8 @@ import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.ToolChainApprovalRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
+import com.pods.agent.service.codeexec.CodeExecutionResult;
+import com.pods.agent.service.codeexec.CodeExecutionService;
 import com.pods.agent.service.expression.BooleanExpressionEvaluator;
 import com.pods.agent.service.expression.PathResolver;
 import lombok.extern.slf4j.Slf4j;
@@ -59,6 +61,7 @@ public class ToolChainRuntimeService {
     private final ArgMappingResolver argMappingResolver;
     private final LlmArgResolver llmArgResolver;
     private final BooleanExpressionEvaluator booleanExpressionEvaluator;
+    private final CodeExecutionService codeExecutionService;
     private final ExecutorService runExecutor = Executors.newFixedThreadPool(6);
     private final ExecutorService branchExecutor = Executors.newFixedThreadPool(8);
     private final ConcurrentHashMap<String, CompletableFuture<ApprovalDecision>> pendingApprovals = new ConcurrentHashMap<>();
@@ -77,7 +80,8 @@ public class ToolChainRuntimeService {
                                    ObjectMapper objectMapper,
                                    ArgMappingResolver argMappingResolver,
                                    LlmArgResolver llmArgResolver,
-                                   BooleanExpressionEvaluator booleanExpressionEvaluator) {
+                                   BooleanExpressionEvaluator booleanExpressionEvaluator,
+                                   CodeExecutionService codeExecutionService) {
         this.toolChainService = toolChainService;
         this.toolRegistryService = toolRegistryService;
         this.toolExecutionService = toolExecutionService;
@@ -93,6 +97,7 @@ public class ToolChainRuntimeService {
         this.argMappingResolver = argMappingResolver;
         this.llmArgResolver = llmArgResolver;
         this.booleanExpressionEvaluator = booleanExpressionEvaluator;
+        this.codeExecutionService = codeExecutionService;
     }
 
     public ToolChainRun execute(String toolChainId,
@@ -386,6 +391,7 @@ public class ToolChainRuntimeService {
                 case "iterator" -> executeIterator(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "assign" -> executeAssign(node, context);
                 case "parallel" -> StepResult.success(Map.of(node.id(), Map.of("parallel", true)), null);
+                case "code_execute" -> executeCodeNode(node, context);
                 case "tool", "mcp_tool" -> executeToolNode(node, context, runOptions);
                 case "decision_table" -> executeDecisionTableNode(node, context);
                 case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
@@ -539,6 +545,67 @@ public class ToolChainRuntimeService {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put(node.id(), step);
         return StepResult.success(out, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private StepResult executeCodeNode(NodeModel node, Map<String, Object> context) {
+        String language = node.configString("language");
+        String code = node.configString("code");
+        if (code == null || code.isBlank()) {
+            return StepResult.failed("Code node is missing executable code.");
+        }
+        Map<String, Object> resolvedInput = resolveCodeNodeInput(node, context);
+        Long timeout = asLong(node.config().get("timeoutMs"));
+        Integer memory = asInt(node.config().get("memoryLimitMb"));
+        CodeExecutionResult result = codeExecutionService.execute(language, code, resolvedInput, timeout, memory);
+        if (!result.success()) {
+            return StepResult.failed(result.error());
+        }
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("input", resolvedInput);
+        step.put("output", result.output());
+        if (!result.stdout().isBlank()) step.put("stdout", result.stdout());
+        if (!result.stderr().isBlank()) step.put("stderr", result.stderr());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put(node.id(), step);
+        return StepResult.success(out, null);
+    }
+
+    private Map<String, Object> resolveCodeNodeInput(NodeModel node, Map<String, Object> context) {
+        Object inputsObj = node.config().get("inputs");
+        if (!(inputsObj instanceof List<?> rows) || rows.isEmpty()) {
+            return resolveNodeInput(node, context);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Object row : rows) {
+            if (!(row instanceof Map<?, ?> raw)) continue;
+            String name = raw.get("name") == null ? "" : String.valueOf(raw.get("name")).trim();
+            if (name.isBlank()) continue;
+            Object expression = raw.containsKey("expression") ? raw.get("expression") : raw.get("value");
+            Object value = argMappingResolver.resolveOne(expression, context, key -> resolvePath(context, key));
+            out.put(name, value);
+        }
+        return out;
+    }
+
+    private Long asLong(Object value) {
+        if (value instanceof Number n) return n.longValue();
+        if (value == null) return null;
+        try {
+            return Long.parseLong(String.valueOf(value).trim());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Integer asInt(Object value) {
+        if (value instanceof Number n) return n.intValue();
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(String.valueOf(value).trim());
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     /**

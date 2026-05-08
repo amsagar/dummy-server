@@ -51,6 +51,10 @@ pods:
     max-tool-callbacks-per-turn: 120
     tool-output-vfs-spill-threshold-chars: 16384
     max-output-tokens: 8192
+    code-execution-default-timeout-ms: 3000
+    code-execution-max-timeout-ms: 15000
+    code-execution-default-memory-limit-mb: 64
+    code-execution-max-memory-limit-mb: 256
     summary-token-threshold: 6000
     auto-routing-low-threshold: 400
     auto-routing-medium-threshold: 1400

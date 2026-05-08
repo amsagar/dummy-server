@@ -39,6 +39,7 @@ const CAPABILITY_TITLES: Record<string, string> = {
   iterator: "Loop",
   parallel: "Parallel",
   assign: "Assign",
+  code_execute: "Code Execute",
   subchain: "Subchain",
   merge: "Merge",
   wait: "Wait",
@@ -141,6 +142,8 @@ export function capabilitySummary(node: ToolGraphNode | null | undefined): strin
       return `Updates workflow variables (${Array.isArray(cfg.assignments) ? cfg.assignments.length : 0} assignment(s)).`;
     case "parallel":
       return "Fans out to all outgoing branches concurrently.";
+    case "code_execute":
+      return `Executes ${String(cfg.language || "javascript")} snippet${cfg.inputs?.length ? ` with ${cfg.inputs.length} mapped input(s)` : ""}.`;
     case "tool":
     case "mcp_tool":
       return `Invokes ${String(cfg.toolName || "tool")} with mapped inputs${cfg.approvalMode ? ` (approval: ${cfg.approvalMode})` : ""}.`;
@@ -345,6 +348,29 @@ export function collectGraphWarnings(graph: ToolGraph): GraphWarning[] {
       const assignments = Array.isArray(cfg.assignments) ? cfg.assignments : [];
       if (assignments.length === 0) {
         warnings.push({ nodeId: String(node.id), message: "Assign node has no assignments." });
+      }
+    }
+    if (type === "code_execute") {
+      const language = String(cfg.language || "").toLowerCase();
+      if (!["javascript", "typescript", "python", "java"].includes(language)) {
+        warnings.push({ nodeId: String(node.id), message: "Code Execute language must be javascript/typescript/python/java." });
+      }
+      const code = String(cfg.code || "").trim();
+      if (!code) warnings.push({ nodeId: String(node.id), message: "Code Execute snippet is empty." });
+      const timeout = Number(cfg.timeoutMs ?? 0);
+      if (Number.isFinite(timeout) && timeout > 0 && (timeout < 250 || timeout > 60000)) {
+        warnings.push({ nodeId: String(node.id), message: "Code Execute timeoutMs should be between 250 and 60000." });
+      }
+      const memory = Number(cfg.memoryLimitMb ?? 0);
+      if (Number.isFinite(memory) && memory > 0 && (memory < 16 || memory > 1024)) {
+        warnings.push({ nodeId: String(node.id), message: "Code Execute memoryLimitMb should be between 16 and 1024." });
+      }
+      const inputs = Array.isArray(cfg.inputs) ? cfg.inputs : [];
+      for (const row of inputs) {
+        if (!String(row?.name || "").trim()) {
+          warnings.push({ nodeId: String(node.id), message: "Code Execute inputs[] contains an entry without name." });
+          break;
+        }
       }
     }
   }

@@ -218,6 +218,18 @@ export const api = {
         headers: getHeaders(),
         body: JSON.stringify({ expression }),
       }).then(handleResponse),
+    previewCode: (payload: {
+      language: string;
+      code: string;
+      input?: Record<string, any>;
+      timeoutMs?: number;
+      memoryLimitMb?: number;
+    }) =>
+      fetch(`${BASE_URL}/toolchains/code/preview`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }).then(handleResponse),
   },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),

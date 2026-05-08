@@ -153,8 +153,9 @@ Validation rules:
 - graph.nodes and graph.edges must be present and non-empty.
 - intents must contain at least one non-empty intent.
 - graph must not contain any node with type "skill".
-- Prefer modern primitives when they reduce nodes: decision/switch expressions, iterator loopMode+exitCondition, error edges (kind=error), assign variables, and parallel fanout.
+- Prefer modern primitives when they reduce nodes: decision/switch expressions, iterator loopMode+exitCondition, error edges (kind=error), assign variables, parallel fanout, and code_execute for deterministic transforms.
 - Use graph.variables for reusable workflow state and assign nodes for mutation.
+- code_execute nodes must include config.language (javascript|typescript|python|java), config.code, and optional config.inputs[] mapping rows.
 - referencedSkills must include only skills you actually loaded via skill tool.
 - inputSchema and outputSchema must be JSON objects.
 - Do not include commentary text around JSON.

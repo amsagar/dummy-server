@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Replays the LLM-authored argMappings against the recorded turn that seeded the
@@ -326,6 +327,34 @@ public class MappingValidator {
             if (!systemFunctions.hasFunction(name)) return "unknown mapping function: " + name;
         }
         return null;
+    }
+
+    public List<String> validateCodeExecuteConfig(Map<String, Object> config) {
+        List<String> issues = new ArrayList<>();
+        Map<String, Object> safe = config == null ? Map.of() : config;
+        String language = String.valueOf(safe.getOrDefault("language", "")).trim().toLowerCase(Locale.ROOT);
+        if (!Set.of("javascript", "typescript", "python", "java").contains(language)) {
+            issues.add("code_execute language must be one of javascript/typescript/python/java");
+        }
+        String code = String.valueOf(safe.getOrDefault("code", ""));
+        if (code.isBlank()) {
+            issues.add("code_execute code cannot be empty");
+        }
+        if ("java".equals(language)) {
+            String lower = code.toLowerCase(Locale.ROOT);
+            if (lower.contains("java.io")
+                    || lower.contains("java.net")
+                    || lower.contains("java.nio.file")
+                    || lower.contains("runtime.getruntime")
+                    || lower.contains("processbuilder")) {
+                issues.add("code_execute java snippet uses blocked API");
+            }
+        }
+        Object inputsObj = safe.get("inputs");
+        if (inputsObj != null && !(inputsObj instanceof List<?>)) {
+            issues.add("code_execute inputs must be a list");
+        }
+        return issues;
     }
 
     public record RecordedCall(String toolName, Object input, Object output) {}

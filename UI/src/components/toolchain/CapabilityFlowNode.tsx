@@ -10,6 +10,7 @@ function typeTone(type: string) {
   if (normalized === "parallel") return "border-amber-400 bg-amber-100 text-amber-900";
   if (normalized === "iterator") return "border-cyan-300 bg-cyan-50 text-cyan-900";
   if (normalized === "assign") return "border-sky-300 bg-sky-50 text-sky-900";
+  if (normalized === "code_execute") return "border-teal-300 bg-teal-50 text-teal-900";
   if (normalized === "subchain") return "border-indigo-300 bg-indigo-50 text-indigo-900";
   if (normalized === "synthesis") return "border-violet-300 bg-violet-50 text-violet-900";
   return "border-slate-300 bg-white text-slate-900";

@@ -2731,7 +2731,7 @@ Designer instruction:
         }
         for (Map<String, Object> node : nodes) {
             String type = stringValue(node.get("type")).toLowerCase(Locale.ROOT);
-            if (!Set.of("start", "end", "tool", "mcp_tool", "decision", "synthesis").contains(type)) {
+            if (!Set.of("start", "end", "tool", "mcp_tool", "decision", "synthesis", "code_execute").contains(type)) {
                 issues.add("unknown node type '" + type + "' on " + node.get("id"));
                 continue;
             }
@@ -2749,6 +2749,51 @@ Designer instruction:
                 };
                 if (!validForType.contains(toolName)) {
                     issues.add(type + " '" + toolName + "' (node " + node.get("id") + ") not in catalog");
+                }
+            }
+            if ("code_execute".equals(type)) {
+                Map<String, Object> config = readMap(node.get("config"));
+                String language = stringValue(config.get("language")).toLowerCase(Locale.ROOT);
+                String code = stringValue(config.get("code"));
+                if (!Set.of("javascript", "typescript", "python", "java").contains(language)) {
+                    issues.add("code_execute node " + node.get("id") + " has unsupported language '" + language + "'");
+                }
+                if (code.isBlank()) {
+                    issues.add("code_execute node " + node.get("id") + " has empty code");
+                }
+                Object timeoutObj = config.get("timeoutMs");
+                if (timeoutObj instanceof Number n && (n.longValue() < 250L || n.longValue() > 60_000L)) {
+                    issues.add("code_execute node " + node.get("id") + " timeoutMs must be between 250 and 60000");
+                }
+                Object memoryObj = config.get("memoryLimitMb");
+                if (memoryObj instanceof Number n && (n.intValue() < 16 || n.intValue() > 1024)) {
+                    issues.add("code_execute node " + node.get("id") + " memoryLimitMb must be between 16 and 1024");
+                }
+                Object inputsObj = config.get("inputs");
+                if (inputsObj != null && !(inputsObj instanceof List<?>)) {
+                    issues.add("code_execute node " + node.get("id") + " inputs must be a list");
+                }
+                if (inputsObj instanceof List<?> rows) {
+                    for (Object row : rows) {
+                        if (!(row instanceof Map<?, ?> mapping)) {
+                            issues.add("code_execute node " + node.get("id") + " inputs entries must be objects");
+                            continue;
+                        }
+                        String name = stringValue(mapping.get("name"));
+                        if (name.isBlank()) {
+                            issues.add("code_execute node " + node.get("id") + " has input entry without name");
+                        }
+                    }
+                }
+                if ("java".equals(language)) {
+                    String lowerCode = code.toLowerCase(Locale.ROOT);
+                    if (lowerCode.contains("java.io")
+                            || lowerCode.contains("java.net")
+                            || lowerCode.contains("java.nio.file")
+                            || lowerCode.contains("runtime.getruntime")
+                            || lowerCode.contains("processbuilder")) {
+                        issues.add("code_execute node " + node.get("id") + " uses blocked Java API");
+                    }
                 }
             }
         }
