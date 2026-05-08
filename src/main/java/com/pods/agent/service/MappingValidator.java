@@ -1,5 +1,7 @@
 package com.pods.agent.service;
 
+import com.pods.agent.service.expression.PathResolver;
+import com.pods.agent.service.mapping.SystemFunctions;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
@@ -28,6 +30,7 @@ public class MappingValidator {
 
     private final ArgMappingResolver argMappingResolver;
     private final ObjectMapper objectMapper;
+    private final SystemFunctions systemFunctions = new SystemFunctions();
 
     public MappingValidator(ArgMappingResolver argMappingResolver, ObjectMapper objectMapper) {
         this.argMappingResolver = argMappingResolver;
@@ -117,6 +120,11 @@ public class MappingValidator {
         for (String argName : allArgs) {
             Object source = argMappings.get(argName);
             Object expectedValue = expected.get(argName);
+            String sourceError = validateMappingSourceSyntax(source);
+            if (sourceError != null) {
+                failures.add(new Failure(nodeId, argName, expectedValue, null, sourceError));
+                continue;
+            }
             // Recorded arg has no mapping → fail loud. Catches off-by-one node-indexing
             // and the "LLM forgot half the args" failure mode (e.g., decisionTableEvaluate
             // authored with only tableName and no inputs).
@@ -209,6 +217,11 @@ public class MappingValidator {
             for (String argName : allArgs) {
                 Object source = argMappings.get(argName);
                 Object expected = sample.get(argName);
+                String sourceError = validateMappingSourceSyntax(source);
+                if (sourceError != null) {
+                    failures.add(new Failure(nodeId, "items[" + i + "]." + argName, expected, null, sourceError));
+                    continue;
+                }
                 if (source == null) {
                     if (expected != null) {
                         failures.add(new Failure(nodeId, "items[" + i + "]." + argName, expected, null,
@@ -283,22 +296,36 @@ public class MappingValidator {
     }
 
     private Object dotPath(Map<String, Object> context, String key) {
-        if (context == null || key == null) return null;
-        String[] parts = key.split("\\.");
-        Object current = context;
-        for (String part : parts) {
-            if (!(current instanceof Map<?, ?> map)) return null;
-            Object next = null;
-            for (Map.Entry<?, ?> e : map.entrySet()) {
-                if (e.getKey() != null && String.valueOf(e.getKey()).equalsIgnoreCase(part)) {
-                    next = e.getValue();
-                    break;
-                }
+        return PathResolver.resolvePath(context, key, true);
+    }
+
+    private String validateMappingSourceSyntax(Object source) {
+        if (!(source instanceof String s)) return null;
+        String raw = s.trim();
+        if (raw.isEmpty()) return null;
+        if (raw.startsWith("#if(")) {
+            int depth = 0;
+            for (char c : raw.toCharArray()) {
+                if (c == '(') depth++;
+                if (c == ')') depth--;
+                if (depth < 0) return "conditional mapping has unbalanced parentheses";
             }
-            if (next == null) return null;
-            current = next;
+            if (!raw.contains("#endif")) return "conditional mapping missing #endif";
+            return null;
         }
-        return current;
+        if (raw.startsWith("ref:")) {
+            String ref = raw.substring("ref:".length());
+            if (!(ref.startsWith("tool/") || ref.startsWith("chain/") || ref.startsWith("dt/") || ref.startsWith("secret/"))) {
+                return "unsupported ref prefix. Use ref:tool/, ref:chain/, ref:dt/, or ref:secret/";
+            }
+            return null;
+        }
+        int open = raw.indexOf('(');
+        if (open > 0 && raw.endsWith(")")) {
+            String name = raw.substring(0, open).trim().toLowerCase(Locale.ROOT);
+            if (!systemFunctions.hasFunction(name)) return "unknown mapping function: " + name;
+        }
+        return null;
     }
 
     public record RecordedCall(String toolName, Object input, Object output) {}

@@ -75,6 +75,8 @@ const NODE_TYPE_COLORS: Record<string, string> = {
   decision: "bg-amber-100 text-amber-800 border-amber-300",
   switch: "bg-orange-100 text-orange-800 border-orange-300",
   iterator: "bg-cyan-100 text-cyan-800 border-cyan-300",
+  parallel: "bg-amber-200 text-amber-900 border-amber-400",
+  assign: "bg-sky-100 text-sky-900 border-sky-300",
   subchain: "bg-indigo-100 text-indigo-800 border-indigo-300",
   synthesis: "bg-violet-100 text-violet-800 border-violet-300",
   approval: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-300",
@@ -442,6 +444,11 @@ export default function NodeBottomInspectorPanel({
 
               {node.type === "decision" && (
                 <Section title="Decision">
+                  {String(config.expression || "").trim() ? (
+                    <MetaRow label="Expression" mono>
+                      {String(config.expression)}
+                    </MetaRow>
+                  ) : null}
                   <MetaRow label="Source key" mono>
                     {String(config.sourceKey || "")}
                   </MetaRow>
@@ -474,7 +481,10 @@ export default function NodeBottomInspectorPanel({
                     {Array.isArray(config.cases) && config.cases.length > 0 ? (
                       config.cases.map((row: any, idx: number) => (
                         <div key={`case-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 font-mono">
-                          when={String(row?.when || "")} → {String(row?.to || "")}
+                          {String(row?.whenExpression || "").trim()
+                            ? `whenExpression=${String(row?.whenExpression)}`
+                            : `when=${String(row?.when || "")}`}{" "}
+                          → {String(row?.to || "")}
                         </div>
                       ))
                     ) : (
@@ -494,6 +504,37 @@ export default function NodeBottomInspectorPanel({
                   <MetaRow label="Mode" mono>
                     {config.toolName ? `Inline tool (${String(config.toolName)})` : `Subchain (${String(config.subChainId || "—")})`}
                   </MetaRow>
+                  <MetaRow label="Loop mode" mono>
+                    {String(config.loopMode || "foreach")}
+                  </MetaRow>
+                  <MetaRow label="Exit condition" mono>
+                    {String(config.exitCondition || "—")}
+                  </MetaRow>
+                  <MetaRow label="Collect output" mono>
+                    {config.collectOutput ? "true" : "false"}
+                  </MetaRow>
+                </Section>
+              )}
+              {node.type === "assign" && (
+                <Section title="Variable assignments">
+                  {Array.isArray(config.assignments) && config.assignments.length > 0 ? (
+                    <div className="space-y-1 text-xs">
+                      {config.assignments.map((row: any, idx: number) => (
+                        <div key={`assignment-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 font-mono">
+                          {String(row?.var || "")} = {String(row?.expression || "")}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] italic text-slate-400">No assignments configured.</div>
+                  )}
+                </Section>
+              )}
+              {node.type === "parallel" && (
+                <Section title="Parallel fan-out">
+                  <div className="text-xs text-slate-600">
+                    Executes all outgoing branches concurrently; downstream merge waits for all incoming branches.
+                  </div>
                 </Section>
               )}
 

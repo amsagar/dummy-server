@@ -29,6 +29,7 @@ import {
   type ToolGraphNode,
   graphToFlow,
   normalizeGraph,
+  canonicalizeGraphToolNodeTypes,
   parseGraphJson,
   flowEdgesToGraph,
   collectGraphWarnings,
@@ -139,6 +140,27 @@ function normalizeLayoutPositions(raw: any): Record<string, { x: number; y: numb
   return normalized;
 }
 
+function mergeLayoutPositions(
+  userPositions: Record<string, { x: number; y: number }>,
+  sessionPositions: Record<string, { x: number; y: number }>,
+  preferSession: boolean
+): Record<string, { x: number; y: number }> {
+  // Active config sessions should prefer session-scoped coordinates so stale
+  // user-scoped coordinates don't mask recent in-session drags.
+  return preferSession
+    ? { ...userPositions, ...sessionPositions }
+    : { ...sessionPositions, ...userPositions };
+}
+
+function readViewport(raw: any): { x: number; y: number; zoom: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const x = toFiniteNumber((raw as any).x);
+  const y = toFiniteNumber((raw as any).y);
+  const zoom = toFiniteNumber((raw as any).zoom);
+  if (x === null || y === null || zoom === null) return null;
+  return { x, y, zoom };
+}
+
 function readGraphFromLayoutViewport(raw: any): ToolGraph | null {
   const embedded = raw && typeof raw === "object" ? (raw as any)[LAYOUT_VIEWPORT_GRAPH_KEY] : null;
   if (typeof embedded !== "string" || !embedded.trim()) return null;
@@ -211,6 +233,7 @@ export default function ToolChainDesignerPage() {
   const activeToolChainRef = useRef<string>("");
   const layoutPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
   const layoutViewportRef = useRef<Record<string, any>>({});
+  const reactFlowRef = useRef<any>(null);
   const layoutSaveTimerRef = useRef<number | null>(null);
   const modelInitializedRef = useRef<string>("");
   const streamedAssistantIdRef = useRef<string | null>(null);
@@ -283,44 +306,6 @@ export default function ToolChainDesignerPage() {
     if (!activeSessionId) return "No active config session selected.";
     return "";
   }, [toolChainId, activeSessionId]);
-
-  useEffect(() => {
-    if (activeSessionId) return;
-    if (!latest?.graphJson) return;
-    try {
-      const parsed = normalizeGraph(JSON.parse(latest.graphJson));
-      if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
-        setDraftGraph(parsed);
-        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
-        setNodes(rfNodes);
-        setEdges(rfEdges);
-      }
-    } catch {
-      // no-op
-    }
-  }, [latest, setEdges, setNodes, activeSessionId]);
-
-  // Version switcher: when the user picks a specific version from the dropdown,
-  // load that version's graphJson into the board. Selecting "Current draft"
-  // (null) reverts to the active-session / latest behaviour above.
-  useEffect(() => {
-    if (viewedVersionNumber == null) return;
-    const target = (Array.isArray(versions) ? versions : []).find(
-      (v: any) => v.version === viewedVersionNumber
-    );
-    if (!target?.graphJson) return;
-    try {
-      const parsed = normalizeGraph(JSON.parse(target.graphJson));
-      if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
-        setDraftGraph(parsed);
-        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 110);
-        setNodes(rfNodes);
-        setEdges(rfEdges);
-      }
-    } catch {
-      // no-op
-    }
-  }, [viewedVersionNumber, versions, setEdges, setNodes]);
 
   useEffect(() => {
     if (!boardOnlyFullscreen) return;
@@ -479,30 +464,6 @@ export default function ToolChainDesignerPage() {
     enabled: !!toolChainId,
   });
 
-  useEffect(() => {
-    const userPositions = normalizeLayoutPositions(userLayout?.positions);
-    const sessionPositions = normalizeLayoutPositions(sessionLayout?.positions);
-    layoutPositionsRef.current =
-      Object.keys(userPositions).length > 0 ? userPositions : sessionPositions;
-    layoutViewportRef.current =
-      sessionLayout?.viewport && typeof sessionLayout.viewport === "object" ? sessionLayout.viewport : {};
-  }, [sessionLayout, userLayout]);
-
-  const parsedGraph = useMemo<{ nodes: any[]; edges: any[] } | null>(() => {
-    if (!draftGraph?.nodes?.length) return null;
-    return draftGraph;
-  }, [draftGraph]);
-
-  const inspectedNode = useMemo(() => {
-    if (!parsedGraph || !inspectedNodeId) return null;
-    return parsedGraph.nodes.find((n) => String(n.id) === inspectedNodeId) || null;
-  }, [parsedGraph, inspectedNodeId]);
-
-  const editingNode = useMemo(() => {
-    if (!parsedGraph || !editingNodeId) return null;
-    return parsedGraph.nodes.find((n) => String(n.id) === editingNodeId) || null;
-  }, [parsedGraph, editingNodeId]);
-
   const catalogTools = useMemo<any[]>(() => {
     const fromBundle = sessionDetail?.contextBundle?.toolsCatalog;
     if (Array.isArray(fromBundle)) return fromBundle;
@@ -514,6 +475,98 @@ export default function ToolChainDesignerPage() {
     if (Array.isArray(fromBundle)) return fromBundle;
     return [];
   }, [sessionDetail?.contextBundle?.mcpCatalog]);
+
+  const catalogToolNames = useMemo(() => new Set(catalogTools.map((row: any) => String(row?.name || "").trim()).filter(Boolean)), [catalogTools]);
+  const catalogMcpNames = useMemo(() => new Set(catalogMcp.map((row: any) => String(row?.name || "").trim()).filter(Boolean)), [catalogMcp]);
+
+  const canonicalizeGraphForDisplay = useCallback((graph: ToolGraph) => {
+    return canonicalizeGraphToolNodeTypes(graph, catalogToolNames, catalogMcpNames);
+  }, [catalogToolNames, catalogMcpNames]);
+
+  const mergedLayoutPositions = useMemo(() => {
+    const userPositions = normalizeLayoutPositions(userLayout?.positions);
+    const sessionPositions = normalizeLayoutPositions(sessionLayout?.positions);
+    return mergeLayoutPositions(userPositions, sessionPositions, Boolean(activeSessionId));
+  }, [userLayout?.positions, sessionLayout?.positions, activeSessionId]);
+
+  const mergedLayoutViewport = useMemo(() => {
+    const sessionViewport = sessionLayout?.viewport && typeof sessionLayout.viewport === "object"
+      ? sessionLayout.viewport
+      : {};
+    const userViewport = userLayout?.viewport && typeof userLayout.viewport === "object"
+      ? userLayout.viewport
+      : {};
+    return activeSessionId
+      ? { ...userViewport, ...sessionViewport }
+      : { ...sessionViewport, ...userViewport };
+  }, [activeSessionId, sessionLayout?.viewport, userLayout?.viewport]);
+  const persistedViewport = useMemo(() => readViewport(mergedLayoutViewport), [mergedLayoutViewport]);
+
+  useEffect(() => {
+    layoutPositionsRef.current = mergedLayoutPositions;
+    layoutViewportRef.current = mergedLayoutViewport;
+  }, [mergedLayoutPositions, mergedLayoutViewport]);
+
+  useEffect(() => {
+    if (!persistedViewport || !reactFlowRef.current?.setViewport) return;
+    reactFlowRef.current.setViewport(persistedViewport, { duration: 0 });
+  }, [persistedViewport]);
+
+  useEffect(() => {
+    if (activeSessionId) return;
+    if (!latest?.graphJson) return;
+    try {
+      const parsed = normalizeGraph(JSON.parse(latest.graphJson));
+      const canonical = canonicalizeGraphForDisplay(parsed);
+      if (Array.isArray(canonical.nodes) && Array.isArray(canonical.edges)) {
+        setDraftGraph(canonical);
+        const { rfNodes, rfEdges } = graphToFlow(canonical, mergedLayoutPositions, 110);
+        setNodes(rfNodes);
+        setEdges(rfEdges);
+      }
+    } catch {
+      // no-op
+    }
+  }, [latest, setEdges, setNodes, activeSessionId, mergedLayoutPositions, canonicalizeGraphForDisplay]);
+
+  // Version switcher: when the user picks a specific version from the dropdown,
+  // load that version's graphJson into the board. Selecting "Current draft"
+  // (null) reverts to the active-session / latest behaviour above.
+  useEffect(() => {
+    if (viewedVersionNumber == null) return;
+    const target = (Array.isArray(versions) ? versions : []).find(
+      (v: any) => v.version === viewedVersionNumber
+    );
+    if (!target?.graphJson) return;
+    try {
+      const parsed = normalizeGraph(JSON.parse(target.graphJson));
+      const canonical = canonicalizeGraphForDisplay(parsed);
+      if (Array.isArray(canonical.nodes) && Array.isArray(canonical.edges)) {
+        setDraftGraph(canonical);
+        const { rfNodes, rfEdges } = graphToFlow(canonical, mergedLayoutPositions, 110);
+        setNodes(rfNodes);
+        setEdges(rfEdges);
+      }
+    } catch {
+      // no-op
+    }
+  }, [viewedVersionNumber, versions, setEdges, setNodes, mergedLayoutPositions, canonicalizeGraphForDisplay]);
+
+  const parsedGraph = useMemo<{ nodes: any[]; edges: any[] } | null>(() => {
+    if (!draftGraph?.nodes?.length) return null;
+    return canonicalizeGraphForDisplay(draftGraph);
+  }, [draftGraph, canonicalizeGraphForDisplay]);
+
+  const inspectedNode = useMemo(() => {
+    if (!parsedGraph || !inspectedNodeId) return null;
+    return parsedGraph.nodes.find((n) => String(n.id) === inspectedNodeId) || null;
+  }, [parsedGraph, inspectedNodeId]);
+
+  const editingNode = useMemo(() => {
+    if (!parsedGraph || !editingNodeId) return null;
+    return parsedGraph.nodes.find((n) => String(n.id) === editingNodeId) || null;
+  }, [parsedGraph, editingNodeId]);
+
   const workflowInputSchema = useMemo(() => {
     if (viewedVersionNumber != null) {
       const target = (Array.isArray(versions) ? versions : []).find((v: any) => v.version === viewedVersionNumber);
@@ -560,9 +613,10 @@ export default function ToolChainDesignerPage() {
         const parsed =
           readGraphFromLayoutViewport(sessionLayout?.viewport) ||
           normalizeGraph(JSON.parse(sessionDetail.graphJson));
-        const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
+        const canonical = canonicalizeGraphForDisplay(parsed);
+        const { rfNodes, rfEdges } = graphToFlow(canonical, mergedLayoutPositions, 140);
         if (rfNodes.length > 0) {
-          setDraftGraph(parsed);
+          setDraftGraph(canonical);
           setNodes(rfNodes);
           setEdges(rfEdges);
         }
@@ -602,7 +656,7 @@ export default function ToolChainDesignerPage() {
     setPendingInteractions(hydratedPending);
     setInteractionDrafts({});
     setInteractionSelections({});
-  }, [sessionDetail, setEdges, setNodes, isConfigStreaming, nodes.length, sessionLayout?.viewport]);
+  }, [sessionDetail, setEdges, setNodes, isConfigStreaming, sessionLayout?.viewport, sessionLayout?.positions, userLayout?.positions, mergedLayoutPositions, canonicalizeGraphForDisplay]);
 
   const saveLayoutMutation = useMutation({
     mutationFn: ({
@@ -621,29 +675,35 @@ export default function ToolChainDesignerPage() {
   const saveUserLayoutMutation = useMutation({
     mutationFn: ({
       positions,
+      viewport,
     }: {
       positions: Record<string, { x: number; y: number }>;
-    }) => api.toolchains.saveUserLayout(toolChainId, { positions }),
+      viewport?: Record<string, any>;
+    }) => api.toolchains.saveUserLayout(toolChainId, { positions, viewport: viewport || {} }),
     onError: (e: any) => toast.error(e.message || "Failed to save board layout"),
   });
+
+  const buildNodePositions = useCallback((nodeList: any[]) => {
+    return nodeList.reduce((acc, node) => {
+      const x = toFiniteNumber(node?.position?.x);
+      const y = toFiniteNumber(node?.position?.y);
+      if (x !== null && y !== null) {
+        acc[String(node.id)] = { x, y };
+      }
+      return acc;
+    }, {} as Record<string, { x: number; y: number }>);
+  }, []);
 
   const persistNodeLayout = useCallback(
     (nextNodes: any[]) => {
       if (!toolChainId) return;
-      const positions = nextNodes.reduce((acc, node) => {
-        const x = toFiniteNumber(node?.position?.x);
-        const y = toFiniteNumber(node?.position?.y);
-        if (x !== null && y !== null) {
-          acc[String(node.id)] = { x, y };
-        }
-        return acc;
-      }, {} as Record<string, { x: number; y: number }>);
+      const positions = buildNodePositions(nextNodes);
       layoutPositionsRef.current = positions;
       if (layoutSaveTimerRef.current !== null) {
         window.clearTimeout(layoutSaveTimerRef.current);
       }
       layoutSaveTimerRef.current = window.setTimeout(() => {
-        saveUserLayoutMutation.mutate({ positions });
+        saveUserLayoutMutation.mutate({ positions, viewport: layoutViewportRef.current || {} });
         if (activeSessionId) {
           saveLayoutMutation.mutate({
             sessionId: activeSessionId,
@@ -653,23 +713,26 @@ export default function ToolChainDesignerPage() {
         }
       }, 450);
     },
-    [activeSessionId, saveLayoutMutation, saveUserLayoutMutation, toolChainId]
+    [activeSessionId, saveLayoutMutation, saveUserLayoutMutation, toolChainId, buildNodePositions]
   );
 
   const persistGraphDraft = useCallback(
-    (graph: ToolGraph) => {
+    (graph: ToolGraph, nodeSnapshot?: any[]) => {
       setDraftGraph(graph);
       if (!toolChainId || !activeSessionId) return;
       const graphJson = JSON.stringify(graph);
       const nextViewport = { ...(layoutViewportRef.current || {}), [LAYOUT_VIEWPORT_GRAPH_KEY]: graphJson };
       layoutViewportRef.current = nextViewport;
+      const positions = buildNodePositions(nodeSnapshot ?? nodes);
+      layoutPositionsRef.current = positions;
+      saveUserLayoutMutation.mutate({ positions, viewport: nextViewport });
       saveLayoutMutation.mutate({
         sessionId: activeSessionId,
-        positions: layoutPositionsRef.current || {},
+        positions,
         viewport: nextViewport,
       });
     },
-    [activeSessionId, saveLayoutMutation, toolChainId]
+    [activeSessionId, buildNodePositions, nodes, saveLayoutMutation, saveUserLayoutMutation, toolChainId]
   );
 
   const handleNodesChange = useCallback(
@@ -702,13 +765,13 @@ export default function ToolChainDesignerPage() {
         setDraftGraph((prev) => {
           const updated = normalizeGraph(prev);
           updated.edges = flowEdgesToGraph(next);
-          persistGraphDraft(updated);
+          persistGraphDraft(updated, nodes);
           return updated;
         });
         return next;
       });
     },
-    [persistGraphDraft, setEdges]
+    [persistGraphDraft, setEdges, nodes]
   );
 
   const handleConnect = useCallback(
@@ -718,13 +781,13 @@ export default function ToolChainDesignerPage() {
         setDraftGraph((prev) => {
           const updated = normalizeGraph(prev);
           updated.edges = flowEdgesToGraph(next);
-          persistGraphDraft(updated);
+          persistGraphDraft(updated, nodes);
           return updated;
         });
         return next;
       });
     },
-    [persistGraphDraft, setEdges]
+    [persistGraphDraft, setEdges, nodes]
   );
 
   const appendSystemMessage = (
@@ -990,9 +1053,10 @@ export default function ToolChainDesignerPage() {
               if (shouldRenderDraftGraph(state)) {
                 try {
                   const parsed = normalizeGraph(JSON.parse(state.graphJson));
-                  const { rfNodes, rfEdges } = graphToFlow(parsed, layoutPositionsRef.current, 140);
+                  const canonical = canonicalizeGraphForDisplay(parsed);
+                  const { rfNodes, rfEdges } = graphToFlow(canonical, mergedLayoutPositions, 140);
                   if (rfNodes.length > 0) {
-                    setDraftGraph(parsed);
+                    setDraftGraph(canonical);
                     setNodes(rfNodes);
                     setEdges(rfEdges);
                   }
@@ -1219,14 +1283,14 @@ export default function ToolChainDesignerPage() {
         } else {
           toast.success("Node updated");
         }
-        persistGraphDraft(graph);
-        const { rfNodes, rfEdges } = graphToFlow(graph, layoutPositionsRef.current, 140);
+        persistGraphDraft(graph, nodes);
+        const { rfNodes, rfEdges } = graphToFlow(graph, mergedLayoutPositions, 140);
         setNodes(rfNodes);
         setEdges(rfEdges);
         return graph;
       });
     },
-    [persistGraphDraft, setEdges, setNodes]
+    [persistGraphDraft, setEdges, setNodes, mergedLayoutPositions, nodes]
   );
 
   return (
@@ -1386,10 +1450,24 @@ export default function ToolChainDesignerPage() {
                   setInspectedNodeId(String(n.id));
                   setEditingNodeId(String(n.id));
                 }}
+                onMoveEnd={(_, viewport) => {
+                  layoutViewportRef.current = {
+                    ...(layoutViewportRef.current || {}),
+                    x: viewport.x,
+                    y: viewport.y,
+                    zoom: viewport.zoom,
+                  };
+                }}
                 onPaneClick={() => setInspectedNodeId(null)}
                 nodeTypes={nodeTypes}
                 edgeTypes={edgeTypes}
-                fitView
+                onInit={(instance) => {
+                  reactFlowRef.current = instance;
+                  if (persistedViewport) {
+                    instance.setViewport(persistedViewport, { duration: 0 });
+                  }
+                }}
+                fitView={!persistedViewport}
                 proOptions={{ hideAttribution: true }}
                 style={{ width: "100%", height: "100%" }}
               >

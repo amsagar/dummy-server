@@ -40,6 +40,8 @@ export default function ToolChainsPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [runToolChainId, setRunToolChainId] = useState<string>("");
   const [name, setName] = useState("");
@@ -64,6 +66,14 @@ export default function ToolChainsPage() {
     queryKey: ["toolchains", "pending-system-proposals"],
     queryFn: () => api.toolchains.pendingSystemProposals(),
   });
+  const { data: templatesData } = useQuery<any>({
+    queryKey: ["toolchain-templates"],
+    queryFn: () => api.toolchains.templates(),
+  });
+  const templates = useMemo(
+    () => (Array.isArray(templatesData?.templates) ? templatesData.templates : []),
+    [templatesData]
+  );
   const pendingSystemApprovals = useMemo(
     () => (Array.isArray(pendingSystemApprovalsData?.proposals) ? pendingSystemApprovalsData.proposals : []),
     [pendingSystemApprovalsData]
@@ -84,6 +94,17 @@ export default function ToolChainsPage() {
       toast.success("ToolChain created");
     },
     onError: (e: any) => toast.error(e.message || "Failed to create ToolChain"),
+  });
+  const createFromTemplateMutation = useMutation({
+    mutationFn: () => api.toolchains.createFromTemplate({ templateId: selectedTemplateId }),
+    onSuccess: (result: any) => {
+      setTemplateOpen(false);
+      setSelectedTemplateId("");
+      queryClient.invalidateQueries({ queryKey: ["toolchains"] });
+      toast.success("ToolChain created from template");
+      if (result?.toolChainId) navigate(`/toolchains/${result.toolChainId}/designer`);
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to create from template"),
   });
 
   const deleteMutation = useMutation({
@@ -221,6 +242,7 @@ export default function ToolChainsPage() {
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => navigate("/toolchains/approvals")}>Approvals</Button>
           <Button variant="outline" onClick={() => navigate("/toolchains/designer")}>AI Create</Button>
+          <Button variant="outline" onClick={() => setTemplateOpen(true)}>From Template</Button>
           <Button onClick={() => setCreateOpen(true)}>New ToolChain</Button>
         </div>
       </div>
@@ -441,6 +463,37 @@ export default function ToolChainsPage() {
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
             <Button onClick={() => createMutation.mutate()} disabled={!name.trim() || createMutation.isPending}>
               {createMutation.isPending ? "Creating..." : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={templateOpen} onOpenChange={setTemplateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create From Template</DialogTitle>
+            <DialogDescription>Bootstrap a chain from curated starter flows.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <SearchableSelect
+              options={templates.map((tpl: any) => ({
+                value: String(tpl.id),
+                label: String(tpl.name || tpl.id),
+                sublabel: String(tpl.description || ""),
+              }))}
+              value={selectedTemplateId}
+              onValueChange={(v) => setSelectedTemplateId(v)}
+              placeholder="Select template"
+              searchPlaceholder="Search templates..."
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTemplateOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => createFromTemplateMutation.mutate()}
+              disabled={!selectedTemplateId || createFromTemplateMutation.isPending}
+            >
+              {createFromTemplateMutation.isPending ? "Creating..." : "Create"}
             </Button>
           </DialogFooter>
         </DialogContent>

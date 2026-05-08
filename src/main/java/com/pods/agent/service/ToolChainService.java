@@ -117,6 +117,7 @@ public class ToolChainService {
                 .intentSignature(request.getIntentSignature())
                 .structureSignature(request.getStructureSignature())
                 .ragConfigJson(toJson(request.getRagConfig() == null ? Map.of() : request.getRagConfig()))
+                .variablesJson(toJson(request.getVariables() == null ? List.of() : request.getVariables()))
                 .published(false)
                 .createdBy(createdBy)
                 .build());
@@ -149,6 +150,7 @@ public class ToolChainService {
             draft.setIntentSignature(request.getIntentSignature());
             draft.setStructureSignature(request.getStructureSignature());
             draft.setRagConfigJson(toJson(request.getRagConfig() == null ? Map.of() : request.getRagConfig()));
+            draft.setVariablesJson(toJson(request.getVariables() == null ? List.of() : request.getVariables()));
             toolChainVersionRepository.updateDraft(draft);
             if (chain.getCurrentVersion() == null || chain.getCurrentVersion() < draft.getVersion()) {
                 chain.setCurrentVersion(draft.getVersion());

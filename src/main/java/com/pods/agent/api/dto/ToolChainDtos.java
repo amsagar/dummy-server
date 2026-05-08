@@ -28,6 +28,7 @@ public final class ToolChainDtos {
         private String intentSignature;
         private String structureSignature;
         private Map<String, Object> ragConfig;
+        private List<Map<String, Object>> variables;
     }
 
     @Data

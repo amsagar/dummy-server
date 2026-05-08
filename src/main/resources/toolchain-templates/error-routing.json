@@ -1,0 +1,21 @@
+{
+  "name": "Error Routing",
+  "description": "Tool node with success and error edges.",
+  "graph": {
+    "nodes": [
+      { "id": "start", "type": "start", "label": "Start", "config": {} },
+      { "id": "tool_1", "type": "tool", "label": "Fetch", "config": { "toolName": "fetch_data" } },
+      { "id": "fallback_404", "type": "tool", "label": "Fallback 404", "config": { "toolName": "fallback_not_found" } },
+      { "id": "fallback_generic", "type": "tool", "label": "Fallback Generic", "config": { "toolName": "fallback_generic" } },
+      { "id": "end", "type": "end", "label": "End", "config": {} }
+    ],
+    "edges": [
+      { "from": "start", "to": "tool_1" },
+      { "from": "tool_1", "to": "end", "kind": "success" },
+      { "from": "tool_1", "to": "fallback_404", "kind": "error", "condition": "$.error.message CONTAINS \"404\"" },
+      { "from": "tool_1", "to": "fallback_generic", "kind": "error" },
+      { "from": "fallback_404", "to": "end" },
+      { "from": "fallback_generic", "to": "end" }
+    ]
+  }
+}

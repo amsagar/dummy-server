@@ -1,0 +1,22 @@
+{
+  "name": "Parallel Fanout",
+  "description": "Parallel node with merge fan-in.",
+  "graph": {
+    "nodes": [
+      { "id": "start", "type": "start", "label": "Start", "config": {} },
+      { "id": "parallel_1", "type": "parallel", "label": "Parallel", "config": {} },
+      { "id": "tool_a", "type": "tool", "label": "Branch A", "config": { "toolName": "tool_a" } },
+      { "id": "tool_b", "type": "tool", "label": "Branch B", "config": { "toolName": "tool_b" } },
+      { "id": "merge_1", "type": "merge", "label": "Merge", "config": { "strategy": "shallow_merge", "sources": ["tool_a.output", "tool_b.output"] } },
+      { "id": "end", "type": "end", "label": "End", "config": {} }
+    ],
+    "edges": [
+      { "from": "start", "to": "parallel_1" },
+      { "from": "parallel_1", "to": "tool_a" },
+      { "from": "parallel_1", "to": "tool_b" },
+      { "from": "tool_a", "to": "merge_1" },
+      { "from": "tool_b", "to": "merge_1" },
+      { "from": "merge_1", "to": "end" }
+    ]
+  }
+}

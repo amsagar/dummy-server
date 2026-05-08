@@ -145,6 +145,9 @@ export const api = {
       return fetch(`${BASE_URL}/toolchains${query}`, { headers: getHeaders() }).then(handleResponse);
     },
     create: (payload: any) => fetch(`${BASE_URL}/toolchains`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
+    templates: () => fetch(`${BASE_URL}/toolchains/templates`, { headers: getHeaders() }).then(handleResponse),
+    createFromTemplate: (payload: { templateId: string; name?: string; description?: string }) =>
+      fetch(`${BASE_URL}/toolchains/from-template`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     update: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
     remove: (id: string) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
     approve: (id: string, payload?: any) => fetch(`${BASE_URL}/toolchains/${id}/approve`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
@@ -209,6 +212,12 @@ export const api = {
     updateMapping: (id: string, nodeId: string, argName: string, mapping: any) =>
       fetch(`${BASE_URL}/toolchains/${id}/mappings/${encodeURIComponent(nodeId)}/${encodeURIComponent(argName)}`,
         { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(mapping) }).then(handleResponse),
+    validateExpression: (expression: string) =>
+      fetch(`${BASE_URL}/toolchains/expressions/validate`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ expression }),
+      }).then(handleResponse),
   },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),

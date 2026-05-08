@@ -22,6 +22,7 @@ public class ToolChainVersion {
     private String intentSignature;
     private String structureSignature;
     private String ragConfigJson;
+    private String variablesJson;
     private boolean published;
     private String createdBy;
     private long createdAt;

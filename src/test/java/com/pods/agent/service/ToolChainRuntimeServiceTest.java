@@ -5,6 +5,7 @@ import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.ToolChainApprovalRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
+import com.pods.agent.service.expression.BooleanExpressionEvaluator;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 
@@ -39,7 +40,10 @@ class ToolChainRuntimeServiceTest {
                 mock(SkillRegistryService.class),
                 mock(com.pods.agent.config.RuntimeTuningProperties.class),
                 mock(DecisionTableService.class),
-                new ObjectMapper()
+                new ObjectMapper(),
+                new ArgMappingResolver(new BooleanExpressionEvaluator()),
+                mock(LlmArgResolver.class),
+                new BooleanExpressionEvaluator()
         );
 
         assertThrows(IllegalStateException.class, () ->

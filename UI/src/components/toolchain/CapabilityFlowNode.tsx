@@ -7,7 +7,9 @@ function typeTone(type: string) {
   if (normalized === "start") return "border-emerald-300 bg-emerald-50 text-emerald-800";
   if (normalized === "end") return "border-rose-300 bg-rose-50 text-rose-800";
   if (normalized === "decision" || normalized === "switch") return "border-amber-300 bg-amber-50 text-amber-900";
+  if (normalized === "parallel") return "border-amber-400 bg-amber-100 text-amber-900";
   if (normalized === "iterator") return "border-cyan-300 bg-cyan-50 text-cyan-900";
+  if (normalized === "assign") return "border-sky-300 bg-sky-50 text-sky-900";
   if (normalized === "subchain") return "border-indigo-300 bg-indigo-50 text-indigo-900";
   if (normalized === "synthesis") return "border-violet-300 bg-violet-50 text-violet-900";
   return "border-slate-300 bg-white text-slate-900";

@@ -12,9 +12,14 @@ export default function CapabilityFlowEdge(props: EdgeProps) {
     targetPosition,
   });
   const text = String((data as any)?.label || label || "").trim();
+  const kind = String((data as any)?.kind || "success").toLowerCase();
+  const edgeStyle =
+    kind === "error"
+      ? { ...(style || {}), stroke: "#dc2626", strokeDasharray: "6 4" }
+      : style;
   return (
     <>
-      <BaseEdge path={edgePath} markerEnd={markerEnd} style={style} />
+      <BaseEdge path={edgePath} markerEnd={markerEnd} style={edgeStyle} />
       {text ? (
         <EdgeLabelRenderer>
           <div

@@ -10,8 +10,10 @@ import com.pods.agent.service.ToolChainConfigChatService;
 import com.pods.agent.service.ToolChainMappingEditorService;
 import com.pods.agent.service.ToolChainRuntimeService;
 import com.pods.agent.service.ToolChainService;
+import com.pods.agent.service.expression.ExpressionValidator;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.Map;
@@ -36,6 +38,8 @@ class ToolChainControllerTest {
         SystemToolChainProposalRepository proposalRepository = mock(SystemToolChainProposalRepository.class);
         SystemToolChainAsyncService asyncService = mock(SystemToolChainAsyncService.class);
         SecurityContextService securityContextService = mock(SecurityContextService.class);
+        ExpressionValidator expressionValidator = mock(ExpressionValidator.class);
+        ObjectMapper objectMapper = mock(ObjectMapper.class);
 
         when(securityContextService.currentUserIdOrThrow()).thenReturn("user-1");
         when(proposalRepository.findPendingByUser("user-1")).thenReturn(List.of(
@@ -59,7 +63,9 @@ class ToolChainControllerTest {
                 runStepRepository,
                 proposalRepository,
                 asyncService,
-                securityContextService
+                securityContextService,
+                expressionValidator,
+                objectMapper
         );
 
         ResponseEntity<?> response = controller.listSystemToolChainProposals();
@@ -83,6 +89,8 @@ class ToolChainControllerTest {
         SystemToolChainProposalRepository proposalRepository = mock(SystemToolChainProposalRepository.class);
         SystemToolChainAsyncService asyncService = mock(SystemToolChainAsyncService.class);
         SecurityContextService securityContextService = mock(SecurityContextService.class);
+        ExpressionValidator expressionValidator = mock(ExpressionValidator.class);
+        ObjectMapper objectMapper = mock(ObjectMapper.class);
 
         when(securityContextService.currentUserIdOrThrow()).thenReturn("user-1");
         when(asyncService.approveProposal(anyString(), anyString(), anyString())).thenReturn(Optional.of(
@@ -106,7 +114,9 @@ class ToolChainControllerTest {
                 runStepRepository,
                 proposalRepository,
                 asyncService,
-                securityContextService
+                securityContextService,
+                expressionValidator,
+                objectMapper
         );
 
         ResponseEntity<?> response = controller.approveSystemToolChainProposal("proposal-1", null);

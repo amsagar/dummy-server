@@ -16,6 +16,8 @@ import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.ToolChainApprovalRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
+import com.pods.agent.service.expression.BooleanExpressionEvaluator;
+import com.pods.agent.service.expression.PathResolver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.tool.ToolCallback;
@@ -56,6 +58,7 @@ public class ToolChainRuntimeService {
     private final ObjectMapper objectMapper;
     private final ArgMappingResolver argMappingResolver;
     private final LlmArgResolver llmArgResolver;
+    private final BooleanExpressionEvaluator booleanExpressionEvaluator;
     private final ExecutorService runExecutor = Executors.newFixedThreadPool(6);
     private final ExecutorService branchExecutor = Executors.newFixedThreadPool(8);
     private final ConcurrentHashMap<String, CompletableFuture<ApprovalDecision>> pendingApprovals = new ConcurrentHashMap<>();
@@ -73,7 +76,8 @@ public class ToolChainRuntimeService {
                                    DecisionTableService decisionTableService,
                                    ObjectMapper objectMapper,
                                    ArgMappingResolver argMappingResolver,
-                                   LlmArgResolver llmArgResolver) {
+                                   LlmArgResolver llmArgResolver,
+                                   BooleanExpressionEvaluator booleanExpressionEvaluator) {
         this.toolChainService = toolChainService;
         this.toolRegistryService = toolRegistryService;
         this.toolExecutionService = toolExecutionService;
@@ -88,6 +92,7 @@ public class ToolChainRuntimeService {
         this.objectMapper = objectMapper;
         this.argMappingResolver = argMappingResolver;
         this.llmArgResolver = llmArgResolver;
+        this.booleanExpressionEvaluator = booleanExpressionEvaluator;
     }
 
     public ToolChainRun execute(String toolChainId,
@@ -202,7 +207,7 @@ public class ToolChainRuntimeService {
         runRepository.updateStatus(runId, "running", null, null);
         GraphModel graph = parseGraph(version.getGraphJson());
         Map<String, NodeModel> nodes = graph.nodesById();
-        Map<String, List<String>> outgoing = graph.outgoing();
+        Map<String, List<EdgeModel>> outgoing = graph.outgoingEdges();
         Map<String, Integer> indegree = graph.indegree();
         // Resolve runtime model once per run so llm_assisted argMappings can fall back without
         // rediscovering the model on every step. Stored on a mutable runOptions copy under an
@@ -215,6 +220,9 @@ public class ToolChainRuntimeService {
         runOptions.put("_runtime_versionId", version.getId());
         Map<String, Object> context = new LinkedHashMap<>(input);
         context.put("chainInput", new LinkedHashMap<>(input));
+        Map<String, Object> vars = initializeVariables(graph.variables());
+        vars.putAll(initializeVariables(fromJsonListMap(version.getVariablesJson())));
+        context.put("vars", vars);
         Queue<String> ready = new ArrayDeque<>();
         indegree.forEach((k, v) -> {
             if (v == 0) ready.offer(k);
@@ -231,13 +239,27 @@ public class ToolChainRuntimeService {
                 String nodeId = batch.get(i);
                 StepResult result = futures.get(i).join();
                 if (!result.success()) {
+                    if (!result.rejected()) {
+                        List<String> errorNext = selectEdgeTargets(outgoing.getOrDefault(nodeId, List.of()), "error", context, result.error());
+                        if (!errorNext.isEmpty()) {
+                            Map<String, Object> recovered = new LinkedHashMap<>();
+                            recovered.put("error", result.error());
+                            recovered.put("recovered", true);
+                            context.put(nodeId, recovered);
+                            for (String to : errorNext) {
+                                indegree.put(to, indegree.getOrDefault(to, 1) - 1);
+                                if (indegree.get(to) <= 0) ready.offer(to);
+                            }
+                            continue;
+                        }
+                    }
                     finalStatus = result.rejected() ? "rejected" : "failed";
                     completeRun(runId, finalStatus, context, result.error(), effectiveSessionId);
                     return runRepository.findById(runId).orElse(run);
                 }
                 if (result.outputs() != null) context.putAll(result.outputs());
 
-                List<String> next = outgoing.getOrDefault(nodeId, List.of());
+                List<String> next = selectEdgeTargets(outgoing.getOrDefault(nodeId, List.of()), "success", context, null);
                 if (result.nextNodes() != null && !result.nextNodes().isEmpty()) {
                     next = result.nextNodes();
                 }
@@ -251,6 +273,30 @@ public class ToolChainRuntimeService {
         String output = finalizeResponse(run.getToolChainId(), version, context, runId, runOptions, sender, effectiveSessionId);
         completeRun(runId, "success", Map.of("result", output, "context", context), null, effectiveSessionId);
         return runRepository.findById(runId).orElse(run);
+    }
+
+    private List<String> selectEdgeTargets(List<EdgeModel> edges,
+                                           String kind,
+                                           Map<String, Object> context,
+                                           String errorMessage) {
+        if (edges == null || edges.isEmpty()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (EdgeModel edge : edges) {
+            String edgeKind = edge.kind() == null || edge.kind().isBlank() ? "success" : edge.kind().toLowerCase(Locale.ROOT);
+            if (!edgeKind.equals(kind)) continue;
+            String condition = edge.condition();
+            if (condition != null && !condition.isBlank()) {
+                Map<String, Object> evalContext = context;
+                if ("error".equals(kind)) {
+                    evalContext = new LinkedHashMap<>(context);
+                    evalContext.put("error", Map.of("message", errorMessage == null ? "" : errorMessage));
+                }
+                if (!booleanExpressionEvaluator.eval(condition, evalContext)) continue;
+            }
+            out.add(edge.to());
+            if ("error".equals(kind)) break;
+        }
+        return out;
     }
 
     private StepResult executeNode(String runId, NodeModel node, Map<String, Object> context, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
@@ -338,6 +384,8 @@ public class ToolChainRuntimeService {
                 case "wait" -> executeWait(node);
                 case "subchain" -> executeSubchain(node, context, runId, sender, effectiveSessionId, runOptions);
                 case "iterator" -> executeIterator(node, context, runId, sender, effectiveSessionId, runOptions);
+                case "assign" -> executeAssign(node, context);
+                case "parallel" -> StepResult.success(Map.of(node.id(), Map.of("parallel", true)), null);
                 case "tool", "mcp_tool" -> executeToolNode(node, context, runOptions);
                 case "decision_table" -> executeDecisionTableNode(node, context);
                 case "synthesis" -> executeSynthesisNode(node, context, runId, sender, effectiveSessionId);
@@ -683,6 +731,16 @@ public class ToolChainRuntimeService {
     }
 
     private StepResult executeDecision(NodeModel node, Map<String, Object> context) {
+        String expression = node.configString("expression");
+        if (expression != null && !expression.isBlank()) {
+            boolean matched = booleanExpressionEvaluator.eval(expression, context);
+            String trueBranch = node.configString("trueBranch");
+            String falseBranch = node.configString("falseBranch");
+            List<String> next = matched ? (trueBranch == null ? List.of() : List.of(trueBranch))
+                    : (falseBranch == null ? List.of() : List.of(falseBranch));
+            Map<String, Object> out = Map.of(node.id(), matched ? "true" : "false");
+            return StepResult.success(out, next);
+        }
         String key = node.configString("sourceKey");
         String equalsValue = node.configString("equals");
         String trueBranch = node.configString("trueBranch");
@@ -709,6 +767,16 @@ public class ToolChainRuntimeService {
         if (casesObj instanceof List<?> caseList) {
             for (Object c : caseList) {
                 if (!(c instanceof Map<?, ?> caseMap)) continue;
+                Object whenExpression = caseMap.get("whenExpression");
+                if (whenExpression != null && !String.valueOf(whenExpression).isBlank()) {
+                    if (booleanExpressionEvaluator.eval(String.valueOf(whenExpression), context)) {
+                        matchedCase = "__expression__";
+                        Object to = caseMap.get("to");
+                        if (to != null) target = String.valueOf(to);
+                        break;
+                    }
+                    continue;
+                }
                 Object when = caseMap.get("when");
                 if (when == null) continue;
                 if (String.valueOf(when).equalsIgnoreCase(actualStr)) {
@@ -721,6 +789,7 @@ public class ToolChainRuntimeService {
         }
         if (target == null) {
             String defaultBranch = node.configString("default");
+            if (defaultBranch == null || defaultBranch.isBlank()) defaultBranch = node.configString("defaultBranch");
             if (defaultBranch != null && !defaultBranch.isBlank()) {
                 target = defaultBranch;
                 matchedCase = "__default__";
@@ -732,6 +801,29 @@ public class ToolChainRuntimeService {
         }
         Map<String, Object> out = Map.of(node.id(), Map.of("matched", matchedCase, "branch", target));
         return StepResult.success(out, List.of(target));
+    }
+
+    private StepResult executeAssign(NodeModel node, Map<String, Object> context) {
+        Object varsObj = context.get("vars");
+        Map<String, Object> vars = varsObj instanceof Map<?, ?> m ? new LinkedHashMap<>((Map<String, Object>) m) : new LinkedHashMap<>();
+        Object assignmentsObj = node.config().get("assignments");
+        if (!(assignmentsObj instanceof List<?> rows) || rows.isEmpty()) {
+            return StepResult.failed("assign node missing assignments");
+        }
+        Map<String, Object> outAssignments = new LinkedHashMap<>();
+        for (Object rowObj : rows) {
+            if (!(rowObj instanceof Map<?, ?> row)) continue;
+            String var = row.get("var") == null ? null : String.valueOf(row.get("var"));
+            if (var == null || var.isBlank()) continue;
+            Object expr = row.get("expression");
+            Object value = argMappingResolver.resolveOne(expr, context, key -> resolvePath(context, key));
+            vars.put(var, value);
+            outAssignments.put(var, value);
+        }
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("vars", vars);
+        outputs.put(node.id(), outAssignments);
+        return StepResult.success(outputs, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -853,13 +945,22 @@ public class ToolChainRuntimeService {
     private StepResult executeIterator(NodeModel node, Map<String, Object> context, String parentRunId, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
         String as = node.configString("as");
         if (as == null || as.isBlank()) as = "item";
+        String loopMode = String.valueOf(node.config().getOrDefault("loopMode", "foreach")).toLowerCase(Locale.ROOT);
+        String exitCondition = node.configString("exitCondition");
+        int maxIterations = 1000;
+        Object maxObj = node.config().get("maxIterations");
+        if (maxObj instanceof Number n) maxIterations = Math.max(1, Math.min(n.intValue(), 10_000));
+        if (!"foreach".equals(loopMode) && (exitCondition == null || exitCondition.isBlank())) {
+            return StepResult.failed("iterator loopMode requires exitCondition");
+        }
+        boolean collectOutput = Boolean.TRUE.equals(node.config().get("collectOutput"));
 
         // Inline-tool mode: a single tool called once per item from a JSONata-resolved list,
         // with per-item argMappings that may reference $item.X. This is what the suggestion
         // service emits when it sees consecutive same-tool calls in a recorded turn.
         String inlineToolName = node.configString("toolName");
         if (inlineToolName != null && !inlineToolName.isBlank()) {
-            return executeInlineToolIterator(node, context, runOptions, as, inlineToolName);
+            return executeInlineToolIterator(node, context, runOptions, as, inlineToolName, loopMode, exitCondition, maxIterations, collectOutput);
         }
 
         // Legacy sub-chain mode: each item runs the same chain identified by subChainId.
@@ -936,9 +1037,19 @@ public class ToolChainRuntimeService {
         }
 
         List<Object> results = new ArrayList<>();
+        int i = 0;
         for (CompletableFuture<Object> f : futures) {
+            if ("while".equals(loopMode)) {
+                Map<String, Object> loopCtx = buildLoopContext(context, results, i, null);
+                if (!booleanExpressionEvaluator.eval(exitCondition, loopCtx)) break;
+            }
             try {
-                results.add(f.join());
+                Object itemResult = f.join();
+                results.add(itemResult);
+                if ("until".equals(loopMode)) {
+                    Map<String, Object> loopCtx = buildLoopContext(context, results, i, itemResult);
+                    if (booleanExpressionEvaluator.eval(exitCondition, loopCtx)) break;
+                }
             } catch (Exception e) {
                 if (continueOnFail) {
                     results.add(Map.of("error", e.getMessage() == null ? "iterator item failed" : e.getMessage()));
@@ -946,6 +1057,14 @@ public class ToolChainRuntimeService {
                     return StepResult.failed("iterator item failed: " + e.getMessage());
                 }
             }
+            i++;
+            if (i >= maxIterations) return StepResult.failed("iterator exceeded maxIterations=" + maxIterations);
+        }
+        if (collectOutput) {
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("results", results);
+            envelope.put("output", results);
+            return StepResult.success(Map.of(node.id(), envelope), null);
         }
         return StepResult.success(Map.of(node.id(), results), null);
     }
@@ -964,7 +1083,11 @@ public class ToolChainRuntimeService {
                                                  Map<String, Object> context,
                                                  Map<String, Object> runOptions,
                                                  String itemKey,
-                                                 String toolName) {
+                                                 String toolName,
+                                                 String loopMode,
+                                                 String exitCondition,
+                                                 int maxIterations,
+                                                 boolean collectOutput) {
         AgentTool tool = toolRegistryService.getEnabledToolByName(toolName);
         if (tool == null) {
             return StepResult.failed("Iterator tool is not enabled: " + toolName);
@@ -1011,9 +1134,19 @@ public class ToolChainRuntimeService {
         }
 
         List<Map<String, Object>> results = new ArrayList<>();
+        int i = 0;
         for (CompletableFuture<Map<String, Object>> f : futures) {
+            if ("while".equals(loopMode)) {
+                Map<String, Object> loopCtx = buildLoopContext(context, results, i, null);
+                if (!booleanExpressionEvaluator.eval(exitCondition, loopCtx)) break;
+            }
             try {
-                results.add(f.join());
+                Map<String, Object> itemResult = f.join();
+                results.add(itemResult);
+                if ("until".equals(loopMode)) {
+                    Map<String, Object> loopCtx = buildLoopContext(context, results, i, itemResult);
+                    if (booleanExpressionEvaluator.eval(exitCondition, loopCtx)) break;
+                }
             } catch (Exception e) {
                 if (continueOnFail) {
                     results.add(Map.of("error", e.getMessage() == null ? "iterator item failed" : e.getMessage()));
@@ -1021,11 +1154,22 @@ public class ToolChainRuntimeService {
                     return StepResult.failed("iterator item failed: " + e.getMessage());
                 }
             }
+            i++;
+            if (i >= maxIterations) return StepResult.failed("iterator exceeded maxIterations=" + maxIterations);
         }
         Map<String, Object> envelope = new LinkedHashMap<>();
         envelope.put("input", Map.of("items", items));
         envelope.put("output", results);
+        if (collectOutput) envelope.put("results", results);
         return StepResult.success(Map.of(node.id(), envelope), null);
+    }
+
+    private Map<String, Object> buildLoopContext(Map<String, Object> context, List<?> results, int index, Object lastResult) {
+        Map<String, Object> loopCtx = new LinkedHashMap<>(context);
+        loopCtx.put("index", index);
+        loopCtx.put("results", results);
+        if (lastResult != null) loopCtx.put("lastResult", lastResult);
+        return loopCtx;
     }
 
     private List<?> resolveIteratorItems(Object itemsMapping, Map<String, Object> context) {
@@ -1229,26 +1373,7 @@ public class ToolChainRuntimeService {
     }
 
     private Object resolvePath(Map<String, Object> context, String keyPath) {
-        if (context == null || keyPath == null || keyPath.isBlank()) return null;
-        if (context.containsKey(keyPath)) return context.get(keyPath);
-        String[] parts = keyPath.split("\\.");
-        Object current = context;
-        for (String part : parts) {
-            if (!(current instanceof Map<?, ?> map)) return null;
-            Object next = lookupKey(map, part);
-            // Back-compat: legacy mappings reference "tool_N.field" while the new shape
-            // stores tool nodes as {input, output}. If a direct match fails and the map
-            // looks like a step record, try resolving inside its output before giving up.
-            if (next == null && isStepRecord(map) && !"input".equalsIgnoreCase(part) && !"output".equalsIgnoreCase(part)) {
-                Object output = lookupKey(map, "output");
-                if (output instanceof Map<?, ?> outMap) {
-                    next = lookupKey(outMap, part);
-                }
-            }
-            if (next == null) return null;
-            current = next;
-        }
-        return current;
+        return PathResolver.resolvePath(context, keyPath, true);
     }
 
     private Object lookupKey(Map<?, ?> map, String part) {
@@ -1664,6 +1789,7 @@ public class ToolChainRuntimeService {
         Map<String, Object> parsed = fromJsonMap(graphJson);
         List<NodeModel> nodes = new ArrayList<>();
         List<EdgeModel> edges = new ArrayList<>();
+        List<Map<String, Object>> variables = new ArrayList<>();
         Object nodesObj = parsed.get("nodes");
         if (nodesObj instanceof List<?> nodeList) {
             for (Object row : nodeList) {
@@ -1676,7 +1802,41 @@ public class ToolChainRuntimeService {
                 if (row instanceof Map<?, ?> map) edges.add(EdgeModel.from((Map<String, Object>) map));
             }
         }
-        return new GraphModel(nodes, edges);
+        Object varsObj = parsed.get("variables");
+        if (varsObj instanceof List<?> varsList) {
+            for (Object row : varsList) {
+                if (row instanceof Map<?, ?> map) variables.add(new LinkedHashMap<>((Map<String, Object>) map));
+            }
+        }
+        return new GraphModel(nodes, edges, variables);
+    }
+
+    private Map<String, Object> initializeVariables(List<Map<String, Object>> variables) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (variables == null) return out;
+        for (Map<String, Object> row : variables) {
+            if (row == null) continue;
+            String name = row.get("name") == null ? null : String.valueOf(row.get("name"));
+            if (name == null || name.isBlank()) continue;
+            out.put(name, row.get("default"));
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> fromJsonListMap(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        try {
+            Object parsed = objectMapper.readValue(raw, Object.class);
+            if (!(parsed instanceof List<?> list)) return List.of();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (Object row : list) {
+                if (row instanceof Map<?, ?> map) out.add(new LinkedHashMap<>((Map<String, Object>) map));
+            }
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     private Map<String, Object> fromJsonMap(String raw) {
@@ -1721,18 +1881,18 @@ public class ToolChainRuntimeService {
         }
     }
 
-    private record GraphModel(List<NodeModel> nodes, List<EdgeModel> edges) {
+    private record GraphModel(List<NodeModel> nodes, List<EdgeModel> edges, List<Map<String, Object>> variables) {
         Map<String, NodeModel> nodesById() {
             Map<String, NodeModel> out = new LinkedHashMap<>();
             for (NodeModel node : nodes) out.put(node.id(), node);
             return out;
         }
 
-        Map<String, List<String>> outgoing() {
-            Map<String, List<String>> out = new LinkedHashMap<>();
+        Map<String, List<EdgeModel>> outgoingEdges() {
+            Map<String, List<EdgeModel>> out = new LinkedHashMap<>();
             for (NodeModel node : nodes) out.put(node.id(), new ArrayList<>());
             for (EdgeModel edge : edges) {
-                out.computeIfAbsent(edge.from(), k -> new ArrayList<>()).add(edge.to());
+                out.computeIfAbsent(edge.from(), k -> new ArrayList<>()).add(edge);
             }
             return out;
         }
@@ -1800,9 +1960,13 @@ public class ToolChainRuntimeService {
         }
     }
 
-    private record EdgeModel(String from, String to) {
+    private record EdgeModel(String from, String to, String condition, String kind) {
         static EdgeModel from(Map<String, Object> row) {
-            return new EdgeModel(String.valueOf(row.get("from")), String.valueOf(row.get("to")));
+            String kind = row.get("kind") == null ? "success" : String.valueOf(row.get("kind"));
+            String condition = row.get("condition") == null ? null : String.valueOf(row.get("condition"));
+            Object from = row.get("from") != null ? row.get("from") : row.get("source");
+            Object to = row.get("to") != null ? row.get("to") : row.get("target");
+            return new EdgeModel(String.valueOf(from), String.valueOf(to), condition, kind);
         }
     }
 }

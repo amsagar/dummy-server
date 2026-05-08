@@ -1,0 +1,18 @@
+{
+  "name": "Assign Variables",
+  "description": "Demonstrates workflow variables and assign node.",
+  "graph": {
+    "variables": [
+      { "name": "counter", "type": "number", "default": 0, "description": "Iteration counter" }
+    ],
+    "nodes": [
+      { "id": "start", "type": "start", "label": "Start", "config": {} },
+      { "id": "assign_1", "type": "assign", "label": "Increment", "config": { "assignments": [ { "var": "counter", "expression": "concat($.vars.counter, 1)" } ] } },
+      { "id": "end", "type": "end", "label": "End", "config": {} }
+    ],
+    "edges": [
+      { "from": "start", "to": "assign_1" },
+      { "from": "assign_1", "to": "end" }
+    ]
+  }
+}

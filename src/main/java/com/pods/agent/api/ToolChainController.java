@@ -9,6 +9,7 @@ import com.pods.agent.repository.SystemToolChainProposalRepository;
 import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainRunStepRepository;
 import com.pods.agent.service.SecurityContextService;
+import com.pods.agent.service.expression.ExpressionValidator;
 import com.pods.agent.service.ToolChainConfigChatService;
 import com.pods.agent.service.ToolChainMappingEditorService;
 import com.pods.agent.service.ToolChainRuntimeService;
@@ -18,9 +19,15 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import tools.jackson.databind.ObjectMapper;
 
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -36,6 +43,8 @@ public class ToolChainController {
     private final SystemToolChainProposalRepository systemToolChainProposalRepository;
     private final SystemToolChainAsyncService systemToolChainAsyncService;
     private final SecurityContextService securityContextService;
+    private final ExpressionValidator expressionValidator;
+    private final ObjectMapper objectMapper;
 
     public ToolChainController(ToolChainService toolChainService,
                                ToolChainRuntimeService toolChainRuntimeService,
@@ -45,7 +54,9 @@ public class ToolChainController {
                                ToolChainRunStepRepository toolChainRunStepRepository,
                                SystemToolChainProposalRepository systemToolChainProposalRepository,
                                SystemToolChainAsyncService systemToolChainAsyncService,
-                               SecurityContextService securityContextService) {
+                               SecurityContextService securityContextService,
+                               ExpressionValidator expressionValidator,
+                               ObjectMapper objectMapper) {
         this.toolChainService = toolChainService;
         this.toolChainRuntimeService = toolChainRuntimeService;
         this.toolChainConfigChatService = toolChainConfigChatService;
@@ -55,6 +66,8 @@ public class ToolChainController {
         this.systemToolChainProposalRepository = systemToolChainProposalRepository;
         this.systemToolChainAsyncService = systemToolChainAsyncService;
         this.securityContextService = securityContextService;
+        this.expressionValidator = expressionValidator;
+        this.objectMapper = objectMapper;
     }
 
     @GetMapping("/toolchains")
@@ -408,6 +421,82 @@ public class ToolChainController {
             return ResponseEntityFactory.badRequest("Body must include 'expr'");
         }
         return ResponseEntity.ok(toolChainMappingEditorService.testMapping(id, body.get("expr")));
+    }
+
+    @PostMapping("/toolchains/expressions/validate")
+    @Operation(summary = "Validate a boolean expression for toolchain routing and mappings")
+    public ResponseEntity<?> validateExpression(@RequestBody Map<String, Object> body) {
+        String expression = body == null ? null : String.valueOf(body.getOrDefault("expression", ""));
+        var result = expressionValidator.validate(expression);
+        return ResponseEntity.ok(Map.of(
+                "valid", result.valid(),
+                "error", result.error()
+        ));
+    }
+
+    @GetMapping("/toolchains/templates")
+    @Operation(summary = "List built-in toolchain templates")
+    public ResponseEntity<?> listTemplates() {
+        return ResponseEntity.ok(Map.of("templates", loadTemplates(false)));
+    }
+
+    @PostMapping("/toolchains/from-template")
+    @Operation(summary = "Create a toolchain from a built-in template")
+    public ResponseEntity<?> createFromTemplate(@RequestBody Map<String, Object> body) {
+        String templateId = body == null ? null : String.valueOf(body.getOrDefault("templateId", ""));
+        if (templateId == null || templateId.isBlank()) {
+            return ResponseEntityFactory.badRequest("templateId is required");
+        }
+        Map<String, Object> selected = loadTemplates(true).stream()
+                .filter(row -> templateId.equals(String.valueOf(row.get("id"))))
+                .findFirst()
+                .orElse(null);
+        if (selected == null) return ResponseEntityFactory.notFound("Template not found: " + templateId);
+        String name = body != null && body.get("name") != null
+                ? String.valueOf(body.get("name"))
+                : String.valueOf(selected.get("name"));
+        String description = body != null && body.get("description") != null
+                ? String.valueOf(body.get("description"))
+                : String.valueOf(selected.get("description"));
+        ToolChainDtos.ToolChainCreateRequest createReq = new ToolChainDtos.ToolChainCreateRequest();
+        createReq.setName(name);
+        createReq.setDescription(description);
+        createReq.setEnabled(true);
+        ToolChain chain = toolChainService.create(createReq, securityContextService.currentUserIdOrThrow());
+
+        ToolChainDtos.ToolChainVersionRequest versionReq = new ToolChainDtos.ToolChainVersionRequest();
+        versionReq.setGraphJson(String.valueOf(selected.get("graphJson")));
+        versionReq.setResponseMode("hybrid");
+        versionReq.setInputSchema("{}");
+        versionReq.setOutputSchema("{}");
+        toolChainService.createVersion(chain.getId(), versionReq, securityContextService.currentUserIdOrThrow());
+        return ResponseEntity.ok(Map.of("toolChainId", chain.getId(), "name", chain.getName()));
+    }
+
+    private List<Map<String, Object>> loadTemplates(boolean includeGraphJson) {
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        try {
+            Resource[] resources = resolver.getResources("classpath:toolchain-templates/*.json");
+            java.util.Arrays.sort(resources, java.util.Comparator.comparing(Resource::getFilename));
+            List<Map<String, Object>> out = new java.util.ArrayList<>();
+            for (Resource resource : resources) {
+                String fileName = resource.getFilename() == null ? "template.json" : resource.getFilename();
+                String id = fileName.replace(".json", "");
+                String json = new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", id);
+                row.put("name", parsed.getOrDefault("name", id));
+                row.put("description", parsed.getOrDefault("description", ""));
+                if (includeGraphJson) {
+                    row.put("graphJson", objectMapper.writeValueAsString(parsed.getOrDefault("graph", Map.of())));
+                }
+                out.add(row);
+            }
+            return out;
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     @PatchMapping("/toolchains/{id}/mappings/{nodeId}/{argName}")

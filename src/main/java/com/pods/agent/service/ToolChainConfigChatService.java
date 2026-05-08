@@ -204,15 +204,22 @@ public class ToolChainConfigChatService {
                                                    ToolChainDtos.ToolChainConfigSessionLayoutRequest request,
                                                    String userId) {
         ToolChainConfigSession session = requireSession(toolChainId, sessionId);
-        Map<String, Object> positions = normalizeLayoutPositions(readMap(request.getPositions()));
-        Map<String, Object> viewport = readMap(request.getViewport());
-
         ToolChainConfigLayout layout = toolChainConfigLayoutRepository.findByScope(toolChainId, session.getId(), userId)
                 .orElse(ToolChainConfigLayout.builder()
                         .toolChainId(toolChainId)
                         .sessionId(session.getId())
                         .userId(userId)
                         .build());
+        boolean hasPositions = request != null && request.getPositions() != null;
+        boolean hasViewport = request != null && request.getViewport() != null;
+        Map<String, Object> existingPositions = normalizeLayoutPositions(readMap(layout.getPositionsJson()));
+        Map<String, Object> existingViewport = readMap(layout.getViewportJson());
+        Map<String, Object> positions = hasPositions
+                ? normalizeLayoutPositions(readMap(request.getPositions()))
+                : existingPositions;
+        Map<String, Object> viewport = hasViewport
+                ? readMap(request.getViewport())
+                : existingViewport;
         layout.setPositionsJson(toJson(positions));
         layout.setViewportJson(toJson(viewport));
         toolChainConfigLayoutRepository.upsert(layout);
@@ -242,14 +249,21 @@ public class ToolChainConfigChatService {
                                                 ToolChainDtos.ToolChainConfigSessionLayoutRequest request,
                                                 String userId) {
         toolChainService.getRequired(toolChainId);
-        Map<String, Object> positions = normalizeLayoutPositions(readMap(request.getPositions()));
-        Map<String, Object> viewport = readMap(request.getViewport());
-
         ToolChainUserLayout layout = toolChainUserLayoutRepository.findByScope(toolChainId, userId)
                 .orElse(ToolChainUserLayout.builder()
                         .toolChainId(toolChainId)
                         .userId(userId)
                         .build());
+        boolean hasPositions = request != null && request.getPositions() != null;
+        boolean hasViewport = request != null && request.getViewport() != null;
+        Map<String, Object> existingPositions = normalizeLayoutPositions(readMap(layout.getPositionsJson()));
+        Map<String, Object> existingViewport = readMap(layout.getViewportJson());
+        Map<String, Object> positions = hasPositions
+                ? normalizeLayoutPositions(readMap(request.getPositions()))
+                : existingPositions;
+        Map<String, Object> viewport = hasViewport
+                ? readMap(request.getViewport())
+                : existingViewport;
         layout.setPositionsJson(toJson(positions));
         layout.setViewportJson(toJson(viewport));
         toolChainUserLayoutRepository.upsert(layout);
@@ -1821,7 +1835,18 @@ Designer instruction:
 
     private Map<String, Object> validateAndNormalizeDraftArtifact(Map<String, Object> artifact) {
         validateArtifact(artifact);
-        Map<String, ToolInputContract> toolContracts = buildToolContracts(buildToolsCatalogForValidation());
+        List<Map<String, Object>> toolsCatalog = buildToolsCatalogForValidation();
+        Set<String> validToolNames = collectNames(toolsCatalog);
+        Set<String> validMcpNames = collectNames(buildMcpCatalog());
+        String canonicalGraphJson = canonicalizeGraphToolNodeTypes(
+                stringValue(artifact.get("graphJson")),
+                validToolNames,
+                validMcpNames
+        );
+        if (!canonicalGraphJson.isBlank()) {
+            artifact.put("graphJson", canonicalGraphJson);
+        }
+        Map<String, ToolInputContract> toolContracts = buildToolContracts(toolsCatalog);
         GraphRequirementsResult requirementsResult = normalizeAndValidateGraphRequirements(
                 stringValue(artifact.get("graphJson")),
                 toolContracts,
@@ -2188,6 +2213,14 @@ Designer instruction:
         String strippedGraphJson = stripSkillNodes(stringValue(artifact.get("graphJson")), stripWarnings);
         if (!strippedGraphJson.isBlank()) {
             artifact.put("graphJson", strippedGraphJson);
+        }
+        String canonicalGraphJson = canonicalizeGraphToolNodeTypes(
+                stringValue(artifact.get("graphJson")),
+                validToolNames,
+                validMcpNames
+        );
+        if (!canonicalGraphJson.isBlank()) {
+            artifact.put("graphJson", canonicalGraphJson);
         }
         Map<String, ToolInputContract> toolContracts = buildToolContracts(toolsCatalog);
         GraphRequirementsResult requirementsResult = normalizeAndValidateGraphRequirements(
@@ -2631,6 +2664,54 @@ Designer instruction:
         stripped.put("nodes", newNodes);
         stripped.put("edges", newEdges);
         return toJson(stripped);
+    }
+
+    String canonicalizeGraphToolNodeTypes(String graphJson,
+                                          Set<String> validToolNames,
+                                          Set<String> validMcpNames) {
+        if (graphJson == null || graphJson.isBlank()) return graphJson == null ? "" : graphJson;
+        Map<String, Object> graph = readMap(graphJson);
+        List<Map<String, Object>> nodes = readMapList(graph.get("nodes"));
+        if (nodes.isEmpty()) return graphJson;
+        boolean changed = false;
+        List<Map<String, Object>> canonicalNodes = new ArrayList<>(nodes.size());
+        for (Map<String, Object> node : nodes) {
+            String type = stringValue(node.get("type")).toLowerCase(Locale.ROOT);
+            if (!Set.of("tool", "mcp_tool").contains(type)) {
+                canonicalNodes.add(node);
+                continue;
+            }
+            Map<String, Object> config = readMap(node.get("config"));
+            String toolName = stringValue(config.getOrDefault("toolName", config.get("name")));
+            String canonicalType = canonicalizeToolNodeType(type, toolName, validToolNames, validMcpNames);
+            if (!canonicalType.equals(type)) {
+                Map<String, Object> updatedNode = new LinkedHashMap<>(node);
+                updatedNode.put("type", canonicalType);
+                canonicalNodes.add(updatedNode);
+                changed = true;
+            } else {
+                canonicalNodes.add(node);
+            }
+        }
+        if (!changed) return graphJson;
+        Map<String, Object> normalized = new LinkedHashMap<>(graph);
+        normalized.put("nodes", canonicalNodes);
+        return toJson(normalized);
+    }
+
+    private String canonicalizeToolNodeType(String type,
+                                            String toolName,
+                                            Set<String> validToolNames,
+                                            Set<String> validMcpNames) {
+        String normalizedType = stringValue(type).toLowerCase(Locale.ROOT);
+        if (!Set.of("tool", "mcp_tool").contains(normalizedType)) return normalizedType;
+        String normalizedToolName = stringValue(toolName).trim();
+        if (normalizedToolName.isBlank()) return normalizedType;
+        boolean inTools = validToolNames.contains(normalizedToolName);
+        boolean inMcp = validMcpNames.contains(normalizedToolName);
+        if (inTools && !inMcp) return "tool";
+        if (inMcp && !inTools) return "mcp_tool";
+        return normalizedType;
     }
 
     private List<String> validateGraphAgainstCatalog(String graphJson,

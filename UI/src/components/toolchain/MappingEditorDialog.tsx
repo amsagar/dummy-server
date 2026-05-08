@@ -19,6 +19,13 @@ type NodeRow = {
   args: { argName: string; mapping: Mapping }[];
 };
 
+const SYSTEM_FUNCTION_HINTS = [
+  "upper(x)", "lower(x)", "trim(x)", "coalesce(a,b)", "len(x)", "slice(x,0,10)", "parseInt(x)",
+  "replace(x,a,b)", "concat(a,b,c)", "now()", "uuid()", "keys(obj)", "values(obj)", "contains(arr,x)",
+  "first(arr)", "last(arr)", "length(arr)", "join(arr,sep)", "split(s,sep)", "hash(x,sha256)",
+  "ref:tool/get_order", "ref:chain/<chainId>", "ref:dt/<tableName>", "ref:secret/<key>",
+];
+
 function parseGraph(graphJson: any): NodeRow[] {
   let graph: any = graphJson;
   if (typeof graphJson === "string") {
@@ -194,6 +201,22 @@ export function MappingEditorDialog({ open, onOpenChange, toolChainId, toolChain
                         </div>
                       </div>
                       <div className="mt-2 grid gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setDraft(activeNode.id, argName, {
+                                expr: draft.expr || '#if($.input.country == "US") "USD" #else "EUR" #endif',
+                              })
+                            }
+                          >
+                            Insert conditional
+                          </Button>
+                          <span className="text-[11px] text-slate-500">
+                            Functions: {SYSTEM_FUNCTION_HINTS.slice(0, 6).join(", ")}...
+                          </span>
+                        </div>
                         <label className="flex flex-col gap-1 text-xs">
                           <span className="text-slate-600">JSONata expression</span>
                           <Input
@@ -201,6 +224,7 @@ export function MappingEditorDialog({ open, onOpenChange, toolChainId, toolChain
                             onChange={(e) => setDraft(activeNode.id, argName, { expr: e.target.value })}
                             placeholder="$.tool_1.output.customer.id"
                             className="font-mono text-xs"
+                            list="mapping-system-functions"
                           />
                         </label>
                         <label className="flex flex-col gap-1 text-xs">
@@ -263,6 +287,11 @@ export function MappingEditorDialog({ open, onOpenChange, toolChainId, toolChain
           <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
         </DialogFooter>
       </DialogContent>
+      <datalist id="mapping-system-functions">
+        {SYSTEM_FUNCTION_HINTS.map((hint) => (
+          <option key={hint} value={hint} />
+        ))}
+      </datalist>
     </Dialog>
   );
 }

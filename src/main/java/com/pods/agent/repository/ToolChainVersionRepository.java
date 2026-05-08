@@ -38,6 +38,7 @@ public class ToolChainVersionRepository {
                 .addValue("intentSignature", version.getIntentSignature())
                 .addValue("structureSignature", version.getStructureSignature())
                 .addValue("ragConfigJson", version.getRagConfigJson())
+                .addValue("variablesJson", version.getVariablesJson())
                 .addValue("published", version.isPublished())
                 .addValue("createdBy", version.getCreatedBy())
                 .addValue("createdAt", version.getCreatedAt()));
@@ -100,7 +101,8 @@ public class ToolChainVersionRepository {
                 .addValue("intentsJson", version.getIntentsJson())
                 .addValue("intentSignature", version.getIntentSignature())
                 .addValue("structureSignature", version.getStructureSignature())
-                .addValue("ragConfigJson", version.getRagConfigJson()));
+                .addValue("ragConfigJson", version.getRagConfigJson())
+                .addValue("variablesJson", version.getVariablesJson()));
     }
 
     /**
@@ -137,6 +139,7 @@ public class ToolChainVersionRepository {
                 .intentSignature(rs.getString("intent_signature"))
                 .structureSignature(rs.getString("structure_signature"))
                 .ragConfigJson(rs.getString("rag_config_json"))
+                .variablesJson(rs.getString("variables_json"))
                 .published(rs.getBoolean("is_published"))
                 .createdBy(rs.getString("created_by"))
                 .createdAt(rs.getLong("created_at"))

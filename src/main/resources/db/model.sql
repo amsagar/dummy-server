@@ -447,6 +447,7 @@ CREATE TABLE IF NOT EXISTS agent.tool_chain_versions (
     intent_signature   TEXT,
     structure_signature TEXT,
     rag_config_json    TEXT,
+    variables_json     TEXT,
     is_published       BOOLEAN NOT NULL DEFAULT FALSE,
     created_by         TEXT,
     created_at         BIGINT NOT NULL,
@@ -456,6 +457,7 @@ ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intents_json TEXT
 ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intent_signature TEXT;
 ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS structure_signature TEXT;
 ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS rag_config_json TEXT;
+ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS variables_json TEXT;
 
 CREATE TABLE IF NOT EXISTS agent.tool_chain_runs (
                                                      id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

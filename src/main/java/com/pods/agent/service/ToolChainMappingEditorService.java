@@ -5,6 +5,7 @@ import com.pods.agent.domain.ToolChain;
 import com.pods.agent.domain.ToolChainVersion;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.ToolChainVersionRepository;
+import com.pods.agent.service.expression.PathResolver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
@@ -208,34 +209,7 @@ public class ToolChainMappingEditorService {
     }
 
     private Object resolvePath(Map<String, Object> context, String keyPath) {
-        if (context == null || keyPath == null || keyPath.isBlank()) return null;
-        if (context.containsKey(keyPath)) return context.get(keyPath);
-        String[] parts = keyPath.split("\\.");
-        Object current = context;
-        for (String part : parts) {
-            if (!(current instanceof Map<?, ?> map)) return null;
-            Object next = null;
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (entry.getKey() != null && String.valueOf(entry.getKey()).equalsIgnoreCase(part)) {
-                    next = entry.getValue();
-                    break;
-                }
-            }
-            if (next == null && map.containsKey("output") && map.size() == 2 && map.containsKey("input")) {
-                Object out = map.get("output");
-                if (out instanceof Map<?, ?> outMap) {
-                    for (Map.Entry<?, ?> entry : outMap.entrySet()) {
-                        if (entry.getKey() != null && String.valueOf(entry.getKey()).equalsIgnoreCase(part)) {
-                            next = entry.getValue();
-                            break;
-                        }
-                    }
-                }
-            }
-            if (next == null) return null;
-            current = next;
-        }
-        return current;
+        return PathResolver.resolvePath(context, keyPath, true);
     }
 
     public record TestResult(boolean ok, Object value, String error, Map<String, Object> contextPreview) {
