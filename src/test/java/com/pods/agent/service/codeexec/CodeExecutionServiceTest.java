@@ -3,6 +3,7 @@ package com.pods.agent.service.codeexec;
 import com.pods.agent.config.RuntimeTuningProperties;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -53,5 +54,31 @@ class CodeExecutionServiceTest {
         );
         assertTrue(result.success());
         assertEquals("3", String.valueOf(result.output()));
+    }
+
+    @Test
+    void processSupportSurfacesChildStderrOnEarlyExit() {
+        if (!nodeAvailable()) {
+            return;
+        }
+        ProcessCodeExecutorSupport support = new ProcessCodeExecutorSupport();
+        CodeExecutionResult result = support.run(
+                List.of("node", "-e", "const __pods_code = const;"),
+                Map.of("orderId", "600030451")
+        );
+        assertFalse(result.success());
+        assertTrue(result.error().contains("status") || result.error().contains("stdin write failed"));
+        String diagnostics = (result.stderr() + "\n" + result.stdout()).toLowerCase();
+        assertTrue(diagnostics.contains("syntaxerror") || diagnostics.contains("unexpected token"));
+    }
+
+    private boolean nodeAvailable() {
+        try {
+            Process process = new ProcessBuilder("node", "--version").start();
+            int exit = process.waitFor();
+            return exit == 0;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 }

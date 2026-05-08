@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.io.OutputStream;
 
 final class ProcessCodeExecutorSupport {
     private static final String RESULT_MARKER = "__PODS_EXEC_RESULT__";
@@ -17,15 +18,27 @@ final class ProcessCodeExecutorSupport {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(false);
             process = pb.start();
-            process.getOutputStream().write(objectMapper.writeValueAsBytes(input == null ? Map.of() : input));
-            process.getOutputStream().close();
+            String stdinError = null;
+            try (OutputStream stdin = process.getOutputStream()) {
+                stdin.write(objectMapper.writeValueAsBytes(input == null ? Map.of() : input));
+                stdin.flush();
+            } catch (Exception writeError) {
+                stdinError = writeError.getMessage();
+            }
             byte[] stdoutBytes = process.getInputStream().readAllBytes();
             byte[] stderrBytes = process.getErrorStream().readAllBytes();
             int exit = process.waitFor();
             String stdout = new String(stdoutBytes, StandardCharsets.UTF_8);
             String stderr = new String(stderrBytes, StandardCharsets.UTF_8);
+            if (stdinError != null && !stdinError.isBlank() && exit == 0) {
+                return CodeExecutionResult.failure("Snippet stdin write failed: " + stdinError, stdout, stderr, false);
+            }
             if (exit != 0) {
-                return CodeExecutionResult.failure("Snippet process exited with status " + exit, stdout, stderr, false);
+                String error = "Snippet process exited with status " + exit;
+                if (stdinError != null && !stdinError.isBlank()) {
+                    error += " (stdin write failed: " + stdinError + ")";
+                }
+                return CodeExecutionResult.failure(error, stdout, stderr, false);
             }
             int markerIdx = stdout.lastIndexOf(RESULT_MARKER);
             if (markerIdx < 0) {
