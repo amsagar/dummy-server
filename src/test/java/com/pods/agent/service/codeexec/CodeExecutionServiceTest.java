@@ -7,6 +7,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CodeExecutionServiceTest {
 
@@ -28,5 +29,17 @@ class CodeExecutionServiceTest {
         );
         assertFalse(result.success());
         assertTrue(result.error().toLowerCase().contains("blocked"));
+    }
+
+    @Test
+    void javascriptExecutorExposesNamedInputsAsVariables() {
+        JavaScriptExecutor executor = new JavaScriptExecutor();
+        CodeExecutionResult result = executor.execute(
+                "return order.id;",
+                Map.of("order", Map.of("id", "600030451")),
+                64
+        );
+        assertTrue(result.success());
+        assertEquals("600030451", String.valueOf(result.output()));
     }
 }

@@ -559,7 +559,7 @@ public class ToolChainRuntimeService {
         Integer memory = asInt(node.config().get("memoryLimitMb"));
         CodeExecutionResult result = codeExecutionService.execute(language, code, resolvedInput, timeout, memory);
         if (!result.success()) {
-            return StepResult.failed(result.error());
+            return StepResult.failed(formatCodeExecutionError(result));
         }
         Map<String, Object> step = new LinkedHashMap<>();
         step.put("input", resolvedInput);
@@ -581,11 +581,40 @@ public class ToolChainRuntimeService {
             if (!(row instanceof Map<?, ?> raw)) continue;
             String name = raw.get("name") == null ? "" : String.valueOf(raw.get("name")).trim();
             if (name.isBlank()) continue;
-            Object expression = raw.containsKey("expression") ? raw.get("expression") : raw.get("value");
-            Object value = argMappingResolver.resolveOne(expression, context, key -> resolvePath(context, key));
+            Object source = raw.containsKey("expression")
+                    ? raw.get("expression")
+                    : (raw.containsKey("from") ? raw.get("from") : raw.get("value"));
+            Object value = argMappingResolver.resolveOne(source, context, key -> resolvePath(context, key));
+            // Backward compatibility: historical configs used `from: "<nodeId>"` and expected
+            // that to mean prior step output, not the full {input,output} envelope.
+            if (raw.containsKey("from") && value instanceof Map<?, ?> map && isStepRecord(map)) {
+                value = lookupKey(map, "output");
+            }
             out.put(name, value);
         }
         return out;
+    }
+
+    private String formatCodeExecutionError(CodeExecutionResult result) {
+        String base = result.error() == null || result.error().isBlank()
+                ? "Code execution failed."
+                : result.error();
+        String stderr = result.stderr();
+        String stdout = result.stdout();
+        if (stderr != null && !stderr.isBlank()) {
+            base += " stderr: " + truncateForError(stderr);
+        } else if (stdout != null && !stdout.isBlank()) {
+            base += " stdout: " + truncateForError(stdout);
+        }
+        return base;
+    }
+
+    private String truncateForError(String text) {
+        if (text == null) return "";
+        String normalized = text.trim().replace('\n', ' ').replace('\r', ' ');
+        int max = 700;
+        if (normalized.length() <= max) return normalized;
+        return normalized.substring(0, max) + "...";
     }
 
     private Long asLong(Object value) {
