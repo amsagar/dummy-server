@@ -238,6 +238,8 @@ export default function ToolChainDesignerPage() {
   const modelInitializedRef = useRef<string>("");
   const streamedAssistantIdRef = useRef<string | null>(null);
   const seenQuestionRequestIdsRef = useRef<Set<string>>(new Set());
+  const malformedStreamLinesRef = useRef(0);
+  const unknownStreamEventsRef = useRef(0);
   const chatResizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
   // AbortController for the in-flight SSE stream — captured so the Stop button
   // in the composer can abort the fetch and call the backend cancel endpoint.
@@ -890,6 +892,8 @@ export default function ToolChainDesignerPage() {
     }
     streamedAssistantIdRef.current = null;
     seenQuestionRequestIdsRef.current = new Set();
+    malformedStreamLinesRef.current = 0;
+    unknownStreamEventsRef.current = 0;
     setIsConfigStreaming(true);
     // Tracks whether the latest state.updated this stream left a pending question.
     // When true, we keep isConfigStreaming on after done so the user perceives a
@@ -931,8 +935,27 @@ export default function ToolChainDesignerPage() {
         const normalized = line.trim();
         const dataLine = normalized.startsWith("data: ") ? normalized.slice(6) : normalized.startsWith("data:") ? normalized.slice(5) : null;
         if (!dataLine) return;
+        const ensureAssistantPlaceholder = (content: string) => {
+          const safe = String(content || "").trim();
+          if (!safe) return;
+          setChatMessages((prev) => {
+            if (streamedAssistantIdRef.current) return prev;
+            const hasAssistant = prev.some((m) => m.type === "assistant");
+            if (hasAssistant) return prev;
+            const nextId = genId();
+            streamedAssistantIdRef.current = nextId;
+            return [...prev, { id: nextId, type: "assistant", content: safe, reasoning: "", isStreaming: true }];
+          });
+        };
         try {
           const ev = JSON.parse(dataLine);
+          if (!ev || typeof ev !== "object" || !String(ev.type || "").trim()) {
+            const count = ++unknownStreamEventsRef.current;
+            if (count <= 3) {
+              console.debug("[ToolChainDesigner] Ignoring stream event without type", ev);
+            }
+            return;
+          }
           switch (ev.type) {
             case "connected":
               if (ev.sessionId) {
@@ -1015,6 +1038,7 @@ export default function ToolChainDesignerPage() {
             case "state.updated": {
               const state = ev.state || {};
               setSessionStatus(state.status || "draft");
+              ensureAssistantPlaceholder("Drafting your toolchain...");
               if (state.toolChainId && state.toolChainId !== toolChainId) {
                 setToolChainId(state.toolChainId);
                 queryClient.invalidateQueries({ queryKey: ["toolchains"] });
@@ -1123,9 +1147,19 @@ export default function ToolChainDesignerPage() {
               setChatMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
               toast.error(ev.message || "ToolChain streaming failed");
               break;
+            default: {
+              const count = ++unknownStreamEventsRef.current;
+              if (count <= 3) {
+                console.debug("[ToolChainDesigner] Unhandled stream event type", ev.type, ev);
+              }
+              break;
+            }
           }
         } catch {
-          // ignore malformed SSE event
+          const count = ++malformedStreamLinesRef.current;
+          if (count <= 3) {
+            console.debug("[ToolChainDesigner] Ignoring malformed stream event line", dataLine);
+          }
         }
       };
       while (true) {

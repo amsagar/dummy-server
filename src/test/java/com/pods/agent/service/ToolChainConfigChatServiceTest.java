@@ -18,8 +18,11 @@ import com.pods.agent.repository.ToolChainRunRepository;
 import com.pods.agent.repository.ToolChainUserLayoutRepository;
 import com.pods.agent.config.ModelProviderRouter;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import tools.jackson.databind.ObjectMapper;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -27,9 +30,11 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -224,6 +229,78 @@ class ToolChainConfigChatServiceTest {
                 ));
         assertEquals("mcp_tool", typesById.get("a"));
         assertEquals("mcp_tool", typesById.get("b"));
+    }
+
+    @Test
+    void designerBridgeEmitsFallbackTextDeltaWhenGraphIsNotParseable() throws Exception {
+        ToolChainConfigChatService service = buildService();
+        SseEmitter emitter = mock(SseEmitter.class);
+        Object bridge = newDesignerBridge(service, emitter);
+
+        Method sendTextDelta = bridge.getClass().getDeclaredMethod("sendTextDelta", String.class);
+        sendTextDelta.setAccessible(true);
+        sendTextDelta.invoke(bridge, "drafting workflow now");
+
+        verify(emitter, times(1)).send(any(SseEmitter.SseEventBuilder.class));
+    }
+
+    @Test
+    void designerBridgeEmitsGraphPreviewOnlyOnceForSamePartialGraph() throws Exception {
+        ToolChainConfigChatService service = buildService();
+        SseEmitter emitter = mock(SseEmitter.class);
+        Object bridge = newDesignerBridge(service, emitter);
+        Method sendTextDelta = bridge.getClass().getDeclaredMethod("sendTextDelta", String.class);
+        sendTextDelta.setAccessible(true);
+
+        String parseableChunk = """
+                {"artifactPatch":{"graphJson":{"nodes":[{"id":"start","type":"start"}],"edges":[]}}}
+                """;
+
+        sendTextDelta.invoke(bridge, parseableChunk);
+        sendTextDelta.invoke(bridge, parseableChunk);
+
+        verify(emitter, times(1)).send(any(SseEmitter.SseEventBuilder.class));
+    }
+
+    @Test
+    void designerBridgeExtractPartialGraphParsesNodesFromChunk() throws Exception {
+        ToolChainConfigChatService service = buildService();
+        SseEmitter emitter = mock(SseEmitter.class);
+        Object bridge = newDesignerBridge(service, emitter);
+        Method extractPartialGraph = bridge.getClass().getDeclaredMethod("extractPartialGraph", String.class);
+        extractPartialGraph.setAccessible(true);
+
+        String raw = """
+                {"artifactPatch":{"graphJson":{"nodes":[{"id":"start","type":"start"}],"edges":[{"id":"e1","from":"start","to":"end"}]}}}
+                """;
+        Object parsed = extractPartialGraph.invoke(bridge, raw);
+        assertNotNull(parsed);
+        Map<String, Object> map = (Map<String, Object>) parsed;
+        assertEquals(1, ((List<?>) map.get("nodes")).size());
+    }
+
+    private Object newDesignerBridge(ToolChainConfigChatService service, SseEmitter emitter) throws Exception {
+        Class<?> bridgeClass = null;
+        for (Class<?> inner : ToolChainConfigChatService.class.getDeclaredClasses()) {
+            if ("DesignerRuntimeStreamBridge".equals(inner.getSimpleName())) {
+                bridgeClass = inner;
+                break;
+            }
+        }
+        if (bridgeClass == null) throw new IllegalStateException("DesignerRuntimeStreamBridge not found");
+        Constructor<?> ctor = bridgeClass.getDeclaredConstructor(
+                ToolChainConfigChatService.class,
+                SseEmitter.class,
+                ObjectMapper.class,
+                ToolChainConfigSession.class,
+                String.class
+        );
+        ctor.setAccessible(true);
+        ToolChainConfigSession session = ToolChainConfigSession.builder()
+                .id("session-1")
+                .toolChainId("tc-1")
+                .build();
+        return ctor.newInstance(service, emitter, objectMapper, session, "tc-1");
     }
 
     private ToolChainConfigChatService buildService() {

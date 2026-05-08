@@ -1423,6 +1423,8 @@ Designer instruction:
         private int lastEmittedNodeCount = 0;
         private int lastEmittedEdgeCount = 0;
         private long lastPartialEmitMs = 0;
+        private boolean graphPreviewStreamingActive = false;
+        private long lastFallbackTextEmitMs = 0;
 
         private DesignerRuntimeStreamBridge(SseEmitter emitter,
                                             ObjectMapper mapper,
@@ -1494,17 +1496,24 @@ Designer instruction:
             if (now - lastPartialEmitMs < 200) return;
 
             Map<String, Object> partialGraph = extractPartialGraph(rawTextBuffer.toString());
-            if (partialGraph == null) return;
+            if (partialGraph == null) {
+                emitFallbackDesignerTextDelta(content, now);
+                return;
+            }
 
             Object nodesObj = partialGraph.get("nodes");
             Object edgesObj = partialGraph.get("edges");
             int nodeCount = (nodesObj instanceof List<?> nl) ? nl.size() : 0;
             int edgeCount = (edgesObj instanceof List<?> el) ? el.size() : 0;
-            if (nodeCount <= lastEmittedNodeCount && edgeCount <= lastEmittedEdgeCount) return;
+            if (nodeCount <= lastEmittedNodeCount && edgeCount <= lastEmittedEdgeCount) {
+                emitFallbackDesignerTextDelta(content, now);
+                return;
+            }
 
             lastEmittedNodeCount = nodeCount;
             lastEmittedEdgeCount = edgeCount;
             lastPartialEmitMs = now;
+            graphPreviewStreamingActive = true;
 
             Map<String, Object> previewState = new LinkedHashMap<>();
             previewState.put("status", "drafting");
@@ -1516,6 +1525,16 @@ Designer instruction:
             previewState.put("graphJson", toJson(partialGraph));
             previewState.put("graphAvailable", nodeCount > 0);
             super.sendStateUpdated(session.getId(), previewState);
+        }
+
+        private void emitFallbackDesignerTextDelta(String content, long nowMs) {
+            if (graphPreviewStreamingActive) return;
+            if (nowMs - lastFallbackTextEmitMs < 200) return;
+            String chunk = content == null ? "" : content.replace('\n', ' ').trim();
+            if (chunk.isBlank()) return;
+            if (chunk.length() > 180) chunk = chunk.substring(0, 180);
+            lastFallbackTextEmitMs = nowMs;
+            super.sendTextDelta(chunk);
         }
 
         private Map<String, Object> extractPartialGraph(String raw) {
@@ -1672,6 +1691,8 @@ Designer instruction:
             this.lastEmittedNodeCount = 0;
             this.lastEmittedEdgeCount = 0;
             this.lastPartialEmitMs = 0;
+            this.graphPreviewStreamingActive = false;
+            this.lastFallbackTextEmitMs = 0;
         }
 
         private void persistReasoningSummaryIfPresent() {
