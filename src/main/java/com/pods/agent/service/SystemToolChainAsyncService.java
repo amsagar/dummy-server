@@ -139,6 +139,27 @@ public class SystemToolChainAsyncService {
                     eligibilityTurnId
             );
             if (eligibilityOpt.isEmpty()) {
+                String retryTurnId = eligibilityTurnId + ":retry-1";
+                saveJobEvent(job, "system_toolchain_job.eligibility_retry", Map.of(
+                        "attempt", 2,
+                        "turnId", retryTurnId
+                ));
+                eligibilityOpt = architectAgentService.evaluateEligibilityFromTrace(
+                        workspace,
+                        tracePath,
+                        job.sessionId(),
+                        job.turnId(),
+                        job.userId(),
+                        job.userPrompt(),
+                        job.assistantResponse(),
+                        job.modelRef(),
+                        retryTurnId
+                );
+                if (eligibilityOpt.isPresent()) {
+                    eligibilityTurnId = retryTurnId;
+                }
+            }
+            if (eligibilityOpt.isEmpty()) {
                 String failureReason = classifyEligibilityFailure(eligibilityTurnId, tracePath);
                 saveJobEvent(job, "system_toolchain_job.failed", Map.of(
                         "reason", "eligibility_invalid",

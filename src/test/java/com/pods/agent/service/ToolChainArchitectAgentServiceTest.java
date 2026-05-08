@@ -93,7 +93,7 @@ class ToolChainArchitectAgentServiceTest {
     }
 
     @Test
-    void evaluateEligibilityFailsWhenReferencedSkillNotLoaded() {
+    void evaluateEligibilitySanitizesReferencedSkillWhenNotLoaded() {
         AgentRuntimeService runtimeService = mock(AgentRuntimeService.class);
         RuntimeEventRepository runtimeEventRepository = mock(RuntimeEventRepository.class);
         ToolChainArchitectAgentService service = new ToolChainArchitectAgentService(
@@ -123,7 +123,8 @@ class ToolChainArchitectAgentServiceTest {
                 "turn-3:eligibility"
         );
 
-        assertTrue(out.isEmpty());
+        assertTrue(out.isPresent());
+        assertEquals(List.of(), out.get().referencedSkills());
     }
 
     @Test

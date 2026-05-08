@@ -74,11 +74,25 @@ public class ToolChainArchitectAgentService {
         Optional<SystemToolChainArtifact> artifact = parseArtifact(raw);
         if (artifact.isEmpty()) return Optional.empty();
         List<RuntimeEvent> architectEvents = runtimeEventRepository.findByTurnId(architectTurnId);
-        if (!hasSkillLoadEvidence(architectEvents, artifact.get().referencedSkills())
+        Set<String> loadedSkills = loadedSkillNames(architectEvents);
+        if (!loadedSkills.contains("toolchain-architect")
                 || !hasTraceReadEvidence(architectEvents, traceRelativePath)) {
             return Optional.empty();
         }
-        return artifact;
+        List<String> sanitizedSkills = sanitizeReferencedSkills(artifact.get().referencedSkills(), loadedSkills);
+        SystemToolChainArtifact sanitizedArtifact = SystemToolChainArtifact.builder()
+                .name(artifact.get().name())
+                .description(artifact.get().description())
+                .intents(artifact.get().intents())
+                .referencedSkills(sanitizedSkills)
+                .graphJson(artifact.get().graphJson())
+                .inputSchema(artifact.get().inputSchema())
+                .outputSchema(artifact.get().outputSchema())
+                .responseMode(artifact.get().responseMode())
+                .synthesisPrompt(artifact.get().synthesisPrompt())
+                .ragConfig(artifact.get().ragConfig())
+                .build();
+        return Optional.of(sanitizedArtifact);
     }
 
     public Optional<SystemToolChainEligibility> evaluateEligibilityFromTrace(Path workspace,
@@ -117,11 +131,20 @@ public class ToolChainArchitectAgentService {
         Optional<SystemToolChainEligibility> eligibility = parseEligibility(raw);
         if (eligibility.isEmpty()) return Optional.empty();
         List<RuntimeEvent> eligibilityEvents = runtimeEventRepository.findByTurnId(eligibilityTurnId);
-        if (!hasSkillLoadEvidence(eligibilityEvents, eligibility.get().referencedSkills())
+        Set<String> loadedSkills = loadedSkillNames(eligibilityEvents);
+        if (!loadedSkills.contains("toolchain-architect")
                 || !hasTraceReadEvidence(eligibilityEvents, traceRelativePath)) {
             return Optional.empty();
         }
-        return eligibility;
+        List<String> sanitizedSkills = sanitizeReferencedSkills(eligibility.get().referencedSkills(), loadedSkills);
+        SystemToolChainEligibility sanitizedEligibility = SystemToolChainEligibility.builder()
+                .toolChainNeeded(eligibility.get().toolChainNeeded())
+                .simpleTurn(eligibility.get().simpleTurn())
+                .confidence(eligibility.get().confidence())
+                .reason(eligibility.get().reason())
+                .referencedSkills(sanitizedSkills)
+                .build();
+        return Optional.of(sanitizedEligibility);
     }
 
     private String buildArchitectPrompt(String traceRelativePath) {
@@ -191,17 +214,19 @@ Validation rules:
 """.formatted(traceRelativePath);
     }
 
-    private boolean hasSkillLoadEvidence(List<RuntimeEvent> events, List<String> referencedSkills) {
-        Set<String> loaded = loadedSkillNames(events);
-        if (!loaded.contains("toolchain-architect")) return false;
-        if (referencedSkills == null || referencedSkills.isEmpty()) return true;
+    private List<String> sanitizeReferencedSkills(List<String> referencedSkills, Set<String> loadedSkills) {
+        if (referencedSkills == null || referencedSkills.isEmpty()) return List.of();
+        if (loadedSkills == null || loadedSkills.isEmpty()) return List.of();
+        List<String> out = new ArrayList<>();
         for (String skill : referencedSkills) {
             String normalized = string(skill).toLowerCase(Locale.ROOT);
-            if (normalized.isBlank()) continue;
-            if ("toolchain-architect".equals(normalized)) continue;
-            if (!loaded.contains(normalized)) return false;
+            if (normalized.isBlank() || "toolchain-architect".equals(normalized)) continue;
+            if (!loadedSkills.contains(normalized)) continue;
+            if (out.stream().noneMatch(existing -> existing.equalsIgnoreCase(skill))) {
+                out.add(string(skill));
+            }
         }
-        return true;
+        return out;
     }
 
     private boolean hasTraceReadEvidence(List<RuntimeEvent> events, String traceRelativePath) {

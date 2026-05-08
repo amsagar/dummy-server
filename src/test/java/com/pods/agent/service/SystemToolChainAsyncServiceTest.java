@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -197,6 +198,103 @@ class SystemToolChainAsyncServiceTest {
         verify(proposalRepository, never()).save(any(SystemToolChainProposal.class));
         verify(architectService, never()).generateFromTrace(any(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), any(), anyString());
         verify(suggestionService, never()).createSuggestionFromArchitectArtifact(any(), anyString(), anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void processRetriesEligibilityOnceBeforeFailingOrProceeding() {
+        RuntimeEventRepository runtimeEventRepository = mock(RuntimeEventRepository.class);
+        SessionWorkspaceService workspaceService = mock(SessionWorkspaceService.class);
+        ToolChainTraceFileService traceService = mock(ToolChainTraceFileService.class);
+        ToolChainArchitectAgentService architectService = mock(ToolChainArchitectAgentService.class);
+        ToolChainSuggestionService suggestionService = mock(ToolChainSuggestionService.class);
+        ToolChainService toolChainService = mock(ToolChainService.class);
+        SystemToolChainDurableTraceService durableTraceService = mock(SystemToolChainDurableTraceService.class);
+        AgentSessionManager sessionManager = mock(AgentSessionManager.class);
+        SystemToolChainProposalRepository proposalRepository = mock(SystemToolChainProposalRepository.class);
+        SystemToolChainAsyncService service = new SystemToolChainAsyncService(
+                runtimeEventRepository,
+                workspaceService,
+                traceService,
+                architectService,
+                suggestionService,
+                toolChainService,
+                durableTraceService,
+                sessionManager,
+                proposalRepository,
+                new ObjectMapper()
+        );
+        when(toolChainService.findBestIntentMatchForDedup(anyString(), anyDouble())).thenReturn(Optional.empty());
+        when(proposalRepository.findActiveByUser(eq("user-1"))).thenReturn(List.of());
+        Path workspace = Path.of("/tmp/test");
+        when(traceService.writeTurnTrace(eq(workspace), eq("session-1"), eq("turn-1"), anyString(), anyString()))
+                .thenReturn(".pods-agent/turns/turn-1/toolchain-trace.json");
+        when(durableTraceService.persistAsJson(eq(workspace), eq(".pods-agent/turns/turn-1/toolchain-trace.json")))
+                .thenReturn(Optional.of("{\"traceVersion\":1}"));
+        when(architectService.evaluateEligibilityFromTrace(
+                eq(workspace),
+                eq(".pods-agent/turns/turn-1/toolchain-trace.json"),
+                eq("session-1"),
+                eq("turn-1"),
+                eq("user-1"),
+                anyString(),
+                anyString(),
+                any(),
+                eq("turn-1:toolchain-eligibility")
+        )).thenReturn(Optional.empty());
+        when(architectService.evaluateEligibilityFromTrace(
+                eq(workspace),
+                eq(".pods-agent/turns/turn-1/toolchain-trace.json"),
+                eq("session-1"),
+                eq("turn-1"),
+                eq("user-1"),
+                anyString(),
+                anyString(),
+                any(),
+                eq("turn-1:toolchain-eligibility:retry-1")
+        )).thenReturn(Optional.of(SystemToolChainEligibility.builder()
+                .toolChainNeeded(true)
+                .simpleTurn(false)
+                .confidence("high")
+                .reason("retry succeeded")
+                .referencedSkills(List.of())
+                .build()));
+        when(proposalRepository.findBySessionTurn(eq("session-1"), eq("turn-1")))
+                .thenReturn(Optional.empty());
+        when(proposalRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        service.process(new SystemToolChainAsyncService.Job(
+                "session-1",
+                "turn-1",
+                "prompt",
+                "assistant",
+                "user-1",
+                new ModelRef("openai", "gpt-4o"),
+                workspace
+        ));
+
+        verify(architectService, times(1)).evaluateEligibilityFromTrace(
+                eq(workspace),
+                eq(".pods-agent/turns/turn-1/toolchain-trace.json"),
+                eq("session-1"),
+                eq("turn-1"),
+                eq("user-1"),
+                anyString(),
+                anyString(),
+                any(),
+                eq("turn-1:toolchain-eligibility")
+        );
+        verify(architectService, times(1)).evaluateEligibilityFromTrace(
+                eq(workspace),
+                eq(".pods-agent/turns/turn-1/toolchain-trace.json"),
+                eq("session-1"),
+                eq("turn-1"),
+                eq("user-1"),
+                anyString(),
+                anyString(),
+                any(),
+                eq("turn-1:toolchain-eligibility:retry-1")
+        );
+        verify(proposalRepository).save(any(SystemToolChainProposal.class));
     }
 
     @Test
