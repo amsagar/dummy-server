@@ -580,14 +580,19 @@ public class ToolChainRuntimeService {
         for (Object row : rows) {
             if (!(row instanceof Map<?, ?> raw)) continue;
             String name = raw.get("name") == null ? "" : String.valueOf(raw.get("name")).trim();
+            if (name.isBlank() && raw.get("as") != null) {
+                name = String.valueOf(raw.get("as")).trim();
+            }
             if (name.isBlank()) continue;
             Object source = raw.containsKey("expression")
                     ? raw.get("expression")
-                    : (raw.containsKey("from") ? raw.get("from") : raw.get("value"));
+                    : (raw.containsKey("from")
+                    ? raw.get("from")
+                    : (raw.containsKey("source") ? raw.get("source") : raw.get("value")));
             Object value = argMappingResolver.resolveOne(source, context, key -> resolvePath(context, key));
             // Backward compatibility: historical configs used `from: "<nodeId>"` and expected
             // that to mean prior step output, not the full {input,output} envelope.
-            if (raw.containsKey("from") && value instanceof Map<?, ?> map && isStepRecord(map)) {
+            if ((raw.containsKey("from") || raw.containsKey("source")) && value instanceof Map<?, ?> map && isStepRecord(map)) {
                 value = lookupKey(map, "output");
             }
             out.put(name, value);

@@ -42,4 +42,16 @@ class CodeExecutionServiceTest {
         assertTrue(result.success());
         assertEquals("600030451", String.valueOf(result.output()));
     }
+
+    @Test
+    void javascriptExecutorHandlesStatementBodiesWithConstDeclarations() {
+        JavaScriptExecutor executor = new JavaScriptExecutor();
+        CodeExecutionResult result = executor.execute(
+                "const lines = order.lines || []; return lines.length;",
+                Map.of("order", Map.of("lines", java.util.List.of(1, 2, 3))),
+                64
+        );
+        assertTrue(result.success());
+        assertEquals("3", String.valueOf(result.output()));
+    }
 }
