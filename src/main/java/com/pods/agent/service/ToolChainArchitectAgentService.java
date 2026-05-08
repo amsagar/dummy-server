@@ -247,66 +247,70 @@ Validation rules:
 
     @SuppressWarnings("unchecked")
     private Optional<SystemToolChainArtifact> parseArtifact(String raw) {
-        String json = extractJsonObject(raw);
-        if (json == null || json.isBlank()) return Optional.empty();
-        try {
-            Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
-            String name = string(parsed.get("name"));
-            String description = string(parsed.get("description"));
-            List<String> intents = readStringList(parsed.get("intents"));
-            String graphJson = toJson(parsed.get("graph"));
-            String inputSchema = toJson(parsed.get("inputSchema"));
-            String outputSchema = toJson(parsed.get("outputSchema"));
-            String responseMode = string(parsed.get("responseMode"));
-            String synthesisPrompt = string(parsed.get("synthesisPrompt"));
-            Map<String, Object> ragConfig = toMap(parsed.get("ragConfig"));
-            List<String> referencedSkills = normalizeReferencedSkills(parsed.get("referencedSkills"));
+        for (String json : extractJsonCandidates(raw)) {
+            if (json == null || json.isBlank()) continue;
+            try {
+                Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
+                String name = string(parsed.get("name"));
+                String description = string(parsed.get("description"));
+                List<String> intents = readStringList(parsed.get("intents"));
+                String graphJson = toJson(parsed.get("graph"));
+                String inputSchema = toJson(parsed.get("inputSchema"));
+                String outputSchema = toJson(parsed.get("outputSchema"));
+                String responseMode = string(parsed.get("responseMode"));
+                String synthesisPrompt = string(parsed.get("synthesisPrompt"));
+                Map<String, Object> ragConfig = toMap(parsed.get("ragConfig"));
+                List<String> referencedSkills = normalizeReferencedSkills(parsed.get("referencedSkills"));
 
-            if (name.isBlank() || description.isBlank() || intents.isEmpty()) return Optional.empty();
-            if (!isObjectWithKeys(parsed.get("graph"), "nodes", "edges")) return Optional.empty();
-            if (!isObject(parsed.get("inputSchema")) || !isObject(parsed.get("outputSchema"))) return Optional.empty();
+                if (name.isBlank() || description.isBlank() || intents.isEmpty()) continue;
+                if (!isObjectWithKeys(parsed.get("graph"), "nodes", "edges")) continue;
+                if (!isObject(parsed.get("inputSchema")) || !isObject(parsed.get("outputSchema"))) continue;
 
-            return Optional.of(SystemToolChainArtifact.builder()
-                    .name(name)
-                    .description(description)
-                    .intents(intents)
-                    .referencedSkills(referencedSkills)
-                    .graphJson(graphJson)
-                    .inputSchema(inputSchema)
-                    .outputSchema(outputSchema)
-                    .responseMode(responseMode.isBlank() ? "hybrid" : responseMode)
-                    .synthesisPrompt(synthesisPrompt)
-                    .ragConfig(ragConfig)
-                    .build());
-        } catch (Exception ignored) {
-            return Optional.empty();
+                return Optional.of(SystemToolChainArtifact.builder()
+                        .name(name)
+                        .description(description)
+                        .intents(intents)
+                        .referencedSkills(referencedSkills)
+                        .graphJson(graphJson)
+                        .inputSchema(inputSchema)
+                        .outputSchema(outputSchema)
+                        .responseMode(responseMode.isBlank() ? "hybrid" : responseMode)
+                        .synthesisPrompt(synthesisPrompt)
+                        .ragConfig(ragConfig)
+                        .build());
+            } catch (Exception ignored) {
+                // Keep scanning candidates.
+            }
         }
+        return Optional.empty();
     }
 
     @SuppressWarnings("unchecked")
     private Optional<SystemToolChainEligibility> parseEligibility(String raw) {
-        String json = extractJsonObject(raw);
-        if (json == null || json.isBlank()) return Optional.empty();
-        try {
-            Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
-            if (!(parsed.get("isToolChainNeeded") instanceof Boolean needed)) return Optional.empty();
-            if (!(parsed.get("isSimpleTurn") instanceof Boolean simpleTurn)) return Optional.empty();
-            String confidence = string(parsed.get("confidence")).toLowerCase(Locale.ROOT);
-            if (!List.of("low", "medium", "high").contains(confidence)) return Optional.empty();
-            String reason = string(parsed.get("reason"));
-            if (reason.length() > 160) reason = reason.substring(0, 160);
-            List<String> referencedSkills = normalizeReferencedSkills(parsed.get("referencedSkills"));
-            if (simpleTurn) needed = false;
-            return Optional.of(SystemToolChainEligibility.builder()
-                    .toolChainNeeded(needed)
-                    .simpleTurn(simpleTurn)
-                    .confidence(confidence)
-                    .reason(reason)
-                    .referencedSkills(referencedSkills)
-                    .build());
-        } catch (Exception ignored) {
-            return Optional.empty();
+        for (String json : extractJsonCandidates(raw)) {
+            if (json == null || json.isBlank()) continue;
+            try {
+                Map<String, Object> parsed = objectMapper.readValue(json, Map.class);
+                if (!(parsed.get("isToolChainNeeded") instanceof Boolean needed)) continue;
+                if (!(parsed.get("isSimpleTurn") instanceof Boolean simpleTurn)) continue;
+                String confidence = string(parsed.get("confidence")).toLowerCase(Locale.ROOT);
+                if (!List.of("low", "medium", "high").contains(confidence)) continue;
+                String reason = string(parsed.get("reason"));
+                if (reason.length() > 160) reason = reason.substring(0, 160);
+                List<String> referencedSkills = normalizeReferencedSkills(parsed.get("referencedSkills"));
+                if (simpleTurn) needed = false;
+                return Optional.of(SystemToolChainEligibility.builder()
+                        .toolChainNeeded(needed)
+                        .simpleTurn(simpleTurn)
+                        .confidence(confidence)
+                        .reason(reason)
+                        .referencedSkills(referencedSkills)
+                        .build());
+            } catch (Exception ignored) {
+                // Keep scanning candidates.
+            }
         }
+        return Optional.empty();
     }
 
     private boolean isObject(Object value) {
@@ -321,11 +325,26 @@ Validation rules:
         return true;
     }
 
-    private String extractJsonObject(String raw) {
-        if (raw == null) return null;
+    private List<String> extractJsonCandidates(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        List<String> candidates = new ArrayList<>();
         String text = raw.trim();
+
         Matcher fenced = FENCED_JSON.matcher(text);
-        if (fenced.find()) text = fenced.group(1).trim();
+        while (fenced.find()) {
+            String block = string(fenced.group(1));
+            if (!block.isBlank()) candidates.add(block);
+        }
+
+        String inline = extractOuterJsonObject(text);
+        if (inline != null && !inline.isBlank()) {
+            candidates.add(inline);
+        }
+        return candidates;
+    }
+
+    private String extractOuterJsonObject(String text) {
+        if (text == null || text.isBlank()) return null;
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');
         if (start < 0 || end < 0 || end <= start) return null;

@@ -163,6 +163,49 @@ class ToolChainArchitectAgentServiceTest {
         assertEquals(List.of("Billing Rules"), out.get().referencedSkills());
     }
 
+    @Test
+    void generateFromTraceAcceptsLaterValidJsonWhenFirstFencedBlockIsInvalid() {
+        AgentRuntimeService runtimeService = mock(AgentRuntimeService.class);
+        RuntimeEventRepository runtimeEventRepository = mock(RuntimeEventRepository.class);
+        ToolChainArchitectAgentService service = new ToolChainArchitectAgentService(
+                runtimeService,
+                runtimeEventRepository,
+                new ObjectMapper()
+        );
+
+        when(runtimeService.runTurn(any(), anyString(), any(), any(), eq("turn-5:architect")))
+                .thenReturn("""
+                        Intro text
+                        ```json
+                        {"name":"Bad Draft","description":"...","graph":{"nodes":[start],"edges":[{"from":"a","to":"b"}]}}
+                        ```
+                        More text
+                        ```json
+                        {"name":"Order Validator","description":"Validates order data","intents":["validate order"],"referencedSkills":["Billing Rules"],"graph":{"nodes":[{"id":"start"},{"id":"end"}],"edges":[{"from":"start","to":"end"}]},"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"responseMode":"hybrid","synthesisPrompt":"Summarize.","ragConfig":{}}
+                        ```
+                        """);
+        when(runtimeEventRepository.findByTurnId("turn-5:architect")).thenReturn(List.of(
+                event("tool.call", "{\"toolName\":\"skill\",\"input\":{\"name\":\"toolchain-architect\"}}"),
+                event("tool.call", "{\"toolName\":\"skill\",\"input\":{\"name\":\"Billing Rules\"}}"),
+                event("tool.call", "{\"toolName\":\"read\",\"input\":{\"path\":\".pods-agent/turns/turn-5/toolchain-trace.json\"}}")
+        ));
+
+        Optional<SystemToolChainArtifact> out = service.generateFromTrace(
+                Path.of("/tmp"),
+                ".pods-agent/turns/turn-5/toolchain-trace.json",
+                "session-5",
+                "turn-5",
+                "user-1",
+                "validate order",
+                "done",
+                new ModelRef("openai", "gpt-4o"),
+                "turn-5:architect"
+        );
+
+        assertTrue(out.isPresent());
+        assertEquals("Order Validator", out.get().name());
+    }
+
     private RuntimeEvent event(String type, String payload) {
         return RuntimeEvent.builder()
                 .eventType(type)
