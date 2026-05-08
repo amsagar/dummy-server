@@ -776,15 +776,7 @@ public class ToolChainRuntimeService {
             if (key == null || key.isBlank()) continue;
             Object current = findIgnoreCase(inputs, key);
             if (!isBlankValue(current)) continue;
-            Object fromContext = resolvePath(context, key);
-            if (fromContext == null && context != null) {
-                for (Map.Entry<String, Object> entry : context.entrySet()) {
-                    if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) {
-                        fromContext = entry.getValue();
-                        break;
-                    }
-                }
-            }
+            Object fromContext = findRequiredInputInContext(context, key);
             if (!isBlankValue(fromContext)) {
                 inputs.put(key, fromContext);
             }
@@ -829,6 +821,72 @@ public class ToolChainRuntimeService {
         if (value == null) return true;
         String text = String.valueOf(value);
         return text.isBlank();
+    }
+
+    private Object findRequiredInputInContext(Map<String, Object> context, String key) {
+        if (context == null || context.isEmpty() || key == null || key.isBlank()) return null;
+        Object fromPath = resolvePath(context, key);
+        if (!isBlankValue(fromPath)) return fromPath;
+        for (Map.Entry<String, Object> entry : context.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key) && !isBlankValue(entry.getValue())) {
+                return entry.getValue();
+            }
+            Object nested = nestedValueForRequiredKey(entry.getValue(), key);
+            if (!isBlankValue(nested)) return nested;
+        }
+        return null;
+    }
+
+    private Object nestedValueForRequiredKey(Object container, String key) {
+        if (!(container instanceof Map<?, ?> raw)) return null;
+        Object direct = lookupKey(raw, key);
+        if (!isBlankValue(direct)) return direct;
+        Object output = lookupKey(raw, "output");
+        if (output instanceof Map<?, ?> outputMap) {
+            Object fromOutput = lookupKey(outputMap, key);
+            if (!isBlankValue(fromOutput)) return fromOutput;
+        }
+        Object result = lookupKey(raw, "result");
+        if (result instanceof Map<?, ?> resultMap) {
+            Object fromResult = lookupKey(resultMap, key);
+            if (!isBlankValue(fromResult)) return fromResult;
+        }
+        return null;
+    }
+
+    private String resolveToolChainReference(String chainRef) {
+        if (chainRef == null || chainRef.isBlank()) return chainRef;
+        String trimmed = chainRef.trim();
+        try {
+            toolChainService.getRequired(trimmed);
+            return trimmed;
+        } catch (Exception ignored) {
+            // Fall back to name/slug resolution.
+        }
+        List<com.pods.agent.domain.ToolChain> chains = toolChainService.listAll();
+        for (com.pods.agent.domain.ToolChain chain : chains) {
+            String name = chain.getName();
+            if (name != null && name.equalsIgnoreCase(trimmed)) {
+                return chain.getId();
+            }
+        }
+        String wantedSlug = slugifyChainRef(trimmed);
+        if (!wantedSlug.isBlank()) {
+            for (com.pods.agent.domain.ToolChain chain : chains) {
+                String name = chain.getName();
+                if (name == null || name.isBlank()) continue;
+                if (slugifyChainRef(name).equals(wantedSlug)) {
+                    return chain.getId();
+                }
+            }
+        }
+        return trimmed;
+    }
+
+    private String slugifyChainRef(String value) {
+        if (value == null || value.isBlank()) return "";
+        String slug = value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-");
+        return slug.replaceAll("^-+", "").replaceAll("-+$", "");
     }
 
     private StepResult executeDecision(NodeModel node, Map<String, Object> context) {
@@ -999,10 +1057,11 @@ public class ToolChainRuntimeService {
 
     @SuppressWarnings("unchecked")
     private StepResult executeSubchain(NodeModel node, Map<String, Object> context, String parentRunId, SseEventSender sender, String effectiveSessionId, Map<String, Object> runOptions) {
-        String subChainId = node.configString("chainId");
-        if (subChainId == null || subChainId.isBlank()) {
+        String subChainRef = node.configString("chainId");
+        if (subChainRef == null || subChainRef.isBlank()) {
             return StepResult.failed("subchain node missing 'chainId'");
         }
+        String subChainId = resolveToolChainReference(subChainRef);
         Integer subVersion = null;
         Object versionObj = node.config().get("version");
         if (versionObj instanceof Number n) subVersion = n.intValue();
@@ -1069,10 +1128,11 @@ public class ToolChainRuntimeService {
         if (over == null || over.isBlank()) {
             return StepResult.failed("iterator node missing 'over' (or 'toolName' for inline mode)");
         }
-        String subChainId = node.configString("subChainId");
-        if (subChainId == null || subChainId.isBlank()) {
+        String subChainRef = node.configString("subChainId");
+        if (subChainRef == null || subChainRef.isBlank()) {
             return StepResult.failed("iterator node missing 'subChainId'");
         }
+        String subChainId = resolveToolChainReference(subChainRef);
         Integer subVersion = null;
         Object versionObj = node.config().get("subVersion");
         if (versionObj instanceof Number n) subVersion = n.intValue();

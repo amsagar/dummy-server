@@ -10,8 +10,12 @@ import com.pods.agent.service.expression.BooleanExpressionEvaluator;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 
+import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -29,7 +33,50 @@ class ToolChainRuntimeServiceTest {
                         .build()
         );
 
-        ToolChainRuntimeService runtimeService = new ToolChainRuntimeService(
+        ToolChainRuntimeService runtimeService = newRuntimeService(toolChainService);
+
+        assertThrows(IllegalStateException.class, () ->
+                runtimeService.execute("tc-1", null, "api", "user-1", Map.of(), Map.of(), null));
+    }
+
+    @Test
+    void resolvesSubchainReferenceFromSlugName() throws Exception {
+        ToolChainService toolChainService = mock(ToolChainService.class);
+        when(toolChainService.getRequired("pods-serviceability-leg-check"))
+                .thenThrow(new IllegalArgumentException("ToolChain not found: pods-serviceability-leg-check"));
+        when(toolChainService.listAll()).thenReturn(List.of(
+                ToolChain.builder()
+                        .id("subchain-uuid-1")
+                        .name("Pods Serviceability Leg Check")
+                        .build()
+        ));
+        ToolChainRuntimeService runtimeService = newRuntimeService(toolChainService);
+        Method method = ToolChainRuntimeService.class.getDeclaredMethod("resolveToolChainReference", String.class);
+        method.setAccessible(true);
+        Object resolved = method.invoke(runtimeService, "pods-serviceability-leg-check");
+        assertEquals("subchain-uuid-1", resolved);
+    }
+
+    @Test
+    void findsDecisionRequiredInputInsideStepOutputEnvelope() throws Exception {
+        ToolChainService toolChainService = mock(ToolChainService.class);
+        ToolChainRuntimeService runtimeService = newRuntimeService(toolChainService);
+        Method method = ToolChainRuntimeService.class.getDeclaredMethod(
+                "findRequiredInputInContext", Map.class, String.class);
+        method.setAccessible(true);
+
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("extract_legs", Map.of(
+                "output", Map.of("journeyType", "Long Distance"),
+                "stdout", ""
+        ));
+
+        Object resolved = method.invoke(runtimeService, context, "journeyType");
+        assertEquals("Long Distance", resolved);
+    }
+
+    private ToolChainRuntimeService newRuntimeService(ToolChainService toolChainService) {
+        return new ToolChainRuntimeService(
                 toolChainService,
                 mock(ToolRegistryService.class),
                 mock(ToolExecutionService.class),
@@ -47,8 +94,5 @@ class ToolChainRuntimeServiceTest {
                 new BooleanExpressionEvaluator(),
                 mock(CodeExecutionService.class)
         );
-
-        assertThrows(IllegalStateException.class, () ->
-                runtimeService.execute("tc-1", null, "api", "user-1", Map.of(), Map.of(), null));
     }
 }
