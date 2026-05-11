@@ -11,6 +11,54 @@ You are designing a `ProcessDefDto` JSON artifact that will be saved by `Process
 
 ---
 
+## 🛑 READ THIS FIRST — Zero-tolerance prohibitions
+
+Three failure modes have produced broken workflows in the past. Each is **non-negotiable**: violations cause the proposal to be rejected at review and embarrass the system in the UI.
+
+### 1. NO ghost / "Load …" / "Setup …" / "Init …" activities
+
+You will be tempted to start the workflow with a friendly-sounding bootstrap step like:
+
+- `Load Workflow Architect` (toolName: `skill` / `workflow-architect`)
+- `Load Order Validation Skill`
+- `Initialize Session` / `Setup Context` / `Prepare Request`
+- `Validate Input` / `Normalize Params` (as a standalone CodeExecPlugin step)
+- `Log Result` / `Audit Outcome` / `Track Metric` at the end
+
+**All of these are hallucinations.** The chat turn never executed them. They are not real tools. The engine does not need them. Emit zero of them.
+
+**Mechanical filter** — before you write ANY `AgentToolPlugin` activity, do this in your head:
+
+```
+1. Open `summary.toolNames` from the execution log.
+2. For each AgentToolPlugin activity you are about to emit:
+     if activity.properties.toolName ∉ summary.toolNames:
+         DELETE the activity. Do not emit it. Do not rationalize it.
+3. For each activity whose `name` starts with one of these prefixes
+   (case-insensitive): "Load ", "Init", "Setup", "Prepare", "Bootstrap",
+   "Warmup", "Validate Input", "Normalize", "Log Result", "Audit ", "Track":
+     STOP. This is almost certainly a ghost. The only legitimate exceptions
+     are when the turn actually called a tool whose name semantically
+     matches (which will already be visible in `summary.toolNames` and
+     thus survive step 2).
+```
+
+If after running that filter you are left with zero activities besides `start` → `end`, that is the correct workflow. A workflow that does nothing is better than a workflow that does fictional work.
+
+### 2. NO invented tool names
+
+Every `AgentToolPlugin` activity's `toolName` MUST be a literal string that appears in `summary.toolNames`. No paraphrasing, no pluralizing, no "obvious" variants. If the turn called `getCart`, you may emit `toolName: "getCart"` — never `getCarts`, `fetchCart`, `loadCart`, or `cart`.
+
+### 3. NO Python / JavaScript / TypeScript in CodeExecPlugin
+
+Java only. Other languages are temporarily disabled in the runtime — emitting them guarantees a failed run.
+
+---
+
+If any of the above three rules is unclear, default to emitting fewer activities, not more. The rest of this file fleshes out the schema and patterns, but **these three rules dominate everything else**.
+
+---
+
 ## Execution log input contract
 
 Before writing any JSON, the architect MUST read the turn's execution log:
@@ -310,11 +358,34 @@ The architect commonly hallucinates one of these patterns — **all are forbidde
 | Ghost step the architect tries to add | Why it's wrong |
 |---|---|
 | `loadSkill` / `loadConfig` / `initSession` calling `AgentToolPlugin` with `toolName: "skill"` (or similar non-existent name) | The turn didn't load a skill at runtime — skills are baked into the chat agent's prompt, not invoked as workflow tools. There is no agent tool called `skill`. |
+| `Load Workflow Architect` / `Load Order Validation Skill` / any `Load <Something> Skill` | Skills are not loadable at runtime. They live in the chat-agent's prompt only. There is no `loadSkill` tool, no `skill` tool, no `workflow-architect` tool. Emit zero of these. |
 | `validateInput` / `parseRequest` / `normalizeParams` as a `CodeExecPlugin` step | Validation/normalization belongs inside the tool itself or as a transition `condition`. Not a separate node. |
 | `logResult` / `auditOutcome` / `trackMetric` at the end | The engine writes audit rows automatically. Don't reimplement it. |
 | A second `fetchList` or `lookupUser` "to be safe" before the real one | One call per turn-step. No defensive double-fetches. |
+| `Authenticate` / `Get Token` / `Refresh Session` before a tool call | Auth is handled inside the tool plugin by `ToolRegistryService`. The workflow never sees credentials. |
+
+#### Activity-name prefix blacklist
+
+If an activity you're about to emit has a `name` (or `id`) that matches any of these case-insensitive prefixes, treat it as a probable ghost and apply the mechanical filter from the top-of-file prohibitions:
+
+```
+Load …, Init …, Initialize …, Setup …, Prepare …, Bootstrap …, Warmup …,
+Validate Input, Normalize …, Parse Request, Authenticate, Get Token,
+Refresh Session, Log Result, Audit Outcome, Track Metric, Finalize,
+Cleanup, Teardown, Notify, Emit Event
+```
+
+The activity survives only if its `toolName` is literally present in `summary.toolNames` from the execution log. Otherwise: delete.
+
+**Pre-emit checklist — run this for every activity you are about to write:**
+
+1. Is its `pluginName` `AgentToolPlugin`? If yes, is `properties.toolName` literally present in `summary.toolNames`? If no → **delete**.
+2. Does its `name` match the prefix blacklist above? If yes, did step 1 already validate the tool exists? If no → **delete**.
+3. Does the chat turn's `userPrompt` or an `architect_note` explicitly request this step? If neither, and step 1/2 didn't justify it → **delete**.
 
 **Rule**: the count of `AgentToolPlugin` activities you emit MUST equal the count of distinct agent-tool *call-sites* in the turn (one per loop body, even if the turn called it many times). If a tool name appears in your activity list that wasn't in the prompt's tool-names list, delete that activity.
+
+**When in doubt: emit fewer activities.** A workflow with `start → fetchList → end` is better than `start → loadSkill → setup → fetchList → log → end`. The four extra nodes add failure surface, are visible in the UI as broken-looking dead weight, and will get the workflow proposal rejected.
 
 Bad — workflow generated from a turn that only called `getAllProducts` and `getProductById`:
 ```
@@ -645,6 +716,10 @@ See [references/workflow-patterns.md](references/workflow-patterns.md) for the f
 
 ## Quality checklist (run before returning)
 
+0. **Ghost-step sweep** — for every activity in your draft:
+   - If `pluginName == "AgentToolPlugin"`, confirm `properties.toolName` is a literal member of `summary.toolNames` from the execution log. If not → delete the activity AND its incident transitions, then rewire.
+   - If the activity `name` starts with `Load `, `Init`, `Setup`, `Prepare`, `Bootstrap`, `Warmup`, `Validate Input`, `Normalize`, `Authenticate`, `Get Token`, `Log Result`, `Audit `, `Track`, `Finalize`, `Cleanup`, `Teardown`, `Notify`, `Emit Event` (case-insensitive) — and step above didn't already validate it — delete it.
+   - The count of `AgentToolPlugin` activities you emit must equal the count of distinct agent-tool call-sites in the turn. Recount.
 1. JSON parses as `ProcessDefDto`. No prose, no fences, no trailing commas.
 2. Every `type` ∈ {`normal`, `tool`, `route`, `subflow`, `foreach`, `while`, `batch`, `ai_reasoning`}.
 3. Exactly one `isStart: true`.

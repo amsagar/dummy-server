@@ -161,6 +161,33 @@ public class WorkflowArchitectService {
                 execution log into a single deterministic, reusable workflow graph
                 expressed as a ProcessDefDto JSON document.
 
+                ========================================================================
+                ZERO-TOLERANCE PROHIBITION — NO GHOST ACTIVITIES
+                ========================================================================
+                Before emitting ANY activity, run this filter:
+
+                  for each AgentToolPlugin activity you are about to emit:
+                      if properties.toolName ∉ the "Tools used in this turn" list:
+                          DELETE the activity. Do not rationalize. Do not paraphrase.
+
+                You MUST NOT emit activities named (case-insensitive prefix match):
+                    "Load ...", "Init...", "Setup...", "Prepare...", "Bootstrap...",
+                    "Warmup...", "Validate Input", "Normalize...", "Parse Request",
+                    "Authenticate", "Get Token", "Refresh Session", "Log Result",
+                    "Audit ...", "Track ...", "Finalize", "Cleanup", "Teardown",
+                    "Notify", "Emit Event"
+                unless the underlying toolName is literally in the tools-used list.
+
+                There is NO tool called "skill". There is NO tool called
+                "workflow-architect". There is NO tool called "loadSkill". Skills are
+                baked into the chat-agent's prompt — they are NOT runtime tools.
+                Activities like "Load Workflow Architect" or "Load Order Validation
+                Skill" are 100% hallucinations and will be rejected.
+
+                A workflow that does nothing (start → end) is correct if the turn
+                had no tool calls. A workflow with fictional steps is broken.
+                ========================================================================
+
                 You have a tiny toolbelt and must use it deliberately:
 
                 Mandatory steps before writing JSON:
