@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -150,6 +151,18 @@ public class WorkflowBuilderService {
         skillAllowlist.add(ARCHITECT_SKILL);
         skillAllowlist.addAll(skillNames);
 
+        // Collect every workflow skeleton template (templates/*.json) shipped
+        // by any allowed skill. These become the structural ground truth for
+        // the template_structure_drift validator check AND the
+        // canonical-shape reference the alignment judge sees. Generic — works
+        // for any skill that ships templates, not just one.
+        List<ProcessDefDto> skeletonTemplates = collectSkeletonTemplates(skillAllowlist);
+        if (!skeletonTemplates.isEmpty()) {
+            log.info("[WorkflowBuilder] proposal {} loaded {} workflow skeleton template(s) from skills: {}",
+                    proposal.getId(), skeletonTemplates.size(),
+                    skeletonTemplates.stream().map(ProcessDefDto::name).toList());
+        }
+
         int maxAttempts = Math.max(1, properties.getMaxBuildAttempts());
         int maxNoopRetries = Math.max(0, properties.getMaxNoopRetries());
         log.debug("[WorkflowBuilder] proposal {} model={} maxAttempts={} maxNoopRetries={} skillAllowlist={}",
@@ -260,7 +273,8 @@ public class WorkflowBuilderService {
                 continue;
             }
 
-            ValidationReport report = validator.validate(draftJson, proposal.getUserPrompt());
+            ValidationReport report = validator.validate(
+                    draftJson, proposal.getUserPrompt(), skeletonTemplates);
             if (!report.ok()) {
                 lastFailureSummary = renderStructuralFeedback(report.errors());
                 log.info("[WorkflowBuilder] proposal {} attempt {} structural validation FAILED ({} error(s)): {}",
@@ -298,6 +312,50 @@ public class WorkflowBuilderService {
                 System.currentTimeMillis() - startedAt, lastFailureSummary);
         return markFailed(proposal,
                 "build_loop_exhausted: " + (lastFailureSummary == null ? "unknown" : lastFailureSummary));
+    }
+
+    /**
+     * Walks the allowed skills, finds every {@code templates/*.json} file in
+     * their bundles, parses each as a {@link ProcessDefDto}, and returns the
+     * usable ones. Parse failures are logged and dropped — a broken template
+     * file in one skill must not crash the build for an unrelated proposal.
+     *
+     * <p>Returns an empty list when no allowed skill ships a templates/
+     * directory, which is the common case (workflow-architect's templates
+     * are reference patterns, not "start from this" skeletons — they live
+     * under the architect skill but the validator-congruence rule only
+     * fires when a SKILL the proposal touches explicitly bundles its own
+     * workflow skeleton, e.g. pods-order-validation/templates/*.json).
+     */
+    private List<ProcessDefDto> collectSkeletonTemplates(Set<String> skillAllowlist) {
+        if (skillAllowlist == null || skillAllowlist.isEmpty()) return List.of();
+        List<ProcessDefDto> out = new ArrayList<>();
+        for (String skillName : skillAllowlist) {
+            // workflow-architect ships generic reference templates
+            // (foreach-accumulate.json etc.) that DESCRIBE patterns rather
+            // than a specific workflow's structural ground truth. Including
+            // it here would cause every proposal to be checked against the
+            // generic patterns, which doesn't make sense — the patterns are
+            // a vocabulary, not a contract. Skip it.
+            if (ARCHITECT_SKILL.equalsIgnoreCase(skillName)) continue;
+            SkillRegistryService.SkillSnapshot snapshot =
+                    skillRegistryService.getEnabledSkillByName(skillName);
+            if (snapshot == null || snapshot.files() == null) continue;
+            for (Map.Entry<String, String> file : snapshot.files().entrySet()) {
+                String path = file.getKey();
+                if (path == null) continue;
+                String lower = path.toLowerCase(Locale.ROOT);
+                if (!lower.startsWith("templates/") || !lower.endsWith(".json")) continue;
+                try {
+                    ProcessDefDto dto = validator.parseProcessDefDtoFlexible(file.getValue());
+                    out.add(dto);
+                } catch (Exception e) {
+                    log.warn("[WorkflowBuilder] failed to parse skeleton template {} from skill {}: {}",
+                            path, skillName, e.getMessage());
+                }
+            }
+        }
+        return out;
     }
 
     private Path resolveWorkspace(String sessionId) {
@@ -510,6 +568,35 @@ public class WorkflowBuilderService {
                 which tools were actually called, with what input shape — but
                 cannot override an explicit skill rule.
 
+                SKELETON-FIRST RULE (applies to every skill, not just one):
+                  - When `skill_load` returns content that includes a
+                    "REQUIRED WORKFLOW SKELETON(S)" banner — i.e. the skill
+                    ships a `templates/<name>.json` workflow skeleton — you
+                    MUST start your draft from that skeleton verbatim and
+                    edit field values only. Do NOT synthesize the workflow
+                    from the SKILL.md prose alone; that approach has failed
+                    every alignment review because prose is interpretive
+                    and the structural shape is non-negotiable.
+                  - "Edit field values" means: tool input expressions,
+                    variable names tied to the source turn, error-policy
+                    numbers, deadlineExpression strings, activity human-
+                    readable names. It does NOT mean: deleting activities,
+                    collapsing foreach loops into enumerations, replacing
+                    a foreach with a `parallel_task` or other improvised
+                    construct, dropping accumulator steps, omitting error
+                    edges, or rewiring transitions in ways that bypass
+                    skeleton activities.
+                  - The structural validator runs a
+                    `template_structure_drift` check on every attempt: if
+                    the skill loaded a skeleton, your draft must contain
+                    at least every `(toolName, pluginName)` pair the
+                    skeleton declares and at least as many `foreach`
+                    activities. Drafts that drift fail validation and
+                    burn a retry. The alignment judge then ALSO checks
+                    against the skeleton; you will not pass alignment by
+                    "fixing" each critique piecemeal if the underlying
+                    shape diverged from the skeleton on attempt 1.
+
                 Hard rules for the workflow JSON:
                   - Match ProcessDefDto exactly: id, name, version, packageId,
                     description, variables, activities, transitions.
@@ -578,11 +665,24 @@ public class WorkflowBuilderService {
                      become a foreach body, never N enumerated activities.
                   3. For EACH skill name in the allowlist (excluding
                      workflow-architect), call skill_load(name="<that skill>").
+                     If ANY of those skills emits a "REQUIRED WORKFLOW
+                     SKELETON(S)" banner in its content, that skill's
+                     `templates/<name>.json` IS your starting draft for
+                     this build. Copy its structure into your draft and
+                     ONLY adapt field values. Do not invent a different
+                     activity layout — the alignment judge and the
+                     structural validator both check against that skeleton.
                   4. Compose the JSON and `write` it to the draft path
-                     above. Before writing, sanity-check: does any tool name
-                     appear on more than 2 of your activities with the same
-                     input keys? If yes, fold them into a foreach body. Stop
-                     with a one-line confirmation.
+                     above. If a skeleton was provided in step 3, your
+                     draft MUST contain at least every (toolName,
+                     pluginName) pair from that skeleton and at least the
+                     same number of `foreach` activities; otherwise the
+                     `template_structure_drift` validator rule will
+                     immediately fail. Before writing, sanity-check:
+                     does any tool name appear on more than 2 of your
+                     activities with the same input keys? If yes, fold
+                     them into a foreach body. Stop with a one-line
+                     confirmation.
 
                 On RETRY attempts:
                   - The user message will list precise validation errors or an
@@ -1167,15 +1267,73 @@ public class WorkflowBuilderService {
                 boolean bIsSkill = "SKILL.md".equalsIgnoreCase(b.getKey());
                 if (aIsSkill && !bIsSkill) return -1;
                 if (!aIsSkill && bIsSkill) return 1;
+                // Templates next, then everything else alphabetical.
+                boolean aIsTpl = isWorkflowTemplate(a.getKey());
+                boolean bIsTpl = isWorkflowTemplate(b.getKey());
+                if (aIsTpl && !bIsTpl) return -1;
+                if (!aIsTpl && bIsTpl) return 1;
                 return a.getKey().compareToIgnoreCase(b.getKey());
             });
+            // Identify workflow-skeleton templates up front so we can prepend
+            // a strong "USE THIS VERBATIM" banner before dumping file content.
+            // Templates living under `templates/` and ending in `.json` are
+            // the convention; this is generic across every skill, not tied to
+            // any one workflow. The banner exists because the builder model
+            // routinely reads the skill prose and synthesizes the workflow
+            // from scratch instead of starting from the skeleton, then drifts
+            // through alignment critiques without ever opening the template.
+            List<String> templatePaths = new ArrayList<>();
+            for (Map.Entry<String, String> e : entries) {
+                if (isWorkflowTemplate(e.getKey())) {
+                    templatePaths.add(e.getKey());
+                }
+            }
             StringBuilder sb = new StringBuilder();
             sb.append("<skill_content name=\"").append(matched).append("\">\n");
+            if (!templatePaths.isEmpty()) {
+                sb.append("\n");
+                sb.append("============================================================\n");
+                sb.append("REQUIRED WORKFLOW SKELETON(S) — start from these VERBATIM\n");
+                sb.append("============================================================\n");
+                sb.append("This skill ships ").append(templatePaths.size()).append(" workflow skeleton template(s):\n");
+                for (String path : templatePaths) {
+                    sb.append("  - ").append(path).append("\n");
+                }
+                sb.append("\n");
+                sb.append("You MUST start your workflow JSON from the skeleton(s) below and\n");
+                sb.append("EDIT FIELD VALUES — do NOT synthesize the workflow from the SKILL.md\n");
+                sb.append("prose alone. The structural shape (activity IDs, types, foreach\n");
+                sb.append("wiring, transition graph, error-edge layout) is non-negotiable; the\n");
+                sb.append("alignment judge and the structural validator both check the draft\n");
+                sb.append("against this shape and will reject drafts that omit activities or\n");
+                sb.append("collapse foreach loops into enumerations. Field values (toolNames,\n");
+                sb.append("input expressions, variable names) you may adapt to match the\n");
+                sb.append("source turn; structural deletions and reshapes are forbidden.\n");
+                sb.append("============================================================\n");
+            }
             for (Map.Entry<String, String> e : entries) {
-                sb.append("\n## File: ").append(e.getKey()).append("\n\n").append(e.getValue()).append("\n");
+                if (isWorkflowTemplate(e.getKey())) {
+                    sb.append("\n## File: ").append(e.getKey())
+                            .append("  [START-FROM-THIS SKELETON]\n\n")
+                            .append(e.getValue()).append("\n");
+                } else {
+                    sb.append("\n## File: ").append(e.getKey()).append("\n\n").append(e.getValue()).append("\n");
+                }
             }
             sb.append("</skill_content>\n");
             return sb.toString();
+        }
+
+        /**
+         * Whether {@code path} looks like a workflow-skeleton template:
+         * any {@code .json} file under a {@code templates/} subdirectory of
+         * the skill bundle. Generic — works for every skill that follows
+         * the convention, not tied to any particular workflow.
+         */
+        private static boolean isWorkflowTemplate(String path) {
+            if (path == null) return false;
+            String lower = path.toLowerCase(Locale.ROOT);
+            return lower.startsWith("templates/") && lower.endsWith(".json");
         }
 
         @SuppressWarnings("unchecked")

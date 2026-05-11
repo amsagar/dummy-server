@@ -94,6 +94,31 @@ public class WorkflowAlignmentJudge {
                          names + input shapes — but NEVER let log observations
                          force a literal call-by-call replay of the workflow.
 
+                    SKELETON-FIRST rule (highest priority — overrides
+                    everything else when applicable): If any loaded skill
+                    includes a file under {@code templates/*.json}, treat
+                    THAT JSON as the canonical structural shape for this
+                    workflow. The builder is expected to start from it and
+                    edit field values only. Your critique must:
+                      - Reference the skeleton's exact activity IDs and
+                        transitions when describing what's missing or wrong.
+                      - Refuse to "patch around" structural divergence —
+                        if the draft restructures activities the skeleton
+                        had (deleting, renaming, replacing foreach with
+                        enumeration or parallel_task, dropping accumulators,
+                        or rewiring transitions), the critique is
+                        severity=high and the corrective action is
+                        "restart from `templates/<name>.json` verbatim and
+                        edit only field values", NOT a list of activity-
+                        level patches. Piecemeal patches across multiple
+                        retry attempts have a documented failure mode: the
+                        model drifts further from the skeleton each round.
+                        Anchor the critique on the skeleton, not on the
+                        current draft.
+                      - Identify the skeleton file by name in your critique
+                        when one exists, so the builder knows which file to
+                        copy from on the next attempt.
+
                     HARD anti-enumeration rule (overrides any other instinct):
                     Skill rules dictate control flow. If the execution log
                     contains 3+ calls to the same tool with varying values for

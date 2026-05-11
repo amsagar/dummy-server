@@ -92,31 +92,46 @@ public class SkillRegistryService {
             }
 
             // ── 2. Directory-based skills: default-skills/{skill-name}/**  ────
-            // Pull in any text companion (markdown, JSON templates, JSON catalogs) so the
-            // full skill bundle is visible to consumers, not just SKILL.md.
-            List<Resource> allDeep = new ArrayList<>();
-            for (String pattern : List.of(
-                    "classpath:default-skills/**/*.md",
-                    "classpath:default-skills/**/*.json",
-                    "classpath:default-skills/**/*.txt",
-                    "classpath:default-skills/**/*.yaml",
-                    "classpath:default-skills/**/*.yml")) {
-                for (Resource r : resolver.getResources(pattern)) allDeep.add(r);
-            }
+            // Pull in EVERY file the skill bundle ships, regardless of
+            // extension or directory depth. A skill author should be able to
+            // drop scripts (.py, .sh, .sql), schemas (.xsd, .xml), reference
+            // catalogs (.csv, .ndjson), config (.toml, .ini, .properties) or
+            // any other companion file alongside SKILL.md and have it become
+            // visible to the agent via skill_load. Binary or undecodable
+            // files are skipped with a warning rather than failing startup,
+            // so an accidentally-committed image cannot brick skill loading.
+            List<Resource> allDeep = new ArrayList<>(
+                    List.of(resolver.getResources("classpath:default-skills/**/*")));
             // Group by the first path segment after "default-skills/"
             Map<String, Map<String, String>> byDir = new java.util.LinkedHashMap<>();
             for (Resource resource : allDeep) {
-                String uri = resource.getURI().toString();
+                if (!resource.isReadable()) continue;
+                String uri;
+                try {
+                    uri = resource.getURI().toString();
+                } catch (IOException ioe) {
+                    continue;
+                }
                 // Extract relative path after "default-skills/"
                 int marker = uri.indexOf("default-skills/");
                 if (marker < 0) continue;
                 String rel = uri.substring(marker + "default-skills/".length()); // e.g. "sql-expert/SKILL.md"
+                if (rel.isEmpty() || rel.endsWith("/")) continue; // directory entry
                 int slash = rel.indexOf('/');
                 if (slash < 0) continue; // root-level file already handled above
                 String dir = rel.substring(0, slash);          // "sql-expert"
-                String filePath = rel.substring(slash + 1);    // "SKILL.md"
+                String filePath = rel.substring(slash + 1);    // "SKILL.md" or "scripts/migrate.py"
+                if (filePath.isBlank()) continue; // pure directory entry inside a jar
+                String content;
+                try {
+                    content = resource.getContentAsString(StandardCharsets.UTF_8);
+                } catch (IOException | RuntimeException ex) {
+                    log.warn("[SkillRegistry] skipping unreadable skill file {}: {}",
+                            uri, ex.getMessage());
+                    continue;
+                }
                 byDir.computeIfAbsent(dir, k -> new java.util.LinkedHashMap<>())
-                        .put(filePath, resource.getContentAsString(StandardCharsets.UTF_8));
+                        .put(filePath, content);
             }
             for (Map.Entry<String, Map<String, String>> entry : byDir.entrySet()) {
                 String dir = entry.getKey();

@@ -69,6 +69,23 @@ public class WorkflowJsonValidator {
      * (rather than fix-one, find-next).
      */
     public ValidationReport validate(String rawJson, String sourcePrompt) {
+        return validate(rawJson, sourcePrompt, List.of());
+    }
+
+    /**
+     * Variant that additionally enforces template-congruence: for every
+     * non-null {@code template} passed in (typically a workflow skeleton
+     * shipped by a skill under {@code templates/*.json}), the draft must
+     * contain at least every {@code (toolName, pluginName)} pair the
+     * template declares and at least as many {@code foreach} activities.
+     * Drafts that drift earn a {@code template_structure_drift} error per
+     * missing piece. This is the structural counterpart to the alignment
+     * judge's "did you actually start from the skeleton?" critique —
+     * generic across every skill that ships a templates/ directory.
+     */
+    public ValidationReport validate(String rawJson,
+                                     String sourcePrompt,
+                                     List<ProcessDefDto> templates) {
         List<ValidationError> errors = new ArrayList<>();
         ProcessDefDto dto;
         try {
@@ -85,6 +102,11 @@ public class WorkflowJsonValidator {
                     null));
         }
         validateWorkflowStructureCollect(dto, errors);
+        if (templates != null) {
+            for (ProcessDefDto template : templates) {
+                validateTemplateCongruence(dto, template, errors);
+            }
+        }
         return new ValidationReport(dto, errors);
     }
 
@@ -354,6 +376,107 @@ public class WorkflowJsonValidator {
                             + " (load via skill_load(\"workflow-architect\")).",
                     "activities[*].properties.toolName='" + toolNameOriginal + "'"));
         }
+    }
+
+    /**
+     * Asserts the draft is structurally congruent with a skill-supplied
+     * workflow skeleton. Generic — runs for any template the caller hands
+     * in, not tied to any specific workflow. Checks two things, both
+     * additive (draft may extend the template but not subtract from it):
+     *
+     * <ol>
+     *   <li>Every {@code (toolName, pluginName)} pair in the template must
+     *       appear in the draft. This catches the most common failure mode
+     *       we observed: the model "skips" required tool calls by deleting
+     *       activities the skeleton declared. Identity is case-insensitive
+     *       on toolName and pluginName; missing pluginName is permitted
+     *       (treated as null vs null match).</li>
+     *   <li>The draft's {@code foreach} activity count must be ≥ the
+     *       template's. Replacing a foreach with an enumeration of
+     *       activities is the second-most-common drift mode and is also
+     *       blocked separately by the enumeration anti-pattern check, but
+     *       this rule catches the "model dropped the foreach entirely and
+     *       used a single activity instead" case which the enumeration
+     *       check doesn't flag.</li>
+     * </ol>
+     *
+     * Each missing piece produces its own {@code template_structure_drift}
+     * error with a message that names what's missing and points the model
+     * at the skeleton it should have started from. Templates with a null
+     * activities list are skipped silently (defensive — a broken template
+     * shouldn't crash validation).
+     */
+    private void validateTemplateCongruence(ProcessDefDto draft,
+                                            ProcessDefDto template,
+                                            List<ValidationError> errors) {
+        if (draft == null || template == null || template.activities() == null) return;
+        List<ProcessDefDto.ActivityDto> draftActivities = draft.activities() == null
+                ? List.of() : draft.activities();
+
+        // 1. Collect every (toolName, pluginName) pair appearing in the
+        //    template's tool activities. We key on the toolName because that
+        //    is the contract the skeleton declares (which tool gets called
+        //    in this slot). pluginName is part of the identity so AgentToolPlugin
+        //    vs CodeExecPlugin with the same toolName remain distinguishable.
+        Set<String> templatePairs = collectToolPluginPairs(template);
+        Set<String> draftPairs = collectToolPluginPairs(draft);
+        Set<String> missing = new LinkedHashSet<>(templatePairs);
+        missing.removeAll(draftPairs);
+        for (String pair : missing) {
+            errors.add(new ValidationError(
+                    "template_structure_drift",
+                    "skill-supplied workflow skeleton declares tool activity "
+                            + pair + " but the draft has no matching (toolName, pluginName) pair."
+                            + " Start your draft from the skeleton under templates/*.json (surfaced"
+                            + " by skill_load with a 'REQUIRED WORKFLOW SKELETON(S)' banner) and"
+                            + " edit field values rather than synthesizing a different layout."
+                            + " Template name: '" + safeName(template) + "'.",
+                    null));
+        }
+
+        // 2. Count foreach activities in template vs draft. The draft must
+        //    have at least the template's count so the model can't quietly
+        //    replace a foreach with a single activity.
+        long templateForeachCount = template.activities().stream()
+                .filter(a -> a != null && a.type() != null
+                        && "foreach".equalsIgnoreCase(a.type().trim()))
+                .count();
+        long draftForeachCount = draftActivities.stream()
+                .filter(a -> a != null && a.type() != null
+                        && "foreach".equalsIgnoreCase(a.type().trim()))
+                .count();
+        if (templateForeachCount > draftForeachCount) {
+            errors.add(new ValidationError(
+                    "template_structure_drift",
+                    "skill-supplied workflow skeleton declares " + templateForeachCount
+                            + " foreach activity(ies) but the draft has only " + draftForeachCount
+                            + ". A foreach in the skeleton is a hard requirement — replacing it"
+                            + " with a single activity or enumerated calls violates Step coverage"
+                            + " rules and the alignment judge will reject the draft."
+                            + " Template name: '" + safeName(template) + "'.",
+                    null));
+        }
+    }
+
+    private static Set<String> collectToolPluginPairs(ProcessDefDto dto) {
+        Set<String> out = new LinkedHashSet<>();
+        if (dto == null || dto.activities() == null) return out;
+        for (ProcessDefDto.ActivityDto a : dto.activities()) {
+            if (a == null || a.type() == null || !"tool".equalsIgnoreCase(a.type().trim())) continue;
+            Map<String, Object> props = a.properties();
+            Object toolNameValue = props == null ? null : props.get("toolName");
+            if (!(toolNameValue instanceof String toolName) || toolName.isBlank()) continue;
+            String plugin = a.pluginName() == null ? "" : a.pluginName().trim();
+            out.add("(toolName='" + toolName.trim().toLowerCase(Locale.ROOT)
+                    + "', pluginName='" + plugin.toLowerCase(Locale.ROOT) + "')");
+        }
+        return out;
+    }
+
+    private static String safeName(ProcessDefDto dto) {
+        if (dto == null) return "(null)";
+        String n = dto.name();
+        return n == null || n.isBlank() ? "(unnamed)" : n;
     }
 
     /**
