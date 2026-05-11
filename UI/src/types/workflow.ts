@@ -166,6 +166,12 @@ export interface RunSummary {
   requesterId?: string | null;
   errorClass?: string | null;
   errorMessage?: string | null;
+  /**
+   * The JSON-decoded value of the closing activity's `properties.result`
+   * SecureSpel expression. Present on closed.completed runs whose workflow
+   * declares an end-result; absent otherwise (server omits the field).
+   */
+  result?: unknown;
 }
 
 // Field names mirror the Java record components in ActivityInstRow /

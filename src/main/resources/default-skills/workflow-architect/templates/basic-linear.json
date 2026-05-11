@@ -45,7 +45,7 @@
       "name": "End",
       "type": "route",
       "pluginName": null,
-      "properties": {},
+      "properties": { "result": "#{#result}" },
       "deadlineExpression": null,
       "isStart": false,
       "isEnd": true,

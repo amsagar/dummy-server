@@ -6,6 +6,7 @@ import com.pods.agent.workflow.engine.domain.ProcessDefinition;
 import com.pods.agent.workflow.persistence.ProcessDefRepository;
 import com.pods.agent.workflow.persistence.ProcessDefRow;
 import com.pods.agent.workflow.persistence.ProcessInstRepository;
+import com.pods.agent.workflow.service.WorkflowApiKeyService;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -25,13 +26,16 @@ public class ProcessDefService {
     private final ProcessDefRepository repo;
     private final ProcessInstRepository processInstRepo;
     private final ObjectMapper objectMapper;
+    private final WorkflowApiKeyService apiKeyService;
 
     public ProcessDefService(ProcessDefRepository repo,
                              ProcessInstRepository processInstRepo,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper,
+                             WorkflowApiKeyService apiKeyService) {
         this.repo = repo;
         this.processInstRepo = processInstRepo;
         this.objectMapper = objectMapper;
+        this.apiKeyService = apiKeyService;
     }
 
     public ProcessDefDto save(ProcessDefDto dto) {
@@ -89,13 +93,23 @@ public class ProcessDefService {
                     "Cannot delete workflow definition because it has " + runCount
                             + " run(s). Delete run history first or keep this definition for audit.");
         }
-        return repo.deleteById(id) > 0;
+        boolean deleted = repo.deleteById(id) > 0;
+        if (deleted) {
+            // Scrub the dead def id out of every API key's scope so it
+            // stops appearing as a stale UUID in the API Keys page.
+            apiKeyService.removeProcessDefFromAllScopes(id);
+        }
+        return deleted;
     }
 
     @Transactional
     public boolean forceDeleteById(String id) {
         processInstRepo.deleteByDefId(id);
-        return repo.deleteById(id) > 0;
+        boolean deleted = repo.deleteById(id) > 0;
+        if (deleted) {
+            apiKeyService.removeProcessDefFromAllScopes(id);
+        }
+        return deleted;
     }
 
     private ProcessDefDto deserialize(ProcessDefRow row) {

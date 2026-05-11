@@ -155,7 +155,7 @@
       "name": "End",
       "type": "route",
       "pluginName": null,
-      "properties": {},
+      "properties": { "result": "#{#details?.output}" },
       "inputSchema": {},
       "outputSchema": {},
       "deadlineExpression": null,

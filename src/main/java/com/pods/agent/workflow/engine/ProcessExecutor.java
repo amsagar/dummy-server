@@ -7,6 +7,7 @@ import com.pods.agent.workflow.engine.domain.ActivityResult;
 import com.pods.agent.workflow.engine.domain.ActivityState;
 import com.pods.agent.workflow.engine.domain.ProcessState;
 import com.pods.agent.workflow.engine.domain.TransitionDef;
+import com.pods.agent.workflow.joget.expression.SecureSpelEvaluator;
 import tools.jackson.core.type.TypeReference;
 import com.pods.agent.workflow.persistence.ActivityInstRow;
 import com.pods.agent.workflow.persistence.WorkflowVariableRow;
@@ -175,6 +176,7 @@ public class ProcessExecutor {
                                 "transitions", List.of(),
                                 "outcome", result.isSuccess() ? "no-match" : "error"));
                 if (result.isSuccess() && activity.isEnd()) {
+                    persistEndResult(ctx, activity);
                     audit.record(ctx.processInstanceId(),
                             AuditTrailManager.Action.PROCESS_COMPLETED,
                             Map.of("definitionId", ctx.definition().id()));
@@ -320,6 +322,49 @@ public class ProcessExecutor {
                                                ActivityDef activity,
                                                ActivityResult result) {
         return router.resolve(ctx, activity, result);
+    }
+
+    /**
+     * On PROCESS_COMPLETED, evaluate the closing activity's
+     * {@code properties.result} SecureSpel expression (if any) against the
+     * run's final variable scope and persist the JSON-serialized value on
+     * the {@code process_inst} row. The result is later surfaced in the
+     * run-summary API response so external callers don't need a second
+     * round-trip to dig the answer out of activity outputs.
+     *
+     * <p>This is best-effort: any failure (missing expression, eval error,
+     * serialization issue) is logged and swallowed — the workflow has
+     * already succeeded; surfacing a result is a convenience, not a
+     * correctness requirement.
+     */
+    private void persistEndResult(ExecutionContext ctx, ActivityDef activity) {
+        Object expr = activity.properties().get("result");
+        if (!(expr instanceof String exprStr) || exprStr.isBlank()) {
+            return;
+        }
+        try {
+            String unwrapped = exprStr.startsWith("#{") && exprStr.endsWith("}")
+                    ? exprStr.substring(2, exprStr.length() - 1)
+                    : exprStr;
+            SecureSpelEvaluator.Result eval = SecureSpelEvaluator.evaluate(
+                    unwrapped, ctx.scope().effectiveSnapshot());
+            if (!eval.ok()) {
+                audit.record(ctx.processInstanceId(), null,
+                        AuditTrailManager.Action.EXPRESSION_FAILED, ctx.requesterId(),
+                        Map.of("phase", "endResult",
+                                "activityId", activity.id(),
+                                "error", String.valueOf(eval.error())));
+                return;
+            }
+            String json = objectMapper.writeValueAsString(eval.value());
+            persistence.persistProcessResult(ctx.processInstanceId(), json);
+        } catch (Exception e) {
+            audit.record(ctx.processInstanceId(), null,
+                    AuditTrailManager.Action.EXPRESSION_FAILED, ctx.requesterId(),
+                    Map.of("phase", "endResult",
+                            "activityId", activity.id(),
+                            "error", e.getClass().getSimpleName() + ": " + e.getMessage()));
+        }
     }
 
     private static boolean isLoopActivity(ActivityDef activity) {

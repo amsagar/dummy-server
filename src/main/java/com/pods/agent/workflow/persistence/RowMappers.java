@@ -21,7 +21,8 @@ final class RowMappers {
             rs.getString("parent_inst_id"),
             (Long) rs.getObject("due_at"),
             rs.getString("error_class"),
-            rs.getString("error_message"));
+            rs.getString("error_message"),
+            rs.getString("result_json"));
 
     static final RowMapper<ActivityInstRow> ACTIVITY_INST = (rs, n) -> new ActivityInstRow(
             rs.getString("id"),

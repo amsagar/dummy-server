@@ -425,3 +425,34 @@ ALTER COLUMN embedding TYPE halfvec(3072);
 CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
     ON agent.agent_tool_embeddings
     USING hnsw (embedding halfvec_cosine_ops);
+
+-- ── Workflow API keys ─────────────────────────────────────────────────────────
+-- Scoped credentials for triggering workflow runs from outside the app
+-- (curl, Postman, CI, etc.) without leaking a user's JWT. Each key is
+-- restricted to a fixed allowlist of process_def_ids: it can only start runs
+-- of workflows in `process_def_ids`. We store key_hash (sha-256) for
+-- verification and key_prefix (the first 12 chars of the plaintext) for
+-- O(1) lookup at auth time; the plaintext key is shown to the user exactly
+-- once at creation.
+CREATE TABLE IF NOT EXISTS agent.workflow_api_key (
+    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    name            TEXT NOT NULL,
+    key_prefix      TEXT NOT NULL,
+    key_hash        TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
+    process_def_ids TEXT NOT NULL,
+    created_at      BIGINT NOT NULL,
+    last_used_at    BIGINT,
+    revoked_at      BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_api_key_prefix
+    ON agent.workflow_api_key (key_prefix);
+CREATE INDEX IF NOT EXISTS idx_workflow_api_key_owner
+    ON agent.workflow_api_key (owner_id, revoked_at);
+
+-- ── Workflow run final result ─────────────────────────────────────────────────
+-- When an end activity declares `properties.result` as a SecureSpel expression,
+-- the engine evaluates it on PROCESS_COMPLETED and stores the JSON-serialized
+-- value here. Run-summary API responses surface it inline. Null for legacy
+-- runs and for workflows that don't declare an end-result expression.
+ALTER TABLE agent.process_inst ADD COLUMN IF NOT EXISTS result_json TEXT;

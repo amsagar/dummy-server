@@ -69,6 +69,11 @@ public class JdbcEnginePersistence implements EnginePersistence {
     }
 
     @Override
+    public void persistProcessResult(String id, String resultJson) {
+        processInstRepo.setResult(id, resultJson);
+    }
+
+    @Override
     public void persistActivityStart(ActivityInstRow row) {
         activityInstRepo.insert(row);
     }

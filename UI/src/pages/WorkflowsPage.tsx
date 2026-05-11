@@ -4,9 +4,10 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import { Plus, Play, Pencil, Loader2, List, Sparkles, Activity, Database } from "lucide-react";
+import { Plus, Play, Pencil, Loader2, List, Sparkles, Activity, Database, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { CopyCurlDialog } from "@/components/workflow/CopyCurlDialog";
 import { workflowApi } from "@/services/workflowApi";
 import type {
   ProcessDef,
@@ -22,6 +23,7 @@ export default function WorkflowsPage() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [search, setSearch] = useState("");
+  const [curlForId, setCurlForId] = useState<string | null>(null);
 
   const list = useQuery<ProcessDef[]>({
     queryKey: ["workflows"],
@@ -105,6 +107,10 @@ export default function WorkflowsPage() {
     mutationFn: (id: string) => workflowApi.processes.remove(id, { force: true }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["workflows"] });
+      // Workflow deletion scrubs the def id from every API key's scope on
+      // the server; refresh the cached list so stale UUIDs don't linger in
+      // the API Keys page.
+      qc.invalidateQueries({ queryKey: ["workflow-api-keys"] });
       toast.success("Workflow deleted");
     },
     onError: (e: Error) => toast.error(e.message ?? "Failed to delete workflow"),
@@ -248,6 +254,14 @@ export default function WorkflowsPage() {
                 <Button
                   variant="outline"
                   size="sm"
+                  onClick={() => wf.id && setCurlForId(wf.id)}
+                  disabled={!wf.id}
+                >
+                  <Terminal className="w-3.5 h-3.5 mr-1" /> Copy curl
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => {
                     if (!wf.id) return;
                     const confirmed = window.confirm(`Delete "${wf.name}" and all its runs/activity history?`);
@@ -263,6 +277,16 @@ export default function WorkflowsPage() {
           })}
         </div>
       )}
+
+      <CopyCurlDialog
+        processDef={
+          curlForId
+            ? (list.data ?? []).find((wf) => wf.id === curlForId) ?? null
+            : null
+        }
+        open={!!curlForId}
+        onOpenChange={(o) => !o && setCurlForId(null)}
+      />
     </div>
   );
 }

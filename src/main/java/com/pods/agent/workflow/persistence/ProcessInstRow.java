@@ -15,5 +15,8 @@ public record ProcessInstRow(
         String parentInstId,
         Long dueAt,
         String errorClass,
-        String errorMessage
+        String errorMessage,
+        // Populated on PROCESS_COMPLETED when the end activity declares
+        // `properties.result` — JSON-encoded value of that expression.
+        String resultJson
 ) {}

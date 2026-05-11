@@ -566,6 +566,42 @@ See [references/transition-routing.md](references/transition-routing.md).
 
 ---
 
+## End-activity result — what the run returns over the API
+
+Every `end` activity SHOULD set `properties.result` to a SecureSpel expression that captures the workflow's natural output. The engine evaluates the expression against the run's final variable scope on `PROCESS_COMPLETED` and surfaces the JSON-encoded value as the `result` field of the run-summary API response (`POST /api/v1/workflow/runs` and `GET /api/v1/workflow/runs/{id}`).
+
+This is what makes a workflow **callable** from outside the app — without it, external callers have to make a second round-trip to `GET /runs/{id}/activities` and dig the answer out of the last activity's `outputSnapshot`. With it, the answer comes back in the same response that started the run.
+
+```json
+{
+  "id": "end",
+  "name": "End",
+  "type": "route",
+  "isEnd": true,
+  "properties": { "result": "#{#details?.output}" },
+  "inputSchema": {},
+  "outputSchema": {}
+}
+```
+
+**Expression by pattern**:
+
+| Workflow shape | Suggested `result` expression |
+|---|---|
+| Accumulator loop (`foreach` + `CodeExecPlugin`) | `"#{#details?.output}"` — the final array of accumulated items |
+| Single-tool lookup (`AgentToolPlugin` returning a Map) | `"#{#orderDetail}"` — the tool's parsed body |
+| LLM synthesis (`ai_reasoning`) | `"#{#answer?.text}"` — just the assistant message |
+| Numeric reduction (`CodeExecPlugin` summing) | `"#{#execResult?.output}"` — the script's return value |
+| Workflow with no meaningful output | omit `properties.result` entirely; API response will simply lack a `result` field |
+
+**Rules**:
+- The expression is best-effort. Eval failures (missing variable, type mismatch) are audited as `expression.failed` but **do not fail the run** — the workflow has already succeeded.
+- The value is serialized with Jackson; anything that survives `objectMapper.writeValueAsString(...)` is fair game (Maps, Lists, primitives, null).
+- Multiple end activities: each may have its own `result`; only the one actually reached is evaluated.
+- The result is computed at terminal time, against the final scope — `#someVar` reads the value that variable had when the workflow ended.
+
+---
+
 ## Hard rules (these will fail validation)
 
 - ✅ JSON parses directly as `ProcessDefDto`. No markdown fences in your output.
@@ -583,6 +619,7 @@ See [references/transition-routing.md](references/transition-routing.md).
 - ✅ `inputSchema` `required` arrays must list ONLY the activity properties the underlying tool actually requires. Tools that take no input (e.g. list-all endpoints) get an empty `inputSchema: {}` — do NOT mark `input` as required for those.
 - ✅ **Every `CodeExecPlugin` activity MUST set `"language": "java"`.** Python / JavaScript / TypeScript are temporarily disabled — emit Java only. Inside the snippet, use fully-qualified type names (`java.util.List`, `java.util.ArrayList`, `java.util.LinkedHashMap`) and `return` the value; do NOT assign to a magic variable. Avoid blocked APIs (`java.io`, `java.net`, `java.nio.file`, `ProcessBuilder`, `Runtime`, reflection, `ClassLoader`, `Thread`).
 - ✅ **No invented activities.** Every `AgentToolPlugin` activity's `toolName` MUST appear in the turn's "Tool names used in turn" list. No `loadSkill`/`initSession`/`validateInput`/`logResult` ghosts. If a tool name in your activities isn't in that list, delete the activity.
+- ✅ **Every `end` activity SHOULD set `properties.result`** to a SecureSpel expression that captures the workflow's natural output (e.g. `"#{#details?.output}"` for accumulator patterns, `"#{#orderDetail}"` for single-lookup patterns, `"#{#answer?.text}"` for AI synthesis). Omit only when the workflow has no meaningful return value.
 
 ---
 
@@ -626,6 +663,7 @@ See [references/workflow-patterns.md](references/workflow-patterns.md) for the f
 16. No `inputSchema.required` field that isn't a real prerequisite of the underlying tool.
 17. Every `AgentToolPlugin` `toolName` matches one in the turn's "Tool names used in turn" list. No ghost steps (`loadSkill`, `initSession`, `validateInput`, `logResult`, etc.).
 18. Every `inputSchema` either is `{}` or describes the **activity property keys** (`toolName`, `input`, …) — never the inner tool payload keys (`id`, `userId`, …) at the top level.
+19. Every `end` activity has `properties.result` set to a SecureSpel expression capturing the workflow's natural output — unless the workflow genuinely has no meaningful return value.
 
 ---
 

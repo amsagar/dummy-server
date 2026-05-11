@@ -29,6 +29,7 @@ import {
   LogOut,
   UserCircle2,
   Table2,
+  Key,
 } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -45,6 +46,7 @@ import McpServerToolsPage from "./pages/McpServerToolsPage";
 import DecisionTablesPage from "./pages/DecisionTablesPage";
 import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
+import ApiKeysPage from "./pages/ApiKeysPage";
 import WorkflowDesignerPage from "./pages/WorkflowDesignerPage";
 import WorkflowRunsPage from "./pages/WorkflowRunsPage";
 import WorkflowRunDetailPage from "./pages/WorkflowRunDetailPage";
@@ -72,6 +74,7 @@ function Sidebar() {
     { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: Workflow, name: "Workflows", path: "/workflows" },
+    { icon: Key, name: "API Keys", path: "/api-keys" },
     { icon: History, name: "Executions", path: "/executions" },
     { icon: BarChart3, name: "Insights", path: "/insights" },
     { icon: CheckCircle2, name: "Approvals", path: "/workflows/approvals" },
@@ -208,6 +211,7 @@ function Header() {
     "/tools": "Tools",
     "/tools/": "Tools",
     "/workflows": "Workflows",
+    "/api-keys": "API Keys",
     "/executions": "Executions",
     "/insights": "Insights",
     "/decision-tables": "Decision Tables",
@@ -276,6 +280,7 @@ export default function App() {
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/tools/:domainId" element={<ToolDomainPage />} />
                 <Route path="/workflows" element={<WorkflowsPage />} />
+                <Route path="/api-keys" element={<ApiKeysPage />} />
                 <Route path="/workflows/designer" element={<WorkflowDesignerPage />} />
                 <Route path="/workflows/:id/designer" element={<WorkflowDesignerPage />} />
                 <Route path="/workflows/:id/runs" element={<WorkflowRunsPage />} />

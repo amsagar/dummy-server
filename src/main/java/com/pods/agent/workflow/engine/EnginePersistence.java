@@ -31,6 +31,18 @@ public interface EnginePersistence {
                            String errorMessage);
 
     /**
+     * Write the JSON-serialized end-activity result expression. Called by
+     * the executor on PROCESS_COMPLETED when the closing activity declares
+     * {@code properties.result}. {@code resultJson} may be {@code null} on
+     * eval failure — the call is still made so the column is cleared. No-op
+     * default keeps tests using {@link NoopEnginePersistence} happy without
+     * a code change.
+     */
+    default void persistProcessResult(String id, String resultJson) {
+        // default no-op
+    }
+
+    /**
      * Mark the run as awaiting external input (manual approval, etc.). The
      * row's {@code ended_at} stays null so the duration counters keep ticking
      * until a real terminal write.

@@ -1,5 +1,7 @@
 package com.pods.agent.workflow.api;
 
+import com.pods.agent.config.ApiKeyAuthFilter;
+import tools.jackson.databind.ObjectMapper;
 import com.pods.agent.workflow.api.dto.RunSummary;
 import com.pods.agent.workflow.api.dto.StartRunRequest;
 import com.pods.agent.workflow.engine.ResumeService;
@@ -11,8 +13,12 @@ import com.pods.agent.workflow.persistence.AuditTrailRepository;
 import com.pods.agent.workflow.persistence.AuditTrailRow;
 import com.pods.agent.workflow.persistence.ProcessInstRepository;
 import com.pods.agent.workflow.persistence.ProcessInstRow;
+import com.pods.agent.workflow.persistence.WorkflowApiKeyRow;
+import com.pods.agent.workflow.service.WorkflowApiKeyService;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -36,6 +42,8 @@ public class ProcessRunController {
     private final ActivityInstRepository activityInstRepo;
     private final AuditTrailRepository auditRepo;
     private final WorkflowRerunService rerunService;
+    private final WorkflowApiKeyService apiKeyService;
+    private final ObjectMapper objectMapper;
 
     public ProcessRunController(ProcessDefService defService,
                                 WorkflowManager workflowManager,
@@ -43,7 +51,9 @@ public class ProcessRunController {
                                 ProcessInstRepository processInstRepo,
                                 ActivityInstRepository activityInstRepo,
                                 AuditTrailRepository auditRepo,
-                                WorkflowRerunService rerunService) {
+                                WorkflowRerunService rerunService,
+                                WorkflowApiKeyService apiKeyService,
+                                ObjectMapper objectMapper) {
         this.defService = defService;
         this.workflowManager = workflowManager;
         this.resumeService = resumeService;
@@ -51,6 +61,8 @@ public class ProcessRunController {
         this.activityInstRepo = activityInstRepo;
         this.auditRepo = auditRepo;
         this.rerunService = rerunService;
+        this.apiKeyService = apiKeyService;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -61,9 +73,20 @@ public class ProcessRunController {
      */
     @PostMapping
     public ResponseEntity<RunSummary> start(@RequestBody StartRunRequest req,
-                                            @RequestParam(name = "async", defaultValue = "false") boolean async) {
+                                            @RequestParam(name = "async", defaultValue = "false") boolean async,
+                                            HttpServletRequest httpReq) {
         if (req.processDefId() == null || req.processDefId().isBlank()) {
             return ResponseEntity.badRequest().build();
+        }
+        // When the caller authenticated via API key, enforce that key's
+        // workflow allowlist. JWT-authenticated callers are unrestricted
+        // (they're the human owning the keys; UI flows live here).
+        Object apiKeyAttr = httpReq.getAttribute(ApiKeyAuthFilter.API_KEY_ROW_ATTR);
+        if (apiKeyAttr instanceof WorkflowApiKeyRow apiKey) {
+            List<String> scope = apiKeyService.parseScope(apiKey);
+            if (!scope.contains(req.processDefId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
         }
         ProcessDefinition def = defService.loadDomainById(req.processDefId()).orElse(null);
         if (def == null) {
@@ -272,9 +295,9 @@ public class ProcessRunController {
         return ResponseEntity.ok(Map.of("pending", List.of()));
     }
 
-    private static RunSummary toSummary(String instanceId, ProcessInstRow row) {
+    private RunSummary toSummary(String instanceId, ProcessInstRow row) {
         if (row == null) {
-            return new RunSummary(instanceId, null, null, null, null, null, null, null);
+            return new RunSummary(instanceId, null, null, null, null, null, null, null, null);
         }
         return new RunSummary(
                 row.id(),
@@ -284,6 +307,22 @@ public class ProcessRunController {
                 row.endedAt(),
                 row.requesterId(),
                 row.errorClass(),
-                row.errorMessage());
+                row.errorMessage(),
+                parseResult(row.resultJson()));
+    }
+
+    /**
+     * Decode the JSON-encoded end-result value back into a tree of native
+     * objects so it serializes cleanly through Jackson on the way out. Null
+     * on missing / unparseable — the field is NON_NULL-inclusive so it just
+     * vanishes from the response.
+     */
+    private Object parseResult(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return objectMapper.readValue(json, Object.class);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

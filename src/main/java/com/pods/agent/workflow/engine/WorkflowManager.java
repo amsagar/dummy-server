@@ -92,6 +92,7 @@ public class WorkflowManager {
                 null,
                 null,
                 null,
+                null,
                 null));
 
         CompletableFuture.runAsync(() -> {
@@ -149,6 +150,7 @@ public class WorkflowManager {
                 startedAt,
                 null,
                 requesterId,
+                null,
                 null,
                 null,
                 null,

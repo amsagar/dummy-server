@@ -88,6 +88,7 @@ public class SubFlowExecutor {
                 parentCtx.processInstanceId(),
                 null,
                 null,
+                null,
                 null));
 
         ExecutionContext childCtx = new ExecutionContext(

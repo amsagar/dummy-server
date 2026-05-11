@@ -161,7 +161,7 @@
       "name": "End",
       "type": "route",
       "pluginName": null,
-      "properties": {},
+      "properties": { "result": "#{#verdicts?.output}" },
       "inputSchema": {},
       "outputSchema": {},
       "deadlineExpression": null,

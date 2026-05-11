@@ -11,5 +11,10 @@ public record RunSummary(
         Long endedAt,
         String requesterId,
         String errorClass,
-        String errorMessage
+        String errorMessage,
+        // JSON-parsed value of the closing activity's `properties.result`
+        // expression. Null (and omitted from the JSON response thanks to
+        // NON_NULL) when the workflow doesn't declare an end-result
+        // expression, the eval failed, or the run hasn't completed yet.
+        Object result
 ) {}

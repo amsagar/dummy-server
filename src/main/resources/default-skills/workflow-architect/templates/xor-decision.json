@@ -51,7 +51,7 @@
     },
     {
       "id": "end", "name": "End", "type": "route", "pluginName": null,
-      "properties": {}, "deadlineExpression": null,
+      "properties": { "result": "#{#decision}" }, "deadlineExpression": null,
       "isStart": false, "isEnd": true,
       "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
       "outputVariables": [], "andJoin": false

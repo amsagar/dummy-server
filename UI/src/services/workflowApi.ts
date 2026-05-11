@@ -24,6 +24,22 @@ import type {
 
 const PROCESSES = "/workflow/processes";
 const RUNS = "/workflow/runs";
+const API_KEYS = "/workflow/api-keys";
+
+export interface ApiKeySummary {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  processDefIds: string[];
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface ApiKeyCreateResponse extends ApiKeySummary {
+  /** Plaintext key — shown to the user exactly once. */
+  key: string;
+}
 const PLUGINS = "/workflow/plugins";
 
 export interface ExecutionsFilters {
@@ -175,5 +191,18 @@ export const workflowApi = {
       timeoutMs?: number;
       memoryLimitMb?: number;
     }): Promise<any> => api.post(`/workflow/code/preview`, payload),
+  },
+
+  apiKeys: {
+    list: (): Promise<ApiKeySummary[]> => api.get(API_KEYS),
+    create: (name: string, processDefIds: string[]): Promise<ApiKeyCreateResponse> =>
+      api.post(API_KEYS, { name, processDefIds }),
+    update: (id: string, name: string, processDefIds: string[]): Promise<void> =>
+      api.patch(`${API_KEYS}/${id}`, { name, processDefIds }),
+    regenerate: (id: string): Promise<ApiKeyCreateResponse> =>
+      api.post(`${API_KEYS}/${id}/regenerate`),
+    revoke: (id: string): Promise<void> => api.delete(`${API_KEYS}/${id}`),
+    /** Hard-delete an already-revoked key. The server enforces revoked-only. */
+    purge: (id: string): Promise<void> => api.delete(`${API_KEYS}/${id}/purge`),
   },
 };

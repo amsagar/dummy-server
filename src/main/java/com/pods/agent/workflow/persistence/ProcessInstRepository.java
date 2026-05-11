@@ -39,6 +39,20 @@ public class ProcessInstRepository {
                         .addValue("errorMessage", errorMessage));
     }
 
+    /**
+     * Persist the JSON-encoded value of the end activity's
+     * {@code properties.result} expression. Called by the engine on
+     * PROCESS_COMPLETED. {@code resultJson} may be {@code null} (or this
+     * method may simply not be called) when the workflow doesn't declare an
+     * end-result expression.
+     */
+    public void setResult(String id, String resultJson) {
+        jdbc.update(sql.getQuery("WORKFLOW_PROCESS_INST.UPDATE_RESULT"),
+                new MapSqlParameterSource()
+                        .addValue("id", id)
+                        .addValue("resultJson", resultJson));
+    }
+
     public Optional<ProcessInstRow> findById(String id) {
         List<ProcessInstRow> rs = jdbc.query(sql.getQuery("WORKFLOW_PROCESS_INST.FIND_BY_ID"),
                 new MapSqlParameterSource("id", id), RowMappers.PROCESS_INST);
