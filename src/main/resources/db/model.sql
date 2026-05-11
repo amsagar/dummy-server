@@ -450,9 +450,3 @@ CREATE INDEX IF NOT EXISTS idx_workflow_api_key_prefix
 CREATE INDEX IF NOT EXISTS idx_workflow_api_key_owner
     ON agent.workflow_api_key (owner_id, revoked_at);
 
--- ── Workflow run final result ─────────────────────────────────────────────────
--- When an end activity declares `properties.result` as a SecureSpel expression,
--- the engine evaluates it on PROCESS_COMPLETED and stores the JSON-serialized
--- value here. Run-summary API responses surface it inline. Null for legacy
--- runs and for workflows that don't declare an end-result expression.
-ALTER TABLE agent.process_inst ADD COLUMN IF NOT EXISTS result_json TEXT;

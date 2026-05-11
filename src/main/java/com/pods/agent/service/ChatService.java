@@ -219,14 +219,21 @@ public class ChatService {
 
                 saveMessage(sessionId, "assistant", response, turnId);
 
+                // Fire `done` as soon as the assistant message is durable.
+                // Everything below this point — session-last-active touch,
+                // context state, cost rollup — is best-effort bookkeeping
+                // and shouldn't gate the UI's "stream ended" indicator over
+                // a slow DB link. The SSE stream stays open until
+                // sender.complete() further down, so the cost.updated event
+                // we still want to ship arrives normally after this.
+                sender.sendDone(sessionId, response);
+
                 sessionRepository.updateLastActive(sessionId, userId, System.currentTimeMillis());
                 persistContextState(sessionId, state, compactionResult);
 
                 CostUsage usage = estimateCost(sessionId, state, finalUserMessage, response, elapsed);
                 costUsageRepository.save(usage);
                 sender.sendCostUpdated(sessionId, costUsageRepository.summarizeBySession(sessionId));
-
-                sender.sendDone(sessionId, response);
                 // Legacy ToolChain async generation intentionally disabled after workflow-only cutover.
                 Path turnFilePath = null;
                 try {

@@ -37,26 +37,31 @@ public class WorkflowInsightsService {
                 .addValue("fromTs", fromTs)
                 .addValue("toTs", now);
 
+        // Use LinkedHashMap (not Map.of) because the p* columns are
+        // nullable when the time window has zero completed runs — Map.of
+        // NPEs on null values.
         Map<String, Object> summary = jdbc.query(sql.getQuery("WORKFLOW_INSIGHTS.SUMMARY"), range, rs -> {
-            if (!rs.next()) return Map.of();
-            return Map.of(
-                    "total", rs.getLong("total"),
-                    "failed", rs.getLong("failed"),
-                    "completed", rs.getLong("completed"),
-                    "p50Ms", nullableLong(rs, "p50_ms"),
-                    "p95Ms", nullableLong(rs, "p95_ms"),
-                    "p99Ms", nullableLong(rs, "p99_ms")
-            );
+            if (!rs.next()) return new LinkedHashMap<String, Object>();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("total", rs.getLong("total"));
+            m.put("failed", rs.getLong("failed"));
+            m.put("completed", rs.getLong("completed"));
+            m.put("p50Ms", nullableLong(rs, "p50_ms"));
+            m.put("p95Ms", nullableLong(rs, "p95_ms"));
+            m.put("p99Ms", nullableLong(rs, "p99_ms"));
+            return m;
         });
 
-        List<Map<String, Object>> byDay = jdbc.query(sql.getQuery("WORKFLOW_INSIGHTS.BY_DAY"), range, (rs, i) -> Map.of(
-                "day", rs.getString("day"),
-                "total", rs.getLong("total"),
-                "failed", rs.getLong("failed"),
-                "completed", rs.getLong("completed"),
-                "p50Ms", nullableLong(rs, "p50_ms"),
-                "p95Ms", nullableLong(rs, "p95_ms")
-        ));
+        List<Map<String, Object>> byDay = jdbc.query(sql.getQuery("WORKFLOW_INSIGHTS.BY_DAY"), range, (rs, i) -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("day", rs.getString("day"));
+            m.put("total", rs.getLong("total"));
+            m.put("failed", rs.getLong("failed"));
+            m.put("completed", rs.getLong("completed"));
+            m.put("p50Ms", nullableLong(rs, "p50_ms"));
+            m.put("p95Ms", nullableLong(rs, "p95_ms"));
+            return m;
+        });
 
         List<Map<String, Object>> byWorkflow = jdbc.query(
                 sql.getQuery("WORKFLOW_INSIGHTS.BY_WORKFLOW"),

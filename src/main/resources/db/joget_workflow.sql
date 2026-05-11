@@ -236,3 +236,9 @@ CREATE TABLE IF NOT EXISTS agent.pending_approval (
 
 CREATE INDEX IF NOT EXISTS idx_pending_approval_inst    ON agent.pending_approval (inst_id);
 CREATE INDEX IF NOT EXISTS idx_pending_approval_pending ON agent.pending_approval (decided_at) WHERE decided_at IS NULL;
+-- ── Workflow run final result ─────────────────────────────────────────────────
+-- When an end activity declares `properties.result` as a SecureSpel expression,
+-- the engine evaluates it on PROCESS_COMPLETED and stores the JSON-serialized
+-- value here. Run-summary API responses surface it inline. Null for legacy
+-- runs and for workflows that don't declare an end-result expression.
+ALTER TABLE agent.process_inst ADD COLUMN IF NOT EXISTS result_json TEXT;
