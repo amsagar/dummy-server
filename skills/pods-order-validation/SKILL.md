@@ -28,6 +28,26 @@ calls**. The structural validator and alignment judge both reject those.
 When `toCheck` is empty the foreach naturally produces zero invocations;
 that is the correct construct, not an omitted step.
 
+### CodeExec envelope pattern (do NOT remove)
+
+Every `CodeExecPlugin` activity in this skeleton returns a Java `Map` or
+`List` from its `code`, but the plugin wraps that return as
+`{success, output, stdout, stderr}` before the workflow engine stores
+it. The engine then assigns the **entire envelope** to the activity's
+single declared `outputVariables[0].name` — extra outputVariables
+entries are ignored. Downstream activities read the actual payload via
+`.output` (e.g. `#legData.output.legLines`, `#toCheck.output`,
+`#serviceabilityResults?.output`).
+
+If you split `prepareLegLines` into multiple outputVariables thinking
+the engine will destructure the returned map, the runtime will fail
+with `decisionTableEvaluate is missing required inputs` and
+`foreach collection must be a list`, because only the first variable
+gets populated and the others stay null. The fix is **one
+outputVariable per CodeExec activity, plus `.output` sub-paths
+downstream** — same pattern workflow-architect's
+`templates/foreach-accumulate.json` uses for `#details?.output`.
+
 ## Required resources
 
 | Resource | Type | When to call |

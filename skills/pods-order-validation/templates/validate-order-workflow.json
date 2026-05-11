@@ -7,19 +7,17 @@
   "variables": [
     { "name": "orderId",                       "javaClass": "java.lang.String",  "defaultExpression": null, "required": true  },
     { "name": "order",                         "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
-    { "name": "legLines",                      "javaClass": "java.util.List",    "defaultExpression": null, "required": false },
-    { "name": "actualSequence",                "javaClass": "java.util.List",    "defaultExpression": null, "required": false },
-    { "name": "journeyType",                   "javaClass": "java.lang.String",  "defaultExpression": null, "required": false },
+    { "name": "legData",                       "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
     { "name": "legSequenceResult",             "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
     { "name": "currentLegLine",                "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
     { "name": "currentLegIndex",               "javaClass": "java.lang.Long",    "defaultExpression": "0",  "required": false },
     { "name": "serviceabilityResult",          "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
-    { "name": "serviceabilityResults",         "javaClass": "java.util.List",    "defaultExpression": null, "required": false },
-    { "name": "toCheck",                       "javaClass": "java.util.List",    "defaultExpression": null, "required": false },
+    { "name": "serviceabilityResults",         "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
+    { "name": "toCheck",                       "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
     { "name": "currentContainerLine",          "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
     { "name": "currentContainerIndex",         "javaClass": "java.lang.Long",    "defaultExpression": "0",  "required": false },
     { "name": "containerAvailabilityResult",   "javaClass": "java.util.Map",     "defaultExpression": null, "required": false },
-    { "name": "containerAvailabilityResults",  "javaClass": "java.util.List",    "defaultExpression": null, "required": false }
+    { "name": "containerAvailabilityResults",  "javaClass": "java.util.Map",     "defaultExpression": null, "required": false }
   ],
   "activities": [
     {
@@ -67,7 +65,7 @@
       "pluginName": "CodeExecPlugin",
       "properties": {
         "language": "java",
-        "code": "// Step 2 + 3 of the pods-order-validation skill.\n// 1) Filter order.Lines on VALID_ITEM_CODES (read ItemCode, NOT ServiceCode).\n// 2) Sort by Sequence ASC.\n// 3) Build actualSequence using line.ServiceCode if non-empty,\n//    else fall back to ITEM_TO_SERVICE mapping for that ItemCode.\n// Returns { legLines, actualSequence, journeyType } for downstream steps.\njava.util.Set<String> VALID_ITEM_CODES = java.util.Set.of(\n    \"IDEL\",\"RETSC\",\"LDT\",\"REDEL\",\"FPU\",\"MOV\",\"SID\",\"SFP\",\"SCDEL\",\"CSRED\",\"CSFPU\");\njava.util.Map<String,String> ITEM_TO_SERVICE = java.util.Map.ofEntries(\n    java.util.Map.entry(\"IDEL\",\"NEW\"), java.util.Map.entry(\"RETSC\",\"WRT\"),\n    java.util.Map.entry(\"LDT\",\"WTW\"),  java.util.Map.entry(\"REDEL\",\"RDL\"),\n    java.util.Map.entry(\"FPU\",\"FPU\"),  java.util.Map.entry(\"MOV\",\"MOV\"),\n    java.util.Map.entry(\"SID\",\"SID\"),  java.util.Map.entry(\"SFP\",\"SFP\"),\n    java.util.Map.entry(\"SCDEL\",\"SCDEL\"), java.util.Map.entry(\"CSRED\",\"CSRED\"),\n    java.util.Map.entry(\"CSFPU\",\"CSFPU\"));\njava.util.Map<String,Object> order = (java.util.Map<String,Object>) input.get(\"order\");\njava.util.List<java.util.Map<String,Object>> allLines =\n    (java.util.List<java.util.Map<String,Object>>) order.getOrDefault(\"Lines\", java.util.List.of());\njava.util.List<java.util.Map<String,Object>> legs = new java.util.ArrayList<>();\nfor (java.util.Map<String,Object> l : allLines) {\n  Object ic = l.get(\"ItemCode\");\n  if (ic != null && VALID_ITEM_CODES.contains(ic.toString())) legs.add(l);\n}\nlegs.sort((a,b) -> {\n  Number sa = (Number) a.getOrDefault(\"Sequence\", 0);\n  Number sb = (Number) b.getOrDefault(\"Sequence\", 0);\n  return Long.compare(sa.longValue(), sb.longValue());\n});\njava.util.List<String> seq = new java.util.ArrayList<>();\nfor (java.util.Map<String,Object> l : legs) {\n  Object svc = l.get(\"ServiceCode\");\n  String s = (svc != null && !svc.toString().isBlank())\n      ? svc.toString()\n      : ITEM_TO_SERVICE.get(String.valueOf(l.get(\"ItemCode\")));\n  if (s != null) seq.add(s);\n}\njava.util.Map<String,Object> out = new java.util.LinkedHashMap<>();\nout.put(\"legLines\", legs);\nout.put(\"actualSequence\", seq);\nout.put(\"journeyType\", String.valueOf(order.getOrDefault(\"OrderType\", \"\")));\nreturn out;",
+        "code": "// Step 2 + 3 of the pods-order-validation skill.\n// 1) Filter order.Lines on VALID_ITEM_CODES (read ItemCode, NOT ServiceCode).\n// 2) Sort by Sequence ASC.\n// 3) Build actualSequence using line.ServiceCode if non-empty,\n//    else fall back to ITEM_TO_SERVICE mapping for that ItemCode.\n// Returns { legLines, actualSequence, journeyType }. The CodeExecPlugin\n// wraps this return value as {success, output={...this return...},\n// stdout, stderr}, and the engine stores the ENTIRE envelope under the\n// activity's single output variable (#legData). Downstream activities\n// read fields via #legData.output.legLines / .actualSequence / .journeyType\n// — this is the same envelope-unwrap pattern used by\n// workflow-architect/templates/foreach-accumulate.json (see\n// #details?.output there).\njava.util.Set<String> VALID_ITEM_CODES = java.util.Set.of(\n    \"IDEL\",\"RETSC\",\"LDT\",\"REDEL\",\"FPU\",\"MOV\",\"SID\",\"SFP\",\"SCDEL\",\"CSRED\",\"CSFPU\");\njava.util.Map<String,String> ITEM_TO_SERVICE = java.util.Map.ofEntries(\n    java.util.Map.entry(\"IDEL\",\"NEW\"), java.util.Map.entry(\"RETSC\",\"WRT\"),\n    java.util.Map.entry(\"LDT\",\"WTW\"),  java.util.Map.entry(\"REDEL\",\"RDL\"),\n    java.util.Map.entry(\"FPU\",\"FPU\"),  java.util.Map.entry(\"MOV\",\"MOV\"),\n    java.util.Map.entry(\"SID\",\"SID\"),  java.util.Map.entry(\"SFP\",\"SFP\"),\n    java.util.Map.entry(\"SCDEL\",\"SCDEL\"), java.util.Map.entry(\"CSRED\",\"CSRED\"),\n    java.util.Map.entry(\"CSFPU\",\"CSFPU\"));\njava.util.Map<String,Object> order = (java.util.Map<String,Object>) input.get(\"order\");\njava.util.List<java.util.Map<String,Object>> allLines =\n    (java.util.List<java.util.Map<String,Object>>) order.getOrDefault(\"Lines\", java.util.List.of());\njava.util.List<java.util.Map<String,Object>> legs = new java.util.ArrayList<>();\nfor (java.util.Map<String,Object> l : allLines) {\n  Object ic = l.get(\"ItemCode\");\n  if (ic != null && VALID_ITEM_CODES.contains(ic.toString())) legs.add(l);\n}\nlegs.sort((a,b) -> {\n  Number sa = (Number) a.getOrDefault(\"Sequence\", 0);\n  Number sb = (Number) b.getOrDefault(\"Sequence\", 0);\n  return Long.compare(sa.longValue(), sb.longValue());\n});\njava.util.List<String> seq = new java.util.ArrayList<>();\nfor (java.util.Map<String,Object> l : legs) {\n  Object svc = l.get(\"ServiceCode\");\n  String s = (svc != null && !svc.toString().isBlank())\n      ? svc.toString()\n      : ITEM_TO_SERVICE.get(String.valueOf(l.get(\"ItemCode\")));\n  if (s != null) seq.add(s);\n}\n// journeyType: prefer top-level order.OrderType, fall back to the first\n// line's OrderType (PODS orders observed in stage have OrderType per-line\n// but not always at the order root). Skill prose says \"from order\" but\n// in practice the source-of-truth varies by API revision.\nString journeyType = \"\";\nObject orderTop = order.get(\"OrderType\");\nif (orderTop != null && !orderTop.toString().isBlank()) {\n  journeyType = orderTop.toString();\n} else {\n  for (java.util.Map<String,Object> l : allLines) {\n    Object lt = l.get(\"OrderType\");\n    if (lt != null && !lt.toString().isBlank()) { journeyType = lt.toString(); break; }\n  }\n}\njava.util.Map<String,Object> out = new java.util.LinkedHashMap<>();\nout.put(\"legLines\", legs);\nout.put(\"actualSequence\", seq);\nout.put(\"journeyType\", journeyType);\nreturn out;",
         "input": "#{ {'order': #order} }",
         "timeoutMs": 5000,
         "memoryLimitMb": 64
@@ -81,9 +79,7 @@
       "subflowInputs": {},
       "subflowOutputs": {},
       "outputVariables": [
-        { "name": "legLines",       "javaClass": "java.util.List",   "defaultExpression": null, "required": false },
-        { "name": "actualSequence", "javaClass": "java.util.List",   "defaultExpression": null, "required": false },
-        { "name": "journeyType",    "javaClass": "java.lang.String", "defaultExpression": null, "required": false }
+        { "name": "legData", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
       ],
       "andJoin": false,
       "errorPolicy": { "retryCount": 1, "backoffMs": 200, "timeoutMs": 5000, "failFast": false, "continueOnError": false }
@@ -95,7 +91,7 @@
       "pluginName": "AgentToolPlugin",
       "properties": {
         "toolName": "decisionTableEvaluate",
-        "input": "#{ {'tableName': 'Leg Sequences', 'journeyType': #journeyType, 'actualSequence': #actualSequence} }"
+        "input": "#{ {'tableName': 'Leg Sequences', 'journeyType': #legData.output.journeyType, 'actualSequence': #legData.output.actualSequence} }"
       },
       "inputSchema": {},
       "outputSchema": {},
@@ -117,7 +113,7 @@
       "type": "foreach",
       "pluginName": null,
       "properties": {
-        "collection": "#{#legLines}",
+        "collection": "#{#legData.output.legLines}",
         "itemVar": "currentLegLine",
         "indexVar": "currentLegIndex",
         "maxIterations": 1000
@@ -215,7 +211,7 @@
       "type": "foreach",
       "pluginName": null,
       "properties": {
-        "collection": "#{#toCheck}",
+        "collection": "#{#toCheck.output}",
         "itemVar": "currentContainerLine",
         "indexVar": "currentContainerIndex",
         "maxIterations": 1000
