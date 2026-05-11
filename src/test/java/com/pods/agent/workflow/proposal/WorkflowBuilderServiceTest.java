@@ -400,6 +400,31 @@ class WorkflowBuilderServiceTest {
     }
 
     @Test
+    void rejectingToolCallbackReturnsCannedBodyForEveryCallShape() {
+        // The runtime registers RejectingToolCallback under name="write" on
+        // retry attempts, so the model can still see "a tool called write
+        // exists" but every invocation produces the same write_forbidden
+        // payload. The builder loop never sees the call succeed and the
+        // SHA-256 no-op detector then catches the unchanged draft.
+        String body = "{\"success\":false,\"error\":\"write_forbidden_on_retry\"}";
+        WorkflowBuilderService.RejectingToolCallback callback =
+                new WorkflowBuilderService.RejectingToolCallback(
+                        "write",
+                        "Forbidden on retry attempts.",
+                        body);
+
+        assertEquals("write", callback.getToolDefinition().name());
+        assertEquals("Forbidden on retry attempts.", callback.getToolDefinition().description());
+
+        // Both call(...) overloads (with and without ToolContext) must return
+        // the same body so the agent gets a consistent refusal regardless
+        // of which dispatch path Spring AI picks.
+        assertEquals(body, callback.call("{\"path\":\"x.json\",\"content\":\"...\"}"));
+        assertEquals(body, callback.call("{}", null));
+        assertEquals(body, callback.call(null));
+    }
+
+    @Test
     void buildFailsWhenWorkspaceUnresolvable() {
         Path workspace = Path.of(System.getProperty("java.io.tmpdir"), "pods-builder-test-" + System.nanoTime());
         Fixture fx = new Fixture(workspace);

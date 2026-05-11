@@ -174,10 +174,11 @@ public class WorkflowBuilderService {
             // SHA-256 of the draft before the agent runs. Used after the
             // agent returns to detect the "no-op retry" failure mode where
             // the model replies claiming edits but never actually called
-            // edit/apply_patch/write — the file on disk is byte-identical
-            // to the previous attempt, so re-running the same validation /
+            // edit/apply_patch — the file on disk is byte-identical to the
+            // previous attempt, so re-running the same validation /
             // alignment check would just burn an attempt and produce the
-            // same critique. Short-circuit instead.
+            // same critique. Short-circuit instead. (write is not in this
+            // list because on retries it's deregistered — see runAgent.)
             String hashBefore = hashFileQuiet(draftFile);
             try {
                 String resumeFeedback = lastFailureSummary;
@@ -210,7 +211,7 @@ public class WorkflowBuilderService {
                 // message so the next attempt knows what went wrong.
                 lastFailureSummary = renderDraftUnchangedFeedback(lastFailureSummary);
                 log.warn("[WorkflowBuilder] proposal {} attempt {} produced NO file change"
-                                + " (agent replied without calling edit/apply_patch/write);"
+                                + " (agent replied without calling edit/apply_patch);"
                                 + " surfacing draft_unchanged feedback to attempt {}",
                         proposal.getId(), attemptNum, attemptNum + 1);
                 continue;
@@ -353,18 +354,34 @@ public class WorkflowBuilderService {
                 """,
                 toolExecutionService));
         // Path-restricted write/edit/apply_patch tools — all three must
-        // resolve to the proposal's draft file.
-        tools.add(new PathRestrictedFsCallback("write",
-                "Write the full workflow JSON to the proposal draft file. Use this only on the FIRST attempt; subsequent attempts MUST use `edit`.",
-                """
-                {"type":"object",
-                 "required":["path","content"],
-                 "properties":{
-                   "path":{"type":"string","description":"MUST equal '%s'"},
-                   "content":{"type":"string","description":"Full JSON document to write"}
-                 }}
-                """.formatted(draftRelString),
-                toolExecutionService, draftFile));
+        // resolve to the proposal's draft file. write is only registered on
+        // the initial attempt; on retries it's replaced by a rejecting
+        // callback so the agent can't regenerate-from-scratch and erase
+        // surgical edits made during prior attempts (we observed gpt-5.2-chat
+        // dropping required fields like trigger / maxIterations / outputVariables
+        // when allowed to write on a retry, producing 18 structural errors).
+        if (initialAttempt) {
+            tools.add(new PathRestrictedFsCallback("write",
+                    "Write the full workflow JSON to the proposal draft file. ONLY available on the initial attempt; on retries the tool is replaced and rejects all calls.",
+                    """
+                    {"type":"object",
+                     "required":["path","content"],
+                     "properties":{
+                       "path":{"type":"string","description":"MUST equal '%s'"},
+                       "content":{"type":"string","description":"Full JSON document to write"}
+                     }}
+                    """.formatted(draftRelString),
+                    toolExecutionService, draftFile));
+        } else {
+            tools.add(new RejectingToolCallback("write",
+                    "Forbidden on retry attempts. Use `edit` (surgical replace) or `apply_patch` (multi-hunk diff) instead — they preserve fields you've already set correctly. A full rewrite is rejected to prevent dropping required fields like trigger / maxIterations / outputVariables.",
+                    "{\"success\":false,\"error\":\"write_forbidden_on_retry\","
+                            + "\"hint\":\"write is only available on the initial attempt; "
+                            + "on retries you MUST use edit(old_text, new_text) for surgical "
+                            + "changes or apply_patch for multi-hunk diffs. Regenerating the file "
+                            + "from scratch would erase the structural fields (triggers, "
+                            + "maxIterations, outputVariables) you've already set correctly.\"}"));
+        }
         tools.add(new PathRestrictedFsCallback("edit",
                 "Surgically replace one occurrence of old_text with new_text in the proposal draft file. Preferred for retries.",
                 """
@@ -439,9 +456,12 @@ public class WorkflowBuilderService {
                   - read(path)   — read any file under the session workspace
                   - glob(glob)   — list workspace files
                   - grep(pattern)— search workspace file contents
-                  - write(path,content) — full file rewrite of the draft (initial only)
-                  - edit(path,old_text,new_text) — surgical edit (preferred for retries)
-                  - apply_patch(path,content)    — multi-hunk diff against the draft
+                  - write(path,content) — full file rewrite of the draft.
+                    INITIAL ATTEMPT ONLY. On retries the tool is replaced
+                    by a rejecting stub that returns
+                    `write_forbidden_on_retry`; you cannot call it then.
+                  - edit(path,old_text,new_text) — surgical edit. REQUIRED on retries.
+                  - apply_patch(path,content)    — multi-hunk diff against the draft.
 
                 Skill priority: skills are the source of truth. If a skill
                 rule conflicts with what the execution log appears to imply,
@@ -529,25 +549,31 @@ public class WorkflowBuilderService {
                   - Use `read` to see the current draft contents; then use
                     `edit(old_text,new_text)` to make the smallest fix that
                     addresses every reported issue.
-                  - DO NOT rewrite the file with `write`; that is wasteful and
-                    often introduces new errors. Only fall back to `write` if
-                    the file is structurally broken to the point edits can't
-                    converge.
+                  - `write` is FORBIDDEN on retry attempts. The tool is
+                    deregistered after the initial attempt — calling it
+                    returns `write_forbidden_on_retry`. A full rewrite
+                    erases the structural fields you've already set
+                    correctly (triggers, maxIterations, outputVariables
+                    were observed dropping in production) and forces you
+                    to redo work the validator already accepted. Use
+                    `edit` for surgical changes and `apply_patch` for
+                    multi-hunk diffs.
                   - HARD RULE — your reply MUST be preceded by at least ONE
-                    successful call to `edit`, `apply_patch`, or `write`. A
-                    reply alone does NOT modify the file; the build loop
-                    SHA-256-hashes the draft before and after every attempt
-                    and will detect a no-op. If your hashes match, the
-                    attempt is rejected with a `draft_unchanged` failure and
-                    the same feedback is re-issued on the next attempt
-                    (with this rule restated more loudly). Do not claim
-                    "Edits applied" or "Applied structural fixes" if you
-                    have not actually called a write tool — that is a
+                    successful call to `edit` or `apply_patch`. A reply
+                    alone does NOT modify the file; the build loop
+                    SHA-256-hashes the draft before and after every
+                    attempt and will detect a no-op. If your hashes
+                    match, the attempt is rejected with a
+                    `draft_unchanged` failure and the same feedback is
+                    re-issued on the next attempt (with this rule
+                    restated more loudly). Do not claim "Edits applied"
+                    or "Applied structural fixes" if you have not
+                    actually called `edit` / `apply_patch` — that is a
                     hallucination, not a fix. If the feedback is unclear
                     enough that you cannot decide what to edit, prefer
-                    making one small edit that addresses the most concrete
-                    issue over replying with no edit at all.
-                  - Only AFTER at least one successful edit/apply_patch/write
+                    making one small edit that addresses the most
+                    concrete issue over replying with no edit at all.
+                  - Only AFTER at least one successful edit/apply_patch
                     call, stop calling tools and reply with a one-line
                     confirmation describing what you actually changed.
                 """.formatted(draftPath, skillAllowlist, executionLogPath);
@@ -596,16 +622,22 @@ public class WorkflowBuilderService {
                 Proposal id: %s
 
                 ============================================================
-                MANDATORY: you MUST call edit / apply_patch / write
+                MANDATORY: you MUST call edit / apply_patch
+                (write is FORBIDDEN on retries — the tool is deregistered
+                 and returns `write_forbidden_on_retry`)
                 ============================================================
                 A reply alone does NOT modify the file. The build loop
                 SHA-256-hashes the draft before and after this attempt; if
                 the hash is unchanged your attempt is rejected as a no-op
                 and the same feedback is re-issued. Do NOT claim "Edits
                 applied" or "Applied structural fixes" without actually
-                calling a write tool — that is a hallucination, not a fix.
-                Make at least ONE successful edit/apply_patch/write call
-                before replying.
+                calling edit / apply_patch — that is a hallucination, not
+                a fix. Make at least ONE successful edit / apply_patch
+                call before replying. Do NOT regenerate the file from
+                scratch with `write`: it's blocked, and even if it
+                weren't, a full rewrite drops fields the validator
+                already accepted (triggers, maxIterations,
+                outputVariables) and forces you to redo work.
                 ============================================================
 
                 Feedback to address (every item must be fixed in this attempt):
@@ -630,11 +662,12 @@ public class WorkflowBuilderService {
                      make the match unique. Multiple edits are fine for
                      structural fixes (e.g. deleting an enumeration); use
                      apply_patch for large multi-hunk rewrites.
-                  4. Do NOT regenerate the file with `write` unless the draft
-                     is unsalvageable. Edits compound across attempts
-                     because your earlier conversation is preserved in
-                     memory — keep building on the prior context.
-                  5. ONLY after at least one successful edit/apply_patch/write
+                  4. `write` is BLOCKED on retries (the tool returns
+                     `write_forbidden_on_retry`). Edits compound across
+                     attempts because your earlier conversation is
+                     preserved in memory — keep building on the prior
+                     context with edit / apply_patch only.
+                  5. ONLY after at least one successful edit/apply_patch
                      call, stop calling tools and reply with a one-line
                      confirmation that names the specific changes you made.
                 """.formatted(
@@ -661,11 +694,15 @@ public class WorkflowBuilderService {
 
     /**
      * Build the resume feedback shown when the previous attempt produced no
-     * file change (agent claimed edits but never called write/edit/
-     * apply_patch). The original validator/alignment feedback is preserved
-     * verbatim because it's still the actual problem to fix — but it's
-     * prefixed with a clear "you didn't actually edit anything" warning so
-     * the next attempt cannot interpret the message as an acknowledgement.
+     * file change (agent claimed edits but never called edit / apply_patch).
+     * The original validator/alignment feedback is preserved verbatim
+     * because it's still the actual problem to fix — but it's prefixed with
+     * a clear "you didn't actually edit anything" warning so the next
+     * attempt cannot interpret the message as an acknowledgement. Note we
+     * intentionally do NOT mention `write` as an option: it's deregistered
+     * on retries (returns `write_forbidden_on_retry`) and a full rewrite
+     * tends to drop required structural fields the validator already
+     * accepted.
      */
     private String renderDraftUnchangedFeedback(String priorFeedback) {
         StringBuilder sb = new StringBuilder();
@@ -673,16 +710,17 @@ public class WorkflowBuilderService {
         sb.append("Your previous reply claimed structural edits, but the draft file on disk\n");
         sb.append("is byte-identical to before the attempt — you did NOT call any of:\n");
         sb.append("  - edit(path, old_text, new_text)\n");
-        sb.append("  - apply_patch(path, content)\n");
-        sb.append("  - write(path, content)\n\n");
+        sb.append("  - apply_patch(path, content)\n\n");
+        sb.append("(`write` is deregistered on retries and returns `write_forbidden_on_retry`;\n");
+        sb.append(" do not try to fall back to it. Use edit / apply_patch only.)\n\n");
         sb.append("Replying alone does NOT modify the file. The validator and the alignment\n");
         sb.append("judge re-ran against the unchanged draft and produced the same failure.\n");
         sb.append("This attempt is a no-op and was rejected automatically.\n\n");
         sb.append("On THIS attempt you MUST:\n");
         sb.append("  1. Call read(<draft>) to load the current contents.\n");
-        sb.append("  2. For every issue listed below, call edit(...) (or apply_patch / write)\n");
+        sb.append("  2. For every issue listed below, call edit(...) or apply_patch(...)\n");
         sb.append("     to actually mutate the file. Multiple edit calls are fine.\n");
-        sb.append("  3. Only after at least one successful edit/apply_patch/write call,\n");
+        sb.append("  3. Only after at least one successful edit / apply_patch call,\n");
         sb.append("     reply with a one-line confirmation.\n\n");
         sb.append("The original feedback to address is unchanged:\n\n");
         sb.append(priorFeedback == null || priorFeedback.isBlank()
@@ -917,6 +955,44 @@ public class WorkflowBuilderService {
         private static String escape(String value) {
             if (value == null) return "";
             return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ");
+        }
+    }
+
+    /**
+     * Stand-in for a tool that we want to deregister mid-build but still
+     * surface the refusal politely if the model tries to call it. Used to
+     * deny `write` on retry attempts so the agent can't regenerate the
+     * draft from scratch and erase fields it had already corrected.
+     */
+    static final class RejectingToolCallback implements ToolCallback {
+
+        private final String name;
+        private final String description;
+        private final String responseBody;
+
+        RejectingToolCallback(String name, String description, String responseBody) {
+            this.name = name;
+            this.description = description;
+            this.responseBody = responseBody;
+        }
+
+        @Override
+        public ToolDefinition getToolDefinition() {
+            return DefaultToolDefinition.builder()
+                    .name(name)
+                    .description(description)
+                    .inputSchema("{\"type\":\"object\",\"properties\":{}}")
+                    .build();
+        }
+
+        @Override
+        public String call(String jsonInput) {
+            return responseBody;
+        }
+
+        @Override
+        public String call(String jsonInput, ToolContext toolContext) {
+            return responseBody;
         }
     }
 

@@ -21,7 +21,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "pods.workflow.proposal")
 public class WorkflowProposalProperties {
 
-    private int maxBuildAttempts = 5;
+    private int maxBuildAttempts = 7;
     private ModelOverride classifierModel = new ModelOverride();
     private ModelOverride builderModel = new ModelOverride();
     private ModelOverride alignmentModel = new ModelOverride();

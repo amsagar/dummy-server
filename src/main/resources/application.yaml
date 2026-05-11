@@ -112,7 +112,11 @@ pods:
     proposal:
       # Combined retry budget for the Phase-2 builder loop. Each attempt =
       # one (read draft → structural validation → alignment check) pass.
-      max-build-attempts: 5
+      # Bumped to 7 because the alignment judge legitimately surfaces 2-3
+      # new fine-grained critiques per round (custTrackingId conversion,
+      # AddressType filtering, end-result shape, etc.) and we'd rather
+      # absorb that churn than fail an otherwise correct workflow.
+      max-build-attempts: 7
       # Optional per-phase model overrides. Leave provider-id / model-id
       # blank to use the model the chat agent used in the source turn.
       classifier-model:
