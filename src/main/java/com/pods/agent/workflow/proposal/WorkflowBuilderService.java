@@ -18,8 +18,10 @@ import com.pods.agent.workflow.proposal.agent.FilesystemToolCallback;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -169,6 +171,14 @@ public class WorkflowBuilderService {
             log.info("[WorkflowBuilder] proposal {} attempt {}/{} ({})",
                     proposal.getId(), attemptNum, maxAttempts,
                     attempt == 0 ? "initial draft" : "edit-in-place");
+            // SHA-256 of the draft before the agent runs. Used after the
+            // agent returns to detect the "no-op retry" failure mode where
+            // the model replies claiming edits but never actually called
+            // edit/apply_patch/write — the file on disk is byte-identical
+            // to the previous attempt, so re-running the same validation /
+            // alignment check would just burn an attempt and produce the
+            // same critique. Short-circuit instead.
+            String hashBefore = hashFileQuiet(draftFile);
             try {
                 String resumeFeedback = lastFailureSummary;
                 agentInvoker.invoke(
@@ -189,6 +199,22 @@ public class WorkflowBuilderService {
                 continue;
             }
             repo.incrementBuildAttempts(proposal.getId());
+
+            String hashAfter = hashFileQuiet(draftFile);
+            if (attempt > 0 && hashBefore != null && hashBefore.equals(hashAfter)) {
+                // Retry that didn't touch the file. The agent claimed edits
+                // in its reply but never actually called a write tool —
+                // forwarding the prior validation/alignment feedback again
+                // is pointless because the file hasn't changed. Replace the
+                // feedback with an explicit "you didn't actually edit"
+                // message so the next attempt knows what went wrong.
+                lastFailureSummary = renderDraftUnchangedFeedback(lastFailureSummary);
+                log.warn("[WorkflowBuilder] proposal {} attempt {} produced NO file change"
+                                + " (agent replied without calling edit/apply_patch/write);"
+                                + " surfacing draft_unchanged feedback to attempt {}",
+                        proposal.getId(), attemptNum, attemptNum + 1);
+                continue;
+            }
 
             String draftJson = readDraftQuiet(draftFile);
             if (draftJson == null || draftJson.isBlank()) {
@@ -507,8 +533,23 @@ public class WorkflowBuilderService {
                     often introduces new errors. Only fall back to `write` if
                     the file is structurally broken to the point edits can't
                     converge.
-                  - Stop calling tools when you believe the fix is complete;
-                    one-line acknowledgement is enough.
+                  - HARD RULE — your reply MUST be preceded by at least ONE
+                    successful call to `edit`, `apply_patch`, or `write`. A
+                    reply alone does NOT modify the file; the build loop
+                    SHA-256-hashes the draft before and after every attempt
+                    and will detect a no-op. If your hashes match, the
+                    attempt is rejected with a `draft_unchanged` failure and
+                    the same feedback is re-issued on the next attempt
+                    (with this rule restated more loudly). Do not claim
+                    "Edits applied" or "Applied structural fixes" if you
+                    have not actually called a write tool — that is a
+                    hallucination, not a fix. If the feedback is unclear
+                    enough that you cannot decide what to edit, prefer
+                    making one small edit that addresses the most concrete
+                    issue over replying with no edit at all.
+                  - Only AFTER at least one successful edit/apply_patch/write
+                    call, stop calling tools and reply with a one-line
+                    confirmation describing what you actually changed.
                 """.formatted(draftPath, skillAllowlist, executionLogPath);
     }
 
@@ -554,6 +595,19 @@ public class WorkflowBuilderService {
                 Draft file: %s
                 Proposal id: %s
 
+                ============================================================
+                MANDATORY: you MUST call edit / apply_patch / write
+                ============================================================
+                A reply alone does NOT modify the file. The build loop
+                SHA-256-hashes the draft before and after this attempt; if
+                the hash is unchanged your attempt is rejected as a no-op
+                and the same feedback is re-issued. Do NOT claim "Edits
+                applied" or "Applied structural fixes" without actually
+                calling a write tool — that is a hallucination, not a fix.
+                Make at least ONE successful edit/apply_patch/write call
+                before replying.
+                ============================================================
+
                 Feedback to address (every item must be fixed in this attempt):
 
                 %s
@@ -580,8 +634,9 @@ public class WorkflowBuilderService {
                      is unsalvageable. Edits compound across attempts
                      because your earlier conversation is preserved in
                      memory — keep building on the prior context.
-                  5. Stop calling tools and reply with a single line
-                     confirming the edits when done.
+                  5. ONLY after at least one successful edit/apply_patch/write
+                     call, stop calling tools and reply with a one-line
+                     confirmation that names the specific changes you made.
                 """.formatted(
                         draftPath,
                         proposal.getId(),
@@ -602,6 +657,56 @@ public class WorkflowBuilderService {
     private String renderAlignmentFeedback(Verdict verdict) {
         return "Alignment judge rejected the draft (severity=" + verdict.severity() + "):\n  - "
                 + (verdict.critique() == null ? "(no critique provided)" : verdict.critique());
+    }
+
+    /**
+     * Build the resume feedback shown when the previous attempt produced no
+     * file change (agent claimed edits but never called write/edit/
+     * apply_patch). The original validator/alignment feedback is preserved
+     * verbatim because it's still the actual problem to fix — but it's
+     * prefixed with a clear "you didn't actually edit anything" warning so
+     * the next attempt cannot interpret the message as an acknowledgement.
+     */
+    private String renderDraftUnchangedFeedback(String priorFeedback) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("DRAFT NOT MODIFIED.\n\n");
+        sb.append("Your previous reply claimed structural edits, but the draft file on disk\n");
+        sb.append("is byte-identical to before the attempt — you did NOT call any of:\n");
+        sb.append("  - edit(path, old_text, new_text)\n");
+        sb.append("  - apply_patch(path, content)\n");
+        sb.append("  - write(path, content)\n\n");
+        sb.append("Replying alone does NOT modify the file. The validator and the alignment\n");
+        sb.append("judge re-ran against the unchanged draft and produced the same failure.\n");
+        sb.append("This attempt is a no-op and was rejected automatically.\n\n");
+        sb.append("On THIS attempt you MUST:\n");
+        sb.append("  1. Call read(<draft>) to load the current contents.\n");
+        sb.append("  2. For every issue listed below, call edit(...) (or apply_patch / write)\n");
+        sb.append("     to actually mutate the file. Multiple edit calls are fine.\n");
+        sb.append("  3. Only after at least one successful edit/apply_patch/write call,\n");
+        sb.append("     reply with a one-line confirmation.\n\n");
+        sb.append("The original feedback to address is unchanged:\n\n");
+        sb.append(priorFeedback == null || priorFeedback.isBlank()
+                ? "(no specific feedback was recorded for the previous attempt)"
+                : priorFeedback);
+        return sb.toString();
+    }
+
+    /**
+     * SHA-256 hex digest of {@code path}, or {@code null} when the file
+     * doesn't exist or cannot be read. Used purely for cross-attempt
+     * change detection — never compared against an external value, so
+     * SHA-256 is overkill but deterministic and dependency-free.
+     */
+    private String hashFileQuiet(Path path) {
+        try {
+            if (path == null || !Files.isRegularFile(path)) return null;
+            byte[] bytes = Files.readAllBytes(path);
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(md.digest(bytes));
+        } catch (Exception e) {
+            log.debug("[WorkflowBuilder] failed to hash draft file {}: {}", path, e.getMessage());
+            return null;
+        }
     }
 
     private String readDraftQuiet(Path draftFile) {

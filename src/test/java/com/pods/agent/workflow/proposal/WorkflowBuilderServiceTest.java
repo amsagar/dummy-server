@@ -328,6 +328,78 @@ class WorkflowBuilderServiceTest {
     }
 
     @Test
+    void buildSurfacesDraftUnchangedWhenAgentRepliesWithoutEditing(@TempDir Path workspace) throws IOException {
+        Fixture fx = new Fixture(workspace);
+        WorkflowProposal proposal = fx.persistedPending();
+
+        AtomicInteger invocations = new AtomicInteger();
+        java.util.List<String> seenFeedback = new java.util.ArrayList<>();
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+            int n = invocations.incrementAndGet();
+            seenFeedback.add(feedback == null ? "" : feedback);
+            if (n == 1) {
+                // Attempt 1: write a valid draft so structural passes; we
+                // make alignment fail next so a retry is requested.
+                Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
+            } else if (n == 2) {
+                // Attempt 2: simulate the user's failing run — the agent
+                // hallucinates "Edits applied" but never calls a write
+                // tool. The draft on disk is byte-identical to attempt 1.
+                // (Intentional no-op.)
+            } else {
+                // Attempt 3: the agent finally edits the file.
+                Files.writeString(draft, VALID_DRAFT.replace(
+                        "\"version\": \"1\"", "\"version\": \"2\""),
+                        StandardCharsets.UTF_8);
+            }
+        });
+        // Alignment: misaligned on the unedited draft; aligned once it changes.
+        when(fx.alignmentJudge.judge(anyString(), any(), any(), any(), any()))
+                .thenReturn(new Verdict(false, "Step 2 missing", "high"))
+                .thenReturn(new Verdict(true, "", "low"));
+
+        WorkflowProposal result = fx.builder.build(proposal);
+
+        // Three invocations total: initial + no-op + real edit.
+        assertEquals(3, invocations.get());
+        assertEquals("materialized", result.getStatus());
+        // The judge runs on attempt 1 (misaligned) and attempt 3 (aligned)
+        // but NEVER on attempt 2 because the file didn't change — that's
+        // the whole point of the short-circuit (no wasted LLM call).
+        verify(fx.alignmentJudge, times(2))
+                .judge(anyString(), any(), any(), any(), any());
+        // Attempt 3 received the draft_unchanged feedback, NOT the raw
+        // alignment critique from attempt 1 — proving the loop replaced
+        // the stale feedback with the no-op warning.
+        String attempt3Feedback = seenFeedback.get(2);
+        assertTrue(attempt3Feedback.contains("DRAFT NOT MODIFIED"),
+                "attempt 3 must see draft_unchanged warning, was: " + attempt3Feedback);
+        assertTrue(attempt3Feedback.contains("Step 2 missing"),
+                "attempt 3 must still carry the original critique inside the warning, was: " + attempt3Feedback);
+    }
+
+    @Test
+    void buildSkipsNoOpDetectionOnInitialAttempt(@TempDir Path workspace) throws IOException {
+        // The very first attempt has no "before" hash to compare against —
+        // an empty file equal to an empty file must NOT be flagged.
+        Fixture fx = new Fixture(workspace);
+        WorkflowProposal proposal = fx.persistedPending();
+
+        AtomicInteger invocations = new AtomicInteger();
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+            invocations.incrementAndGet();
+            assertTrue(initial, "this test exercises the initial attempt only");
+            Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
+        });
+        fx.judgeAligned();
+
+        WorkflowProposal result = fx.builder.build(proposal);
+
+        assertEquals("materialized", result.getStatus());
+        assertEquals(1, invocations.get());
+    }
+
+    @Test
     void buildFailsWhenWorkspaceUnresolvable() {
         Path workspace = Path.of(System.getProperty("java.io.tmpdir"), "pods-builder-test-" + System.nanoTime());
         Fixture fx = new Fixture(workspace);
