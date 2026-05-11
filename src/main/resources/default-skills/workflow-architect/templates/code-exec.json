@@ -1,0 +1,47 @@
+{
+  "id": null,
+  "name": "Sandboxed Code Execution",
+  "version": "1",
+  "packageId": null,
+  "description": "Run sandboxed code via CodeExecPlugin. Always use language=\"java\" — other languages are temporarily disabled.",
+  "variables": [
+    { "name": "input", "javaClass": "java.util.Map", "defaultExpression": null, "required": true }
+  ],
+  "activities": [
+    {
+      "id": "start", "name": "Start", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": true, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    },
+    {
+      "id": "runCode", "name": "Run Code", "type": "tool", "pluginName": "CodeExecPlugin",
+      "properties": {
+        "language": "java",
+        "code":     "java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();\nlong sum = 0L;\nif (input.get(\"numbers\") instanceof java.util.List<?> nums) {\n    for (Object n : nums) {\n        if (n instanceof Number num) sum += num.longValue();\n    }\n}\nout.put(\"sum\", sum);\nreturn out;",
+        "input":    "#{#input}",
+        "timeoutMs": 10000,
+        "memoryLimitMb": 128
+      },
+      "deadlineExpression": "PT15S",
+      "isStart": false, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "execResult", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false
+    },
+    {
+      "id": "end", "name": "End", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": false, "isEnd": true,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    }
+  ],
+  "transitions": [
+    { "id": "t1", "fromActivityId": "start",   "toActivityId": "runCode", "condition": null, "isErrorEdge": false, "matchesErrorClass": null },
+    { "id": "t2", "fromActivityId": "runCode", "toActivityId": "end",     "condition": null, "isErrorEdge": false, "matchesErrorClass": null }
+  ]
+}

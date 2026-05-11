@@ -1,6 +1,8 @@
 package com.pods.agent.repository;
 
 import com.pods.agent.domain.RuntimeEvent;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -10,6 +12,7 @@ import java.util.List;
 import java.util.UUID;
 
 @Repository
+@Slf4j
 public class RuntimeEventRepository {
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate namedJdbc;
@@ -24,13 +27,23 @@ public class RuntimeEventRepository {
     public RuntimeEvent save(RuntimeEvent event) {
         if (event.getId() == null) event.setId(UUID.randomUUID().toString());
         if (event.getCreatedAt() == 0) event.setCreatedAt(System.currentTimeMillis());
-        namedJdbc.update(sql.getQuery("RUNTIME_EVENT.INSERT"), new MapSqlParameterSource()
-                .addValue("id", event.getId())
-                .addValue("sessionId", event.getSessionId())
-                .addValue("turnId", event.getTurnId())
-                .addValue("eventType", event.getEventType())
-                .addValue("payload", event.getPayload())
-                .addValue("createdAt", event.getCreatedAt()));
+        try {
+            namedJdbc.update(sql.getQuery("RUNTIME_EVENT.INSERT"), new MapSqlParameterSource()
+                    .addValue("id", event.getId())
+                    .addValue("sessionId", event.getSessionId())
+                    .addValue("turnId", event.getTurnId())
+                    .addValue("eventType", event.getEventType())
+                    .addValue("payload", event.getPayload())
+                    .addValue("createdAt", event.getCreatedAt()));
+        } catch (DataIntegrityViolationException e) {
+            // runtime_events.session_id has a FK to chat_sessions; tolerate a
+            // missing parent row (dev DB resets, manual cleanups, races). The
+            // chat turn must still complete and downstream async work — e.g.
+            // workflow proposal generation — must still get scheduled.
+            log.warn("[RuntimeEventRepository] dropping event for session={} turn={} ({}): {}",
+                    event.getSessionId(), event.getTurnId(), event.getEventType(),
+                    e.getMostSpecificCause() == null ? e.getMessage() : e.getMostSpecificCause().getMessage());
+        }
         return event;
     }
 

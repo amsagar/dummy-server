@@ -1,0 +1,188 @@
+{
+  "id": null,
+  "name": "Fetch List, Classify Each With AI Reasoning",
+  "version": "1",
+  "packageId": null,
+  "description": "Fetch a list, then for each item run a deterministic detail fetch followed by an explicit ai_reasoning classification step (gated with invokeWhen so the LLM call is skipped for items that don't need it). Accumulate the verdicts. Replace tool names, the invokeWhen guard, and the prompt with your real ones.",
+  "variables": [
+    { "name": "apiParams",     "javaClass": "java.util.Map",     "defaultExpression": "{}",   "required": false },
+    { "name": "items",         "javaClass": "java.util.List",    "defaultExpression": null,   "required": false },
+    { "name": "currentItem",   "javaClass": "java.util.Map",     "defaultExpression": null,   "required": false },
+    { "name": "currentIndex",  "javaClass": "java.lang.Long",    "defaultExpression": "0",    "required": false },
+    { "name": "itemDetail",    "javaClass": "java.util.Map",     "defaultExpression": null,   "required": false },
+    { "name": "itemVerdict",   "javaClass": "java.util.Map",     "defaultExpression": null,   "required": false },
+    { "name": "verdicts",      "javaClass": "java.util.Map",     "defaultExpression": null,   "required": false },
+    { "name": "highValueOnly", "javaClass": "java.lang.Boolean", "defaultExpression": "true", "required": false }
+  ],
+  "activities": [
+    {
+      "id": "start",
+      "name": "Start",
+      "type": "route",
+      "pluginName": null,
+      "properties": {},
+      "inputSchema": {},
+      "outputSchema": {},
+      "deadlineExpression": null,
+      "isStart": true,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 0, "backoffMs": 0, "timeoutMs": null, "failFast": false, "continueOnError": false }
+    },
+    {
+      "id": "fetchList",
+      "name": "Fetch List",
+      "type": "tool",
+      "pluginName": "AgentToolPlugin",
+      "properties": { "toolName": "list_items_tool", "input": "#{#apiParams}" },
+      "inputSchema": {},
+      "outputSchema": { "type": "array", "items": { "type": "object" } },
+      "deadlineExpression": "PT30S",
+      "isStart": false,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "items", "javaClass": "java.util.List", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 2, "backoffMs": 500, "timeoutMs": 15000, "failFast": false, "continueOnError": false }
+    },
+    {
+      "id": "iterate",
+      "name": "For each item",
+      "type": "foreach",
+      "pluginName": null,
+      "properties": {
+        "collection": "#{#items}",
+        "itemVar": "currentItem",
+        "indexVar": "currentIndex",
+        "maxIterations": 1000
+      },
+      "inputSchema": {},
+      "outputSchema": {},
+      "deadlineExpression": null,
+      "isStart": false,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 0, "backoffMs": 0, "timeoutMs": null, "failFast": false, "continueOnError": false }
+    },
+    {
+      "id": "fetchDetail",
+      "name": "Fetch Item Detail",
+      "type": "tool",
+      "pluginName": "AgentToolPlugin",
+      "properties": { "toolName": "detail_by_id_tool", "input": "#{#currentItem.id}" },
+      "inputSchema": {},
+      "outputSchema": { "type": "object" },
+      "deadlineExpression": "PT15S",
+      "isStart": false,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "itemDetail", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 1, "backoffMs": 250, "timeoutMs": 10000, "failFast": false, "continueOnError": true }
+    },
+    {
+      "id": "classify",
+      "name": "Classify Item (AI)",
+      "type": "ai_reasoning",
+      "pluginName": null,
+      "properties": {
+        "system": "You are an item classifier. Reply with exactly LOW, MEDIUM, or HIGH \u2014 nothing else.",
+        "prompt": "#{ 'Item id: ' + #currentItem.id + '\\nDetail: ' + #itemDetail }",
+        "invokeWhen": "#highValueOnly == false || #itemDetail.price > 500",
+        "providerID": "openai",
+        "modelID":    "gpt-4o-mini"
+      },
+      "inputSchema": {},
+      "outputSchema": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text":         { "type": "string" },
+          "skipped":      { "type": "boolean" },
+          "finishReason": { "type": "string" }
+        }
+      },
+      "deadlineExpression": "PT20S",
+      "isStart": false,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "itemVerdict", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 1, "backoffMs": 500, "timeoutMs": 30000, "failFast": false, "continueOnError": true }
+    },
+    {
+      "id": "accumulate",
+      "name": "Accumulate Verdict",
+      "type": "tool",
+      "pluginName": "CodeExecPlugin",
+      "properties": {
+        "language": "java",
+        "code": "java.util.List<Object> acc = new java.util.ArrayList<>();\nif (input.get(\"acc\") instanceof java.util.List<?> existing) {\n    for (Object o : existing) acc.add(o);\n}\njava.util.Map<String, Object> verdict = input.get(\"verdict\") instanceof java.util.Map<?, ?> v\n        ? (java.util.Map<String, Object>) v\n        : new java.util.LinkedHashMap<>();\nif (!Boolean.TRUE.equals(verdict.get(\"skipped\"))) {\n    java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();\n    entry.put(\"itemId\", input.get(\"itemId\"));\n    entry.put(\"verdict\", verdict.get(\"text\"));\n    acc.add(entry);\n}\nreturn acc;",
+        "input": "#{ {'acc': #verdicts?.output, 'verdict': #itemVerdict, 'itemId': #currentItem.id} }",
+        "timeoutMs": 5000,
+        "memoryLimitMb": 64
+      },
+      "inputSchema": {},
+      "outputSchema": {},
+      "deadlineExpression": "PT10S",
+      "isStart": false,
+      "isEnd": false,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "verdicts", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 1, "backoffMs": 200, "timeoutMs": 5000, "failFast": false, "continueOnError": false }
+    },
+    {
+      "id": "end",
+      "name": "End",
+      "type": "route",
+      "pluginName": null,
+      "properties": {},
+      "inputSchema": {},
+      "outputSchema": {},
+      "deadlineExpression": null,
+      "isStart": false,
+      "isEnd": true,
+      "subflowDefId": null,
+      "subflowInputs": {},
+      "subflowOutputs": {},
+      "outputVariables": [],
+      "andJoin": false,
+      "errorPolicy": { "retryCount": 0, "backoffMs": 0, "timeoutMs": null, "failFast": false, "continueOnError": false }
+    }
+  ],
+  "transitions": [
+    { "id": "t-start-fetchList",   "fromActivityId": "start",       "toActivityId": "fetchList",   "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false },
+    { "id": "t-fetchList-iterate", "fromActivityId": "fetchList",   "toActivityId": "iterate",     "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false },
+    { "id": "t-fetchList-err-end", "fromActivityId": "fetchList",   "toActivityId": "end",         "condition": null, "isErrorEdge": true,  "matchesErrorClass": null, "trigger": "ON_ERROR",    "priority": 1,    "isDefault": false },
+    { "id": "t-iterate-body",      "fromActivityId": "iterate",     "toActivityId": "fetchDetail", "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false },
+    { "id": "t-iterate-end",       "fromActivityId": "iterate",     "toActivityId": "end",         "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_NO_MATCH", "priority": 100,  "isDefault": true },
+    { "id": "t-fetchDetail-clf",   "fromActivityId": "fetchDetail", "toActivityId": "classify",    "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false },
+    { "id": "t-classify-acc",      "fromActivityId": "classify",    "toActivityId": "accumulate",  "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false },
+    { "id": "t-accumulate-loop",   "fromActivityId": "accumulate",  "toActivityId": "iterate",     "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS",  "priority": null, "isDefault": false }
+  ]
+}

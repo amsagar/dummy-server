@@ -32,9 +32,7 @@ public class AgentSessionManager {
 
         AgentSession session = sessions.get(sessionId);
         if (session != null) {
-            if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
-                throw new IllegalArgumentException("Session does not belong to current user");
-            }
+            ensureSessionRow(sessionId, userId);
             session.touch();
             return session;
         }
@@ -46,9 +44,12 @@ public class AgentSessionManager {
             return session;
         }
 
+        // Either the row does not exist at all, or it exists for a different
+        // user. ensureSessionRow throws on the latter and self-heals the
+        // former by writing an idempotent INSERT.
         session = new AgentSession(sessionId);
         sessions.put(sessionId, session);
-        persistNewSession(session, userId, null);
+        ensureSessionRow(sessionId, userId);
         log.info("[SessionManager] Created session with provided ID: {}", sessionId);
         return session;
     }
@@ -60,6 +61,37 @@ public class AgentSessionManager {
         persistNewSession(session, userId, null);
         log.info("[SessionManager] New session: {}", id);
         return session;
+    }
+
+    /**
+     * Guarantees that {@code chat_sessions} has a row owned by {@code userId}
+     * for the given {@code sessionId}. Used both at session creation and as a
+     * self-healing checkpoint when an in-memory session outlives its DB row
+     * (dev DB resets, manual cleanups, container restarts on a shared DB).
+     *
+     * @throws IllegalArgumentException when a chat_sessions row already exists
+     *         for a different user — never reassign ownership silently.
+     * @throws RuntimeException when persistence itself failed and the row is
+     *         still missing afterwards.
+     */
+    void ensureSessionRow(String sessionId, String userId) {
+        if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isPresent()) {
+            return;
+        }
+        if (sessionRepository.findById(sessionId)
+                .filter(existing -> existing.getUserId() != null
+                        && !existing.getUserId().equals(userId))
+                .isPresent()) {
+            throw new IllegalArgumentException("Session does not belong to current user");
+        }
+        log.warn("[SessionManager] chat_sessions row missing for {} (user={}); reseeding",
+                sessionId, userId);
+        AgentSession proxy = new AgentSession(sessionId);
+        persistNewSession(proxy, userId, null);
+        if (sessionRepository.findById(sessionId).isEmpty()) {
+            throw new IllegalStateException(
+                    "chat_sessions row could not be created for session " + sessionId);
+        }
     }
 
     public AgentSession get(String sessionId) {
@@ -81,8 +113,10 @@ public class AgentSessionManager {
     }
 
     private void persistNewSession(AgentSession session, String userId, String timezone) {
+        long now = System.currentTimeMillis();
         try {
-            long now = System.currentTimeMillis();
+            // CHAT_SESSION.INSERT uses ON CONFLICT DO NOTHING so concurrent
+            // first-message races and self-heal calls are safe to retry.
             sessionRepository.save(ChatSession.builder()
                     .sessionId(session.getSessionId())
                     .userId(userId)
@@ -90,8 +124,15 @@ public class AgentSessionManager {
                     .lastActive(now)
                     .timezone(timezone)
                     .build());
-        } catch (Exception e) {
-            log.error("[SessionManager] Failed to persist session {}: {}", session.getSessionId(), e.getMessage());
+        } catch (RuntimeException e) {
+            // Don't silently drop the failure — every downstream FK insert
+            // (chat_messages, runtime_events, runtime_traces, …) will start
+            // failing if the row is missing. Surface the error clearly so the
+            // caller sees it and the user gets a real message instead of a
+            // confusing FK violation 30 seconds later.
+            log.error("[SessionManager] Failed to persist session {}: {}",
+                    session.getSessionId(), e.getMessage(), e);
+            throw e;
         }
     }
 }

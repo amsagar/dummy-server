@@ -1,0 +1,45 @@
+{
+  "id": null,
+  "name": "MCP Tool Call",
+  "version": "1",
+  "packageId": null,
+  "description": "Invoke a tool exposed by a registered MCP server. Replace serverId and toolName.",
+  "variables": [
+    { "name": "payloadJson", "javaClass": "java.lang.String", "defaultExpression": "{}", "required": true }
+  ],
+  "activities": [
+    {
+      "id": "start", "name": "Start", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": true, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    },
+    {
+      "id": "callMcp", "name": "Call MCP Tool", "type": "tool", "pluginName": "McpToolPlugin",
+      "properties": {
+        "serverId": "your-mcp-server-id",
+        "toolName": "your_mcp_tool",
+        "payload":  "#{#payloadJson}"
+      },
+      "deadlineExpression": "PT45S",
+      "isStart": false, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "mcpResponse", "javaClass": "java.lang.String", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false
+    },
+    {
+      "id": "end", "name": "End", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": false, "isEnd": true,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    }
+  ],
+  "transitions": [
+    { "id": "t1", "fromActivityId": "start",   "toActivityId": "callMcp", "condition": null, "isErrorEdge": false, "matchesErrorClass": null },
+    { "id": "t2", "fromActivityId": "callMcp", "toActivityId": "end",     "condition": null, "isErrorEdge": false, "matchesErrorClass": null }
+  ]
+}

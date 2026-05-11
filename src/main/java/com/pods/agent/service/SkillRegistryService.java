@@ -92,7 +92,17 @@ public class SkillRegistryService {
             }
 
             // ── 2. Directory-based skills: default-skills/{skill-name}/**  ────
-            Resource[] allDeep = resolver.getResources("classpath:default-skills/**/*.md");
+            // Pull in any text companion (markdown, JSON templates, JSON catalogs) so the
+            // full skill bundle is visible to consumers, not just SKILL.md.
+            List<Resource> allDeep = new ArrayList<>();
+            for (String pattern : List.of(
+                    "classpath:default-skills/**/*.md",
+                    "classpath:default-skills/**/*.json",
+                    "classpath:default-skills/**/*.txt",
+                    "classpath:default-skills/**/*.yaml",
+                    "classpath:default-skills/**/*.yml")) {
+                for (Resource r : resolver.getResources(pattern)) allDeep.add(r);
+            }
             // Group by the first path segment after "default-skills/"
             Map<String, Map<String, String>> byDir = new java.util.LinkedHashMap<>();
             for (Resource resource : allDeep) {

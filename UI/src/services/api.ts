@@ -78,8 +78,6 @@ export const api = {
   },
   getChatStreamUrl: () => `${BASE_URL}/chat`,
   chat: {
-    pendingSystemToolchainApprovals: () =>
-      fetch(`${BASE_URL}/chat/pending/system-toolchains`, { headers: getHeaders() }).then(handleResponse),
     approveInteraction: (requestId: string, message?: string) =>
       fetch(`${BASE_URL}/chat/approve`, {
         method: 'POST',
@@ -138,98 +136,6 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     }).then(handleResponse),
-  },
-  toolchains: {
-    list: (origin?: "user" | "system_suggested") => {
-      const query = origin ? `?origin=${encodeURIComponent(origin)}` : "";
-      return fetch(`${BASE_URL}/toolchains${query}`, { headers: getHeaders() }).then(handleResponse);
-    },
-    create: (payload: any) => fetch(`${BASE_URL}/toolchains`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    templates: () => fetch(`${BASE_URL}/toolchains/templates`, { headers: getHeaders() }).then(handleResponse),
-    createFromTemplate: (payload: { templateId: string; name?: string; description?: string }) =>
-      fetch(`${BASE_URL}/toolchains/from-template`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    update: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    remove: (id: string) => fetch(`${BASE_URL}/toolchains/${id}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
-    approve: (id: string, payload?: any) => fetch(`${BASE_URL}/toolchains/${id}/approve`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    reject: (id: string, payload?: any) => fetch(`${BASE_URL}/toolchains/${id}/reject`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    versions: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/versions`, { headers: getHeaders() }).then(handleResponse),
-    createVersion: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/versions`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    publishVersion: (id: string, version: number) => fetch(`${BASE_URL}/toolchains/${id}/versions/${version}/publish`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
-    generateDraft: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/generate-draft`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    execute: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/execute`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    runs: (id: string, limit = 50, offset = 0) => fetch(`${BASE_URL}/toolchains/${id}/runs?limit=${limit}&offset=${offset}`, { headers: getHeaders() }).then(handleResponse),
-    run: (runId: string) => fetch(`${BASE_URL}/runs/${runId}`, { headers: getHeaders() }).then(handleResponse),
-    runEvents: (runId: string) => fetch(`${BASE_URL}/runs/${runId}/events`, { headers: getHeaders() }).then(handleResponse),
-    runStatus: (runId: string) => fetch(`${BASE_URL}/runs/${runId}/status`, { headers: getHeaders() }).then(handleResponse),
-    rerun: (runId: string) => fetch(`${BASE_URL}/runs/${runId}/rerun`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
-    approvals: () => fetch(`${BASE_URL}/toolchains/approvals`, { headers: getHeaders() }).then(handleResponse),
-    runApprovals: (runId: string) => fetch(`${BASE_URL}/runs/${runId}/approvals`, { headers: getHeaders() }).then(handleResponse),
-    approveStep: (runId: string, nodeId: string, payload?: any) => fetch(`${BASE_URL}/runs/${runId}/steps/${encodeURIComponent(nodeId)}/approve`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    rejectStep: (runId: string, nodeId: string, payload?: any) => fetch(`${BASE_URL}/runs/${runId}/steps/${encodeURIComponent(nodeId)}/reject`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    pendingSystemProposals: () => fetch(`${BASE_URL}/toolchains/system-proposals`, { headers: getHeaders() }).then(handleResponse),
-    approveSystemProposal: (proposalId: string, payload?: any) =>
-      fetch(`${BASE_URL}/toolchains/system-proposals/${encodeURIComponent(proposalId)}/approve`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify(payload || {}),
-      }).then(handleResponse),
-    rejectSystemProposal: (proposalId: string, payload?: any) =>
-      fetch(`${BASE_URL}/toolchains/system-proposals/${encodeURIComponent(proposalId)}/reject`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify(payload || {}),
-      }).then(handleResponse),
-    analytics: () => fetch(`${BASE_URL}/toolchains/analytics`, { headers: getHeaders() }).then(handleResponse),
-    configSessions: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions`, { headers: getHeaders() }).then(handleResponse),
-    configSessionsGlobal: () => fetch(`${BASE_URL}/toolchains/config-sessions`, { headers: getHeaders() }).then(handleResponse),
-    configSessionDetail: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { headers: getHeaders() }).then(handleResponse),
-    configChat: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-chat`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    configChatStreamUrl: (id: string) => `${BASE_URL}/toolchains/${id}/config-chat/stream`,
-    cancelConfigStream: (id: string, sessionId: string) =>
-      fetch(`${BASE_URL}/toolchains/${id}/config-chat/stream/${sessionId}/stop`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
-    configSessionReply: (id: string, sessionId: string, payload: any) =>
-      fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/reply`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    configChatGlobal: (payload: any) => fetch(`${BASE_URL}/toolchains/config-chat`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    configChatGlobalStreamUrl: () => `${BASE_URL}/toolchains/config-chat/stream`,
-    configSessionReplyGlobal: (sessionId: string, payload: any) =>
-      fetch(`${BASE_URL}/toolchains/config-sessions/${sessionId}/reply`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(payload || {}) }).then(handleResponse),
-    truncateConfigSession: (id: string, sessionId: string, messageId: string) =>
-      fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/truncate`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ messageId }),
-      }).then(handleResponse),
-    compileSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/compile`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
-    publishSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/publish`, { method: 'POST', headers: getHeaders() }).then(handleResponse),
-    updateConfigSession: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    configSessionLayout: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { headers: getHeaders() }).then(handleResponse),
-    saveConfigSessionLayout: (id: string, sessionId: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    userLayout: (id: string) => fetch(`${BASE_URL}/toolchains/${id}/layout`, { headers: getHeaders() }).then(handleResponse),
-    saveUserLayout: (id: string, payload: any) => fetch(`${BASE_URL}/toolchains/${id}/layout`, { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(payload) }).then(handleResponse),
-    deleteConfigSession: (id: string, sessionId: string) => fetch(`${BASE_URL}/toolchains/${id}/config-sessions/${sessionId}`, { method: 'DELETE', headers: getHeaders() }).then(handleResponse),
-    testMapping: (id: string, expr: any) =>
-      fetch(`${BASE_URL}/toolchains/${id}/mappings/test`, { method: 'POST', headers: getHeaders(), body: JSON.stringify({ expr }) }).then(handleResponse),
-    updateMapping: (id: string, nodeId: string, argName: string, mapping: any) =>
-      fetch(`${BASE_URL}/toolchains/${id}/mappings/${encodeURIComponent(nodeId)}/${encodeURIComponent(argName)}`,
-        { method: 'PATCH', headers: getHeaders(), body: JSON.stringify(mapping) }).then(handleResponse),
-    validateExpression: (expression: string) =>
-      fetch(`${BASE_URL}/toolchains/expressions/validate`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ expression }),
-      }).then(handleResponse),
-    previewCode: (payload: {
-      language: string;
-      code: string;
-      input?: Record<string, any>;
-      timeoutMs?: number;
-      memoryLimitMb?: number;
-    }) =>
-      fetch(`${BASE_URL}/toolchains/code/preview`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify(payload),
-      }).then(handleResponse),
   },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),

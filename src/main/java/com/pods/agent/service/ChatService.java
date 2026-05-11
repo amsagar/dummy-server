@@ -19,6 +19,7 @@ import com.pods.agent.repository.HitlInteractionRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.RuntimeTraceRepository;
 import com.pods.agent.repository.SessionContextStateRepository;
+import com.pods.agent.service.workspace.ExecutionLogService;
 import com.pods.agent.service.workspace.SessionWorkspaceService;
 import com.pods.agent.service.workspace.WorkspaceContextHolder;
 import com.pods.agent.service.workspace.WorkspaceSkillSyncService;
@@ -78,6 +79,8 @@ public class ChatService {
     private final SessionWorkspaceService sessionWorkspaceService;
     private final WorkspaceSkillSyncService workspaceSkillSyncService;
     private final SystemToolChainAsyncService systemToolChainAsyncService;
+    private final WorkflowProposalAsyncService workflowProposalAsyncService;
+    private final ExecutionLogService executionLogService;
     private final ObjectMapper objectMapper;
 
     public ChatService(AgentSessionManager sessionManager,
@@ -96,6 +99,8 @@ public class ChatService {
                        SessionWorkspaceService sessionWorkspaceService,
                        WorkspaceSkillSyncService workspaceSkillSyncService,
                        SystemToolChainAsyncService systemToolChainAsyncService,
+                       WorkflowProposalAsyncService workflowProposalAsyncService,
+                       ExecutionLogService executionLogService,
                        ObjectMapper objectMapper) {
         this.sessionManager = sessionManager;
         this.agentRuntimeService = agentRuntimeService;
@@ -113,6 +118,8 @@ public class ChatService {
         this.sessionWorkspaceService = sessionWorkspaceService;
         this.workspaceSkillSyncService = workspaceSkillSyncService;
         this.systemToolChainAsyncService = systemToolChainAsyncService;
+        this.workflowProposalAsyncService = workflowProposalAsyncService;
+        this.executionLogService = executionLogService;
         this.objectMapper = objectMapper;
     }
 
@@ -220,18 +227,34 @@ public class ChatService {
                 sender.sendCostUpdated(sessionId, costUsageRepository.summarizeBySession(sessionId));
 
                 sender.sendDone(sessionId, response);
+                // Legacy ToolChain async generation intentionally disabled after workflow-only cutover.
+                Path turnFilePath = null;
                 try {
-                    systemToolChainAsyncService.enqueue(new SystemToolChainAsyncService.Job(
+                    turnFilePath = executionLogService.finalizeTurnLog(
+                            sessionId,
+                            turnId,
+                            userId,
+                            request.getMessage(),
+                            response,
+                            state.getModel(),
+                            turnStart,
+                            System.currentTimeMillis()).orElse(null);
+                } catch (Exception e) {
+                    log.warn("[ChatService] Failed to write execution log for turn={}: {}",
+                            turnId, e.getMessage());
+                }
+                try {
+                    workflowProposalAsyncService.enqueue(new WorkflowProposalAsyncService.Job(
                             sessionId,
                             turnId,
                             request.getMessage(),
                             response,
                             userId,
                             state.getModel(),
-                            workspace
+                            turnFilePath
                     ));
                 } catch (Exception e) {
-                    log.warn("[ChatService] Failed to enqueue async system toolchain job for turn={}: {}",
+                    log.warn("[ChatService] Failed to enqueue workflow proposal job for turn={}: {}",
                             turnId, e.getMessage());
                 }
                 sender.complete();

@@ -1,0 +1,46 @@
+{
+  "plugins": [
+    {
+      "name": "AgentToolPlugin",
+      "required": ["toolName"],
+      "optional": ["input"],
+      "returns": "any (JSON object/array bodies are parsed; non-JSON bodies returned as string)",
+      "summary": "Invoke a registered agent tool by name."
+    },
+    {
+      "name": "SkillToolPlugin",
+      "required": ["name"],
+      "optional": [],
+      "returns": { "name": "string", "description": "string", "skillContent": "string", "files": "object" },
+      "summary": "Load a skill bundle by name."
+    },
+    {
+      "name": "HttpRequestPlugin",
+      "required": ["url"],
+      "optional": ["method", "headers", "body", "timeoutMs"],
+      "returns": { "status": "int", "headers": "map", "body": "string" },
+      "summary": "Perform an HTTP request. Non-2xx responses are returned, not thrown."
+    },
+    {
+      "name": "McpToolPlugin",
+      "required": ["serverId", "toolName"],
+      "optional": ["payload"],
+      "returns": "string",
+      "summary": "Call a tool exposed by a registered MCP server."
+    },
+    {
+      "name": "CodeExecPlugin",
+      "required": ["language", "code"],
+      "optional": ["input", "timeoutMs", "memoryLimitMb"],
+      "returns": { "success": "boolean", "output": "any", "stdout": "string", "stderr": "string" },
+      "summary": "Run sandboxed code. Always set language=\"java\" — other languages are temporarily disabled."
+    },
+    {
+      "name": "AiChatPlugin",
+      "required": ["provider", "model", "prompt"],
+      "optional": ["system"],
+      "returns": "string",
+      "summary": "Call an LLM via ModelProviderRouter and return the assistant text."
+    }
+  ]
+}

@@ -299,6 +299,30 @@ CREATE TABLE IF NOT EXISTS agent.hitl_interactions (
     resolved_at   BIGINT
     );
 
+CREATE TABLE IF NOT EXISTS agent.workflow_proposals (
+                                                        id                       TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    session_id               TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
+    turn_id                  TEXT NOT NULL,
+    user_id                  TEXT NOT NULL,
+    status                   TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'materialized', 'failed')),
+    reason                   TEXT,
+    confidence               DOUBLE PRECISION,
+    intent_signature         TEXT NOT NULL,
+    trace_ref                TEXT,
+    user_prompt              TEXT,
+    model_provider_id        TEXT,
+    model_id                 TEXT,
+    proposed_workflow_json   JSONB NOT NULL,
+    matched_tool_names_json  JSONB,
+    decision_comment         TEXT,
+    decided_by               TEXT,
+    decided_at               BIGINT,
+    materialized_def_id      TEXT,
+    error_message            TEXT,
+    created_at               BIGINT NOT NULL,
+    updated_at               BIGINT NOT NULL
+    );
+
 CREATE TABLE IF NOT EXISTS agent.hook_mappings (
                                                    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     hook_point   TEXT NOT NULL,
@@ -355,36 +379,10 @@ CREATE INDEX IF NOT EXISTS idx_runtime_events_session_id ON agent.runtime_events
 CREATE INDEX IF NOT EXISTS idx_runtime_events_turn_id ON agent.runtime_events (turn_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cost_usage_session_id ON agent.cost_usage (session_id);
 CREATE INDEX IF NOT EXISTS idx_hitl_interactions_session_id ON agent.hitl_interactions (session_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_proposals_user_status ON agent.workflow_proposals (user_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_proposals_intent ON agent.workflow_proposals (user_id, intent_signature, status);
 CREATE INDEX IF NOT EXISTS idx_hook_mappings_hook_point ON agent.hook_mappings (hook_point);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_id ON agent.runtime_traces (session_id);
-
-CREATE TABLE IF NOT EXISTS agent.system_toolchain_proposals (
-                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    session_id        TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
-    turn_id           TEXT NOT NULL,
-    user_id           TEXT,
-    status            TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'materialized', 'failed')),
-    reason            TEXT,
-    confidence        TEXT,
-    trace_path        TEXT,
-    durable_trace_json JSONB,
-    user_prompt       TEXT,
-    assistant_response TEXT,
-    model_provider_id TEXT,
-    model_id          TEXT,
-    decision_comment  TEXT,
-    decided_by        TEXT,
-    decided_at        BIGINT,
-    tool_chain_id     TEXT REFERENCES agent.tool_chains (id) ON DELETE SET NULL,
-    error_message     TEXT,
-    created_at        BIGINT NOT NULL,
-    updated_at        BIGINT NOT NULL,
-    UNIQUE (session_id, turn_id)
-    );
-ALTER TABLE agent.system_toolchain_proposals ADD COLUMN IF NOT EXISTS durable_trace_json JSONB;
-
-CREATE INDEX IF NOT EXISTS idx_system_toolchain_proposals_user_status
-    ON agent.system_toolchain_proposals (user_id, status, created_at DESC);
 
 -- ── Embedding model registrations + tool vector index ─────────────────────────
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS model_kind TEXT NOT NULL DEFAULT 'chat';
@@ -406,181 +404,6 @@ CREATE TABLE IF NOT EXISTS agent.agent_tool_embeddings (
     );
 CREATE INDEX IF NOT EXISTS idx_tool_embeddings_model
     ON agent.agent_tool_embeddings (model_provider, model_id);
-
-CREATE TABLE IF NOT EXISTS agent.tool_chains (
-                                                 id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    name            TEXT NOT NULL UNIQUE,
-    description     TEXT,
-    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
-    status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'disabled')),
-    current_version INTEGER,
-    origin          TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'system_suggested')),
-    approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending', 'approved', 'rejected')),
-    approved_by     TEXT,
-    approved_at     BIGINT,
-    intent_signature TEXT,
-    structure_signature TEXT,
-    metadata_json   TEXT,
-    created_by      TEXT,
-    created_at      BIGINT NOT NULL,
-    updated_at      BIGINT NOT NULL
-    );
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'user';
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved';
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approved_by TEXT;
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS approved_at BIGINT;
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS intent_signature TEXT;
-ALTER TABLE agent.tool_chains ADD COLUMN IF NOT EXISTS structure_signature TEXT;
-UPDATE agent.tool_chains SET origin = 'user' WHERE origin IS NULL;
-UPDATE agent.tool_chains SET approval_status = 'approved' WHERE approval_status IS NULL;
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_versions (
-                                                         id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_chain_id      TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
-    version            INTEGER NOT NULL,
-    graph_json         TEXT NOT NULL,
-    input_schema       TEXT,
-    output_schema      TEXT,
-    response_mode      TEXT NOT NULL DEFAULT 'hybrid',
-    synthesis_prompt   TEXT,
-    intents_json       TEXT,
-    intent_signature   TEXT,
-    structure_signature TEXT,
-    rag_config_json    TEXT,
-    variables_json     TEXT,
-    is_published       BOOLEAN NOT NULL DEFAULT FALSE,
-    created_by         TEXT,
-    created_at         BIGINT NOT NULL,
-    UNIQUE (tool_chain_id, version)
-    );
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intents_json TEXT;
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intent_signature TEXT;
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS structure_signature TEXT;
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS rag_config_json TEXT;
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS variables_json TEXT;
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_runs (
-                                                     id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
-    tool_chain_version_id TEXT NOT NULL REFERENCES agent.tool_chain_versions (id) ON DELETE CASCADE,
-    version          INTEGER NOT NULL,
-    trigger_source   TEXT NOT NULL CHECK (trigger_source IN ('chat', 'api', 'manual', 'rerun')),
-    initiated_by     TEXT,
-    status           TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_approval', 'success', 'failed', 'rejected', 'cancelled')),
-    started_at       BIGINT NOT NULL,
-    ended_at         BIGINT,
-    duration_ms      BIGINT,
-    input_snapshot   TEXT,
-    output_snapshot  TEXT,
-    error_message    TEXT
-    );
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_run_steps (
-                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    run_id           TEXT NOT NULL REFERENCES agent.tool_chain_runs (id) ON DELETE CASCADE,
-    node_id          TEXT NOT NULL,
-    node_type        TEXT NOT NULL,
-    tool_ref         TEXT,
-    branch_path      TEXT,
-    status           TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_approval', 'success', 'failed', 'skipped', 'rejected')),
-    retry_count      INTEGER NOT NULL DEFAULT 0,
-    input_payload    TEXT,
-    output_payload   TEXT,
-    error_message    TEXT,
-    started_at       BIGINT NOT NULL,
-    ended_at         BIGINT
-    );
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_approvals (
-                                                          id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    run_id           TEXT NOT NULL REFERENCES agent.tool_chain_runs (id) ON DELETE CASCADE,
-    step_id          TEXT NOT NULL REFERENCES agent.tool_chain_run_steps (id) ON DELETE CASCADE,
-    node_id          TEXT NOT NULL,
-    request_id       TEXT NOT NULL UNIQUE,
-    approval_group   TEXT,
-    prompt           TEXT NOT NULL,
-    status           TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'timeout')),
-    decision_by      TEXT,
-    decision_comment TEXT,
-    created_at       BIGINT NOT NULL,
-    decided_at       BIGINT
-    );
-
-CREATE INDEX IF NOT EXISTS idx_tool_chain_versions_chain ON agent.tool_chain_versions (tool_chain_id, version DESC);
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS intent_signature TEXT;
-ALTER TABLE agent.tool_chain_versions ADD COLUMN IF NOT EXISTS structure_signature TEXT;
-CREATE INDEX IF NOT EXISTS idx_tool_chain_versions_signatures ON agent.tool_chain_versions (intent_signature, structure_signature);
-CREATE INDEX IF NOT EXISTS idx_tool_chains_origin_approval ON agent.tool_chains (origin, approval_status, updated_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_chain_system_signatures
-    ON agent.tool_chains (intent_signature, structure_signature)
-    WHERE origin = 'system_suggested' AND intent_signature IS NOT NULL AND structure_signature IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_tool_chain_runs_chain ON agent.tool_chain_runs (tool_chain_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tool_chain_runs_status ON agent.tool_chain_runs (status, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tool_chain_steps_run ON agent.tool_chain_run_steps (run_id, started_at ASC);
-CREATE INDEX IF NOT EXISTS idx_tool_chain_approvals_pending ON agent.tool_chain_approvals (status, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_config_sessions (
-                                                                id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_chain_id       TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
-    title               TEXT,
-    status              TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'clarification_required', 'ready_to_compile', 'compiled')),
-    latest_artifact_json TEXT,
-    pending_question_json TEXT,
-    created_by          TEXT,
-    created_at          BIGINT NOT NULL,
-    updated_at          BIGINT NOT NULL,
-    archived_at         BIGINT
-    );
-ALTER TABLE agent.tool_chain_config_sessions ADD COLUMN IF NOT EXISTS archived_at BIGINT;
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_config_messages (
-                                                                id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    session_id       TEXT NOT NULL REFERENCES agent.tool_chain_config_sessions (id) ON DELETE CASCADE,
-    role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-    content          TEXT NOT NULL,
-    metadata_json    TEXT,
-    created_at       BIGINT NOT NULL
-    );
--- Allow the timeline to also persist system events (tool calls, questions,
--- approvals) so reload restores the full conversation including HITL cards.
-ALTER TABLE agent.tool_chain_config_messages DROP CONSTRAINT IF EXISTS tool_chain_config_messages_role_check;
-ALTER TABLE agent.tool_chain_config_messages ADD CONSTRAINT tool_chain_config_messages_role_check CHECK (role IN ('user', 'assistant', 'system'));
-ALTER TABLE agent.tool_chain_config_messages ADD COLUMN IF NOT EXISTS event_type TEXT;
-ALTER TABLE agent.tool_chain_config_messages ADD COLUMN IF NOT EXISTS event_payload TEXT;
-ALTER TABLE agent.tool_chain_config_messages ADD COLUMN IF NOT EXISTS request_id TEXT;
-ALTER TABLE agent.tool_chain_config_messages ADD COLUMN IF NOT EXISTS hitl_status TEXT;
-ALTER TABLE agent.tool_chain_config_messages ADD COLUMN IF NOT EXISTS hitl_response TEXT;
-
-CREATE INDEX IF NOT EXISTS idx_tool_chain_config_sessions_chain ON agent.tool_chain_config_sessions (tool_chain_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tool_chain_config_messages_session ON agent.tool_chain_config_messages (session_id, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_tool_chain_config_messages_request ON agent.tool_chain_config_messages (request_id) WHERE request_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_config_layouts (
-                                                               id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
-    session_id       TEXT NOT NULL REFERENCES agent.tool_chain_config_sessions (id) ON DELETE CASCADE,
-    user_id          TEXT NOT NULL,
-    positions_json   TEXT,
-    viewport_json    TEXT,
-    created_at       BIGINT NOT NULL,
-    updated_at       BIGINT NOT NULL,
-    UNIQUE (tool_chain_id, session_id, user_id)
-    );
-
-CREATE INDEX IF NOT EXISTS idx_tool_chain_config_layouts_scope ON agent.tool_chain_config_layouts (tool_chain_id, session_id, user_id);
-
-CREATE TABLE IF NOT EXISTS agent.tool_chain_user_layouts (
-                                                             id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_chain_id    TEXT NOT NULL REFERENCES agent.tool_chains (id) ON DELETE CASCADE,
-    user_id          TEXT NOT NULL,
-    positions_json   TEXT,
-    viewport_json    TEXT,
-    created_at       BIGINT NOT NULL,
-    updated_at       BIGINT NOT NULL,
-    UNIQUE (tool_chain_id, user_id)
-    );
-
-CREATE INDEX IF NOT EXISTS idx_tool_chain_user_layouts_scope ON agent.tool_chain_user_layouts (tool_chain_id, user_id);
 
 CREATE TABLE IF NOT EXISTS agent.decision_tables (
                                                      id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

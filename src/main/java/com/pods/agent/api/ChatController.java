@@ -43,7 +43,7 @@ public class ChatController {
             "question", "approval_required",
             "reasoning",
             "task.started", "task.done",
-            "toolchain.run.bound"
+            "toolchain.run.bound", "workflow.run.bound"
     );
 
     private final ChatService chatService;

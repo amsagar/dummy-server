@@ -1,0 +1,57 @@
+{
+  "id": null,
+  "name": "HTTP Call With Error Recovery",
+  "version": "1",
+  "packageId": null,
+  "description": "Calls an HTTP endpoint; on tool failure routes through a recovery node before terminating.",
+  "variables": [
+    { "name": "endpoint", "javaClass": "java.lang.String", "defaultExpression": null, "required": true },
+    { "name": "resourceId", "javaClass": "java.lang.String", "defaultExpression": null, "required": true }
+  ],
+  "activities": [
+    {
+      "id": "start", "name": "Start", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": true, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    },
+    {
+      "id": "callApi", "name": "Call API", "type": "tool", "pluginName": "HttpRequestPlugin",
+      "properties": {
+        "method": "GET",
+        "url": "#{#endpoint + '/' + #resourceId}",
+        "timeoutMs": 15000
+      },
+      "deadlineExpression": "PT30S",
+      "isStart": false, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [
+        { "name": "apiResponse", "javaClass": "java.util.Map", "defaultExpression": null, "required": false }
+      ],
+      "andJoin": false
+    },
+    {
+      "id": "recover", "name": "Recover From Error", "type": "tool", "pluginName": "AgentToolPlugin",
+      "properties": { "toolName": "log_error", "input": "#{#resourceId}" },
+      "deadlineExpression": null,
+      "isStart": false, "isEnd": false,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    },
+    {
+      "id": "end", "name": "End", "type": "route", "pluginName": null,
+      "properties": {}, "deadlineExpression": null,
+      "isStart": false, "isEnd": true,
+      "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {},
+      "outputVariables": [], "andJoin": false
+    }
+  ],
+  "transitions": [
+    { "id": "t1", "fromActivityId": "start",   "toActivityId": "callApi", "condition": null,                 "isErrorEdge": false, "matchesErrorClass": null },
+    { "id": "t2", "fromActivityId": "callApi", "toActivityId": "end",     "condition": null,                 "isErrorEdge": false, "matchesErrorClass": null },
+    { "id": "t3", "fromActivityId": "callApi", "toActivityId": "recover", "condition": null,                 "isErrorEdge": true,  "matchesErrorClass": "TOOL" },
+    { "id": "t4", "fromActivityId": "callApi", "toActivityId": "recover", "condition": null,                 "isErrorEdge": true,  "matchesErrorClass": "TIMEOUT" },
+    { "id": "t5", "fromActivityId": "recover", "toActivityId": "end",     "condition": null,                 "isErrorEdge": false, "matchesErrorClass": null }
+  ]
+}

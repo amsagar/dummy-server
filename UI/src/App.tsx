@@ -23,6 +23,9 @@ import {
   FolderTree,
   Server,
   Workflow,
+  History,
+  BarChart3,
+  CheckCircle2,
   LogOut,
   UserCircle2,
   Table2,
@@ -39,13 +42,16 @@ import ToolDomainPage from "./pages/ToolDomainPage";
 import SkillsPage from "./pages/SkillsPage";
 import McpRegistryPage from "./pages/McpRegistryPage";
 import McpServerToolsPage from "./pages/McpServerToolsPage";
-import ToolChainsPage from "./pages/ToolChainsPage";
-import ToolChainDesignerPage from "./pages/ToolChainDesignerPage";
-import ToolChainRunsPage from "./pages/ToolChainRunsPage";
-import ToolChainRunDetailPage from "./pages/ToolChainRunDetailPage";
-import ToolChainApprovalsPage from "./pages/ToolChainApprovalsPage";
 import DecisionTablesPage from "./pages/DecisionTablesPage";
 import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
+import WorkflowsPage from "./pages/WorkflowsPage";
+import WorkflowDesignerPage from "./pages/WorkflowDesignerPage";
+import WorkflowRunsPage from "./pages/WorkflowRunsPage";
+import WorkflowRunDetailPage from "./pages/WorkflowRunDetailPage";
+import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
+import ExecutionsPage from "./pages/ExecutionsPage";
+import InsightsPage from "./pages/InsightsPage";
+import WorkflowVersionDiffPage from "./pages/WorkflowVersionDiffPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import { clearAuthToken, getAuthUser, isAuthenticated } from "./services/api";
@@ -65,7 +71,10 @@ function Sidebar() {
     { icon: Cpu, name: "Models", path: "/models" },
     { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
-    { icon: Workflow, name: "ToolChains", path: "/toolchains" },
+    { icon: Workflow, name: "Workflows", path: "/workflows" },
+    { icon: History, name: "Executions", path: "/executions" },
+    { icon: BarChart3, name: "Insights", path: "/insights" },
+    { icon: CheckCircle2, name: "Approvals", path: "/workflows/approvals" },
     { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
@@ -198,7 +207,9 @@ function Header() {
     "/embedding-models": "Embedding Models",
     "/tools": "Tools",
     "/tools/": "Tools",
-    "/toolchains": "ToolChains",
+    "/workflows": "Workflows",
+    "/executions": "Executions",
+    "/insights": "Insights",
     "/decision-tables": "Decision Tables",
     "/skills": "Skills",
     "/mcp-registry": "MCP Registry",
@@ -207,7 +218,7 @@ function Header() {
 
   const title =
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
-    (location.pathname.startsWith("/toolchains/") ? "ToolChains" : undefined) ||
+    (location.pathname.startsWith("/workflows/") ? "Workflows" : undefined) ||
     (location.pathname.startsWith("/decision-tables/") ? "Decision Tables" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
@@ -264,12 +275,15 @@ export default function App() {
                 <Route path="/embedding-models" element={<EmbeddingModelsPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/tools/:domainId" element={<ToolDomainPage />} />
-                <Route path="/toolchains" element={<ToolChainsPage />} />
-                <Route path="/toolchains/designer" element={<ToolChainDesignerPage />} />
-                <Route path="/toolchains/:id/designer" element={<ToolChainDesignerPage />} />
-                <Route path="/toolchains/:id/runs" element={<ToolChainRunsPage />} />
-                <Route path="/toolchains/runs/:runId" element={<ToolChainRunDetailPage />} />
-                <Route path="/toolchains/approvals" element={<ToolChainApprovalsPage />} />
+                <Route path="/workflows" element={<WorkflowsPage />} />
+                <Route path="/workflows/designer" element={<WorkflowDesignerPage />} />
+                <Route path="/workflows/:id/designer" element={<WorkflowDesignerPage />} />
+                <Route path="/workflows/:id/runs" element={<WorkflowRunsPage />} />
+                <Route path="/workflows/runs/:runId" element={<WorkflowRunDetailPage />} />
+                <Route path="/workflows/approvals" element={<WorkflowApprovalsPage />} />
+                <Route path="/executions" element={<ExecutionsPage />} />
+                <Route path="/insights" element={<InsightsPage />} />
+                <Route path="/workflows/:id/diff" element={<WorkflowVersionDiffPage />} />
                 <Route path="/decision-tables" element={<DecisionTablesPage />} />
                 <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
                 <Route path="/skills" element={<SkillsPage />} />

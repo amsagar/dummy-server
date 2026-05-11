@@ -8,6 +8,7 @@ import com.pods.agent.service.PendingInteractionService;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
+import com.pods.agent.service.workspace.ExecutionLogService;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallback;
 import tools.jackson.databind.ObjectMapper;
@@ -44,13 +45,14 @@ class AgentToolCallbackFactoryTest {
                 skillRegistryService,
                 properties,
                 new ObjectMapper(),
-                runtimeEventRepository
+                runtimeEventRepository,
+                mock(ExecutionLogService.class)
         );
 
         List<ToolCallback> callbacks = factory.buildForTurn("s1", "t1", null, List.of(toolB));
 
-        // Selected tool + native skill callback
-        assertEquals(2, callbacks.size());
+        // Selected tool + native skill callback + native architect_note callback
+        assertEquals(3, callbacks.size());
     }
 
     @Test
@@ -75,13 +77,14 @@ class AgentToolCallbackFactoryTest {
                 skillRegistryService,
                 properties,
                 new ObjectMapper(),
-                runtimeEventRepository
+                runtimeEventRepository,
+                mock(ExecutionLogService.class)
         );
 
         List<ToolCallback> callbacks = factory.buildForTurn("s1", "t1", null, List.of());
 
-        // 2 registry tools + native skill callback
-        assertEquals(3, callbacks.size());
+        // 2 registry tools + native skill callback + native architect_note callback
+        assertEquals(4, callbacks.size());
     }
 
     @Test
@@ -105,13 +108,16 @@ class AgentToolCallbackFactoryTest {
                 skillRegistryService,
                 properties,
                 new ObjectMapper(),
-                runtimeEventRepository
+                runtimeEventRepository,
+                mock(ExecutionLogService.class)
         );
 
         List<ToolCallback> callbacks = factory.buildForTurn("s1", "t1", null, List.of(skill));
 
-        assertEquals(1, callbacks.size());
-        assertTrue(callbacks.get(0) instanceof SkillToolCallback);
+        // Skill registry-tool is filtered, native skill callback + architect_note are added.
+        assertEquals(2, callbacks.size());
+        assertTrue(callbacks.stream().anyMatch(cb -> cb instanceof SkillToolCallback));
+        assertTrue(callbacks.stream().anyMatch(cb -> cb instanceof ArchitectNoteCallback));
     }
 
     @Test
@@ -141,15 +147,21 @@ class AgentToolCallbackFactoryTest {
                 skillRegistryService,
                 properties,
                 new ObjectMapper(),
-                runtimeEventRepository
+                runtimeEventRepository,
+                mock(ExecutionLogService.class)
         );
 
         List<ToolCallback> callbacks = factory.buildForTurn("s1", "t1", null, List.of(toolA));
 
-        assertEquals(2, callbacks.size());
-        long count = callbacks.stream()
+        // toolA + native skill callback + native architect_note callback
+        assertEquals(3, callbacks.size());
+        long skillCount = callbacks.stream()
                 .filter(cb -> "skill".equalsIgnoreCase(cb.getToolDefinition().name()))
                 .count();
-        assertEquals(1, count);
+        assertEquals(1, skillCount);
+        long noteCount = callbacks.stream()
+                .filter(cb -> "architect_note".equalsIgnoreCase(cb.getToolDefinition().name()))
+                .count();
+        assertEquals(1, noteCount);
     }
 }

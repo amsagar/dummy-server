@@ -24,6 +24,8 @@ public class ChatState {
     private String agentProfileId;
     private String toolChainId;
     private Integer toolChainVersion;
+    private String workflowDefId;
+    private boolean workflowSelectedByUser;
     /** True when the toolChainId was set via an explicit user confirmation
      *  (the "Use ToolChain X / Use normal AI loop" question). When true, the
      *  runtime fails loudly on chain execution errors instead of silently
@@ -41,7 +43,9 @@ public class ChatState {
                 .agentProfileId(this.agentProfileId)
                 .toolChainId(this.toolChainId)
                 .toolChainVersion(this.toolChainVersion)
+                .workflowDefId(this.workflowDefId)
                 .toolChainSelectedByUser(this.toolChainSelectedByUser)
+                .workflowSelectedByUser(this.workflowSelectedByUser)
                 .rollingSummary(this.rollingSummary)
                 .build();
     }

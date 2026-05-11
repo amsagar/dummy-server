@@ -10,6 +10,7 @@ import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
 import com.pods.agent.service.UserContextHolder;
+import com.pods.agent.service.workspace.ExecutionLogService;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
@@ -34,6 +35,7 @@ public class AgentToolCallbackFactory {
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
     private final SkillRegistryService skillRegistryService;
+    private final ExecutionLogService executionLogService;
 
     public AgentToolCallbackFactory(ToolRegistryService toolRegistryService,
                                     ToolExecutionService toolExecutionService,
@@ -42,7 +44,8 @@ public class AgentToolCallbackFactory {
                                     SkillRegistryService skillRegistryService,
                                     RuntimeTuningProperties runtimeTuningProperties,
                                     ObjectMapper objectMapper,
-                                    RuntimeEventRepository runtimeEventRepository) {
+                                    RuntimeEventRepository runtimeEventRepository,
+                                    ExecutionLogService executionLogService) {
         this.toolRegistryService = toolRegistryService;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -51,6 +54,7 @@ public class AgentToolCallbackFactory {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
+        this.executionLogService = executionLogService;
     }
 
     public List<ToolCallback> buildForTurn(String sessionId, String turnId, SseEventSender sender) {
@@ -114,6 +118,13 @@ public class AgentToolCallbackFactory {
                 objectMapper,
                 runtimeEventRepository,
                 skillExecutionGate
+        ));
+        callbacks.add(new ArchitectNoteCallback(
+                executionLogService,
+                sender,
+                sessionId,
+                turnId,
+                objectMapper
         ));
         return callbacks;
     }
