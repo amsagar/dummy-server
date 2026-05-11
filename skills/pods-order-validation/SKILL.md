@@ -14,6 +14,20 @@ required tool call must complete before you write your final answer.** Output
 that summarizes incomplete work is a bug — keep calling tools until the
 checklist in Step 6 is satisfied, then summarize.
 
+## Building this as a workflow?
+
+If you are the workflow builder (synthesizing a ProcessDefDto JSON, not
+running tools interactively), start from
+`templates/validate-order-workflow.json` in this skill. It encodes all
+seven steps with the correct activity types, foreach loops for Steps 4
+and 5, the ItemCode→ServiceCode mapping with Sequence sort in Step 3, and
+the Step 7 output schema. Edit field values to match the order under
+test — but **do not delete activities, do not change the foreach wiring,
+and do not collapse Step 5 into an enumeration of ContainerAvailability
+calls**. The structural validator and alignment judge both reject those.
+When `toCheck` is empty the foreach naturally produces zero invocations;
+that is the correct construct, not an omitted step.
+
 ## Required resources
 
 | Resource | Type | When to call |
@@ -186,6 +200,14 @@ For each line in `toCheck`, call `ContainerAvailability` with:
 Collect entries from `GeneralAvailabilityDates` where `IsAvailableCS === true`
 and `ReasonCode` is empty. On error, mark the line `status: "unavailable"`
 with the error detail.
+
+**Workflow form:** Step 5 is a `foreach` over `toCheck` with exactly one
+`ContainerAvailability` `AgentToolPlugin` activity in the body — never
+enumerate the calls as N separate activities, never omit the foreach when
+`toCheck` is empty (an empty-collection foreach is the correct construct,
+not a skipped step). See `templates/validate-order-workflow.json` for the
+exact JSON shape (`iterateContainerAvailability` foreach +
+`callContainerAvailability` body + `accumulateContainer` accumulator).
 
 ---
 

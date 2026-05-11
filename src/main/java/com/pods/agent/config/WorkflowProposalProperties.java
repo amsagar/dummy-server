@@ -12,6 +12,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       covers structural-fix and alignment-fix attempts together so a
  *       drafting agent that ping-pongs between fixing one and breaking the
  *       other still terminates.</li>
+ *   <li>{@code maxNoopRetries} — separate, smaller budget for retry
+ *       iterations rejected as no-ops (model replied without calling
+ *       edit/apply_patch, leaving the draft byte-identical). These do not
+ *       consume {@code maxBuildAttempts} so a hallucinating model can't
+ *       starve productive attempts; capped low to avoid infinite loops.</li>
  *   <li>{@code classifierModel} / {@code builderModel} — optional per-phase
  *       model overrides. When both fields are blank the phase falls back to
  *       the {@code modelRef} stored on the proposal (the model used by the
@@ -22,6 +27,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class WorkflowProposalProperties {
 
     private int maxBuildAttempts = 7;
+    private int maxNoopRetries = 3;
     private ModelOverride classifierModel = new ModelOverride();
     private ModelOverride builderModel = new ModelOverride();
     private ModelOverride alignmentModel = new ModelOverride();
@@ -32,6 +38,14 @@ public class WorkflowProposalProperties {
 
     public void setMaxBuildAttempts(int maxBuildAttempts) {
         this.maxBuildAttempts = maxBuildAttempts;
+    }
+
+    public int getMaxNoopRetries() {
+        return maxNoopRetries;
+    }
+
+    public void setMaxNoopRetries(int maxNoopRetries) {
+        this.maxNoopRetries = maxNoopRetries;
     }
 
     public ModelOverride getClassifierModel() {

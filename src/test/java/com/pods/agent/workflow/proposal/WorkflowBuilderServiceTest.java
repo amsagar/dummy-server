@@ -140,7 +140,7 @@ class WorkflowBuilderServiceTest {
 
         // Fake agent: write a valid draft on first invocation; never edit.
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             invocations.incrementAndGet();
             assertTrue(initial, "happy path should only need the initial attempt");
             Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
@@ -164,7 +164,7 @@ class WorkflowBuilderServiceTest {
         WorkflowProposal proposal = fx.persistedPending();
 
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             int n = invocations.incrementAndGet();
             if (n == 1) {
                 // Initial: write a structurally-broken draft.
@@ -197,7 +197,7 @@ class WorkflowBuilderServiceTest {
         WorkflowProposal proposal = fx.persistedPending();
 
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             invocations.incrementAndGet();
             // Always emit broken JSON so structural validation never passes.
             Files.writeString(draft, STRUCTURALLY_INVALID_DRAFT, StandardCharsets.UTF_8);
@@ -221,7 +221,7 @@ class WorkflowBuilderServiceTest {
         WorkflowProposal proposal = fx.persistedPending();
 
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             int n = invocations.incrementAndGet();
             if (n == 2) {
                 assertNotNull(feedback);
@@ -253,7 +253,7 @@ class WorkflowBuilderServiceTest {
         // discard the prior conversation).
         Set<ChatMemory> seenMemories = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             int n = invocations.incrementAndGet();
             assertNotNull(memory, "ChatMemory must be passed to the agent invoker");
             seenMemories.add(memory);
@@ -278,7 +278,7 @@ class WorkflowBuilderServiceTest {
         Fixture fx = new Fixture(workspace);
 
         Set<ChatMemory> seenMemories = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             seenMemories.add(memory);
             Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
         });
@@ -299,7 +299,7 @@ class WorkflowBuilderServiceTest {
 
         AtomicInteger invocations = new AtomicInteger();
         Set<String> sawEnumerationFeedback = new HashSet<>();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             int n = invocations.incrementAndGet();
             if (n == 1) {
                 // Initial: write the user's actual failing-run JSON shape — 20
@@ -334,7 +334,7 @@ class WorkflowBuilderServiceTest {
 
         AtomicInteger invocations = new AtomicInteger();
         java.util.List<String> seenFeedback = new java.util.ArrayList<>();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             int n = invocations.incrementAndGet();
             seenFeedback.add(feedback == null ? "" : feedback);
             if (n == 1) {
@@ -386,7 +386,7 @@ class WorkflowBuilderServiceTest {
         WorkflowProposal proposal = fx.persistedPending();
 
         AtomicInteger invocations = new AtomicInteger();
-        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory) -> {
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters) -> {
             invocations.incrementAndGet();
             assertTrue(initial, "this test exercises the initial attempt only");
             Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
@@ -407,11 +407,13 @@ class WorkflowBuilderServiceTest {
         // payload. The builder loop never sees the call succeed and the
         // SHA-256 no-op detector then catches the unchanged draft.
         String body = "{\"success\":false,\"error\":\"write_forbidden_on_retry\"}";
+        AtomicInteger rejected = new AtomicInteger();
         WorkflowBuilderService.RejectingToolCallback callback =
                 new WorkflowBuilderService.RejectingToolCallback(
                         "write",
                         "Forbidden on retry attempts.",
-                        body);
+                        body,
+                        rejected);
 
         assertEquals("write", callback.getToolDefinition().name());
         assertEquals("Forbidden on retry attempts.", callback.getToolDefinition().description());
@@ -422,6 +424,11 @@ class WorkflowBuilderServiceTest {
         assertEquals(body, callback.call("{\"path\":\"x.json\",\"content\":\"...\"}"));
         assertEquals(body, callback.call("{}", null));
         assertEquals(body, callback.call(null));
+        // Every call attempt — successful or not — should bump the
+        // rejection counter so the build loop can surface the count in
+        // the next attempt's audit block.
+        assertEquals(3, rejected.get(),
+                "rejection counter must record every attempted invocation, regardless of overload");
     }
 
     @Test

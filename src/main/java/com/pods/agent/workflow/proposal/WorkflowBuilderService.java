@@ -26,6 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
@@ -150,8 +151,9 @@ public class WorkflowBuilderService {
         skillAllowlist.addAll(skillNames);
 
         int maxAttempts = Math.max(1, properties.getMaxBuildAttempts());
-        log.debug("[WorkflowBuilder] proposal {} model={} maxAttempts={} skillAllowlist={}",
-                proposal.getId(), modelRef, maxAttempts, skillAllowlist);
+        int maxNoopRetries = Math.max(0, properties.getMaxNoopRetries());
+        log.debug("[WorkflowBuilder] proposal {} model={} maxAttempts={} maxNoopRetries={} skillAllowlist={}",
+                proposal.getId(), modelRef, maxAttempts, maxNoopRetries, skillAllowlist);
         String lastFailureSummary = null;
 
         // One ChatMemory per build run keeps the conversation history (system
@@ -165,21 +167,32 @@ public class WorkflowBuilderService {
                 .maxMessages(40)
                 .build();
 
-        // Attempt 0 = initial draft creation; later attempts edit in place.
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            int attemptNum = attempt + 1;
-            log.info("[WorkflowBuilder] proposal {} attempt {}/{} ({})",
-                    proposal.getId(), attemptNum, maxAttempts,
-                    attempt == 0 ? "initial draft" : "edit-in-place");
-            // SHA-256 of the draft before the agent runs. Used after the
-            // agent returns to detect the "no-op retry" failure mode where
-            // the model replies claiming edits but never actually called
-            // edit/apply_patch — the file on disk is byte-identical to the
-            // previous attempt, so re-running the same validation /
-            // alignment check would just burn an attempt and produce the
-            // same critique. Short-circuit instead. (write is not in this
-            // list because on retries it's deregistered — see runAgent.)
+        // Two separate counters. productiveAttempts is the budget we want to
+        // protect — only iterations that actually mutated the draft count.
+        // noopAttempts catches the failure mode where the model replies
+        // claiming edits but never calls edit/apply_patch (its own prior
+        // confident message in ChatMemory then keeps misleading subsequent
+        // attempts into the same pattern). Capping no-ops separately means a
+        // hallucinating model can't starve the productive budget, while still
+        // bounding the loop so a totally broken model terminates.
+        int productiveAttempts = 0;
+        int noopAttempts = 0;
+        while (productiveAttempts < maxAttempts && noopAttempts <= maxNoopRetries) {
+            boolean initialAttempt = productiveAttempts == 0;
+            int displayAttempt = productiveAttempts + noopAttempts + 1;
+            log.info("[WorkflowBuilder] proposal {} attempt {} (productive={}/{}, noop={}/{}) ({})",
+                    proposal.getId(), displayAttempt,
+                    productiveAttempts, maxAttempts,
+                    noopAttempts, maxNoopRetries,
+                    initialAttempt ? "initial draft" : "edit-in-place");
+            // SHA-256 of the draft before the agent runs. Defense-in-depth
+            // against a rare case where edits net out to byte-identical
+            // content — the primary no-op signal is now the per-attempt
+            // ToolCallCounters below, which is impossible for the model to
+            // fake (it counts successful tool invocations from inside the
+            // PathRestrictedFsCallback).
             String hashBefore = hashFileQuiet(draftFile);
+            ToolCallCounters counters = new ToolCallCounters();
             try {
                 String resumeFeedback = lastFailureSummary;
                 agentInvoker.invoke(
@@ -189,38 +202,60 @@ public class WorkflowBuilderService {
                         executionLogFile,
                         modelRef,
                         skillAllowlist,
-                        attempt == 0,
+                        initialAttempt,
                         resumeFeedback,
-                        chatMemory);
+                        chatMemory,
+                        counters);
             } catch (Exception e) {
                 log.warn("[WorkflowBuilder] proposal {} attempt {} agent invocation failed: {}",
-                        proposal.getId(), attemptNum, e.getMessage());
+                        proposal.getId(), displayAttempt, e.getMessage());
                 lastFailureSummary = "agent_invocation_failed: " + e.getMessage();
                 repo.incrementBuildAttempts(proposal.getId());
+                productiveAttempts++;
                 continue;
             }
             repo.incrementBuildAttempts(proposal.getId());
 
             String hashAfter = hashFileQuiet(draftFile);
-            if (attempt > 0 && hashBefore != null && hashBefore.equals(hashAfter)) {
+            boolean noMutatingCalls = counters.mutatingCalls() == 0;
+            boolean hashUnchanged = hashBefore != null && hashBefore.equals(hashAfter);
+            // Only treat the initial attempt as a no-op if BOTH signals fire
+            // (zero mutating tool calls AND file unchanged) — a brand-new
+            // draft file may have been hash-null before, hash-something
+            // after, which we don't want to misclassify.
+            boolean isNoop = !initialAttempt && (noMutatingCalls || hashUnchanged);
+            if (isNoop) {
                 // Retry that didn't touch the file. The agent claimed edits
-                // in its reply but never actually called a write tool —
+                // in its reply but never actually called a mutating tool —
                 // forwarding the prior validation/alignment feedback again
-                // is pointless because the file hasn't changed. Replace the
-                // feedback with an explicit "you didn't actually edit"
-                // message so the next attempt knows what went wrong.
-                lastFailureSummary = renderDraftUnchangedFeedback(lastFailureSummary);
+                // is pointless because the file hasn't changed. Wipe the
+                // poisoned conversation history (the model's own false
+                // success claims are now in there, and seeing them on the
+                // next attempt is what keeps producing the same no-op),
+                // then prepend a tool-call audit block so the next attempt
+                // sees verifiable counts instead of prose.
+                chatMemory.clear(proposal.getId());
+                lastFailureSummary = renderDraftUnchangedFeedback(lastFailureSummary, counters);
+                noopAttempts++;
                 log.warn("[WorkflowBuilder] proposal {} attempt {} produced NO file change"
-                                + " (agent replied without calling edit/apply_patch);"
-                                + " surfacing draft_unchanged feedback to attempt {}",
-                        proposal.getId(), attemptNum, attemptNum + 1);
+                                + " (edit={}, apply_patch={}, write={}, rejected_write={});"
+                                + " cleared ChatMemory; noop {}/{}",
+                        proposal.getId(), displayAttempt,
+                        counters.edit.get(), counters.applyPatch.get(),
+                        counters.write.get(), counters.rejectedWriteOnRetry.get(),
+                        noopAttempts, maxNoopRetries);
                 continue;
             }
+
+            // Past this point the attempt mutated the draft — count it
+            // against the productive budget regardless of whether
+            // structural / alignment validation passes.
+            productiveAttempts++;
 
             String draftJson = readDraftQuiet(draftFile);
             if (draftJson == null || draftJson.isBlank()) {
                 log.warn("[WorkflowBuilder] proposal {} attempt {} produced empty draft file {}",
-                        proposal.getId(), attemptNum, draftFile.getFileName());
+                        proposal.getId(), displayAttempt, draftFile.getFileName());
                 lastFailureSummary = "draft_file_empty:" + draftFile.getFileName();
                 continue;
             }
@@ -229,12 +264,12 @@ public class WorkflowBuilderService {
             if (!report.ok()) {
                 lastFailureSummary = renderStructuralFeedback(report.errors());
                 log.info("[WorkflowBuilder] proposal {} attempt {} structural validation FAILED ({} error(s)): {}",
-                        proposal.getId(), attemptNum, report.errors().size(),
+                        proposal.getId(), displayAttempt, report.errors().size(),
                         report.errors().stream().map(ValidationError::code).toList());
                 continue;
             }
             log.debug("[WorkflowBuilder] proposal {} attempt {} structural validation passed",
-                    proposal.getId(), attemptNum);
+                    proposal.getId(), displayAttempt);
 
             String executionLogContent = readExecutionLogQuiet(executionLogFile);
             Verdict verdict = alignmentJudge.judge(
@@ -246,20 +281,21 @@ public class WorkflowBuilderService {
             if (!verdict.aligned()) {
                 lastFailureSummary = renderAlignmentFeedback(verdict);
                 log.info("[WorkflowBuilder] proposal {} attempt {} alignment FAILED (severity={}): {}",
-                        proposal.getId(), attemptNum, verdict.severity(), verdict.critique());
+                        proposal.getId(), displayAttempt, verdict.severity(), verdict.critique());
                 continue;
             }
             log.info("[WorkflowBuilder] proposal {} attempt {} alignment passed (severity={}); finalizing",
-                    proposal.getId(), attemptNum, verdict.severity());
+                    proposal.getId(), displayAttempt, verdict.severity());
 
             WorkflowProposal finalized = finalizeSuccess(proposal, report.dto(), draftJson, workspace);
-            log.info("[WorkflowBuilder] build SUCCESS for proposal {} -> process_def {} after {} attempt(s) in {}ms",
+            log.info("[WorkflowBuilder] build SUCCESS for proposal {} -> process_def {} after {} productive + {} noop attempt(s) in {}ms",
                     finalized.getId(), finalized.getMaterializedDefId(),
-                    attemptNum, System.currentTimeMillis() - startedAt);
+                    productiveAttempts, noopAttempts, System.currentTimeMillis() - startedAt);
             return finalized;
         }
-        log.warn("[WorkflowBuilder] build EXHAUSTED for proposal {} after {} attempt(s) in {}ms; last failure: {}",
-                proposal.getId(), maxAttempts, System.currentTimeMillis() - startedAt, lastFailureSummary);
+        log.warn("[WorkflowBuilder] build EXHAUSTED for proposal {} after {} productive + {} noop attempt(s) in {}ms; last failure: {}",
+                proposal.getId(), productiveAttempts, noopAttempts,
+                System.currentTimeMillis() - startedAt, lastFailureSummary);
         return markFailed(proposal,
                 "build_loop_exhausted: " + (lastFailureSummary == null ? "unknown" : lastFailureSummary));
     }
@@ -311,7 +347,8 @@ public class WorkflowBuilderService {
                           Set<String> skillAllowlist,
                           boolean initialAttempt,
                           String resumeFeedback,
-                          ChatMemory chatMemory) throws Exception {
+                          ChatMemory chatMemory,
+                          ToolCallCounters counters) throws Exception {
         ModelProviderRouter.Spec spec = modelProviderRouter.resolve(modelRef, true);
         ChatClient client = spec.client();
 
@@ -371,7 +408,8 @@ public class WorkflowBuilderService {
                        "content":{"type":"string","description":"Full JSON document to write"}
                      }}
                     """.formatted(draftRelString),
-                    toolExecutionService, draftFile));
+                    toolExecutionService, draftFile,
+                    counters == null ? null : counters.write));
         } else {
             tools.add(new RejectingToolCallback("write",
                     "Forbidden on retry attempts. Use `edit` (surgical replace) or `apply_patch` (multi-hunk diff) instead — they preserve fields you've already set correctly. A full rewrite is rejected to prevent dropping required fields like trigger / maxIterations / outputVariables.",
@@ -380,7 +418,8 @@ public class WorkflowBuilderService {
                             + "on retries you MUST use edit(old_text, new_text) for surgical "
                             + "changes or apply_patch for multi-hunk diffs. Regenerating the file "
                             + "from scratch would erase the structural fields (triggers, "
-                            + "maxIterations, outputVariables) you've already set correctly.\"}"));
+                            + "maxIterations, outputVariables) you've already set correctly.\"}",
+                    counters == null ? null : counters.rejectedWriteOnRetry));
         }
         tools.add(new PathRestrictedFsCallback("edit",
                 "Surgically replace one occurrence of old_text with new_text in the proposal draft file. Preferred for retries.",
@@ -394,7 +433,8 @@ public class WorkflowBuilderService {
                    "content":{"type":"string","description":"Full-rewrite fallback only — prefer old_text/new_text"}
                  }}
                 """.formatted(draftRelString),
-                toolExecutionService, draftFile));
+                toolExecutionService, draftFile,
+                counters == null ? null : counters.edit));
         tools.add(new PathRestrictedFsCallback("apply_patch",
                 "Apply a multi-hunk diff to the proposal draft file (ORIGINAL/UPDATED markers).",
                 """
@@ -405,7 +445,8 @@ public class WorkflowBuilderService {
                    "content":{"type":"string"}
                  }}
                 """.formatted(draftRelString),
-                toolExecutionService, draftFile));
+                toolExecutionService, draftFile,
+                counters == null ? null : counters.applyPatch));
         tools.add(new SkillLoadCallback(skillRegistryService, objectMapper, skillAllowlist));
 
         String system = buildSystemPrompt(skillAllowlist, draftRelString, logRel.toString().replace('\\', '/'));
@@ -703,10 +744,27 @@ public class WorkflowBuilderService {
      * on retries (returns `write_forbidden_on_retry`) and a full rewrite
      * tends to drop required structural fields the validator already
      * accepted.
+     *
+     * <p>Counters from the previous attempt are surfaced verbatim as a
+     * tool-call audit block. Concrete numbers are harder for the model to
+     * argue with than prose: the model's self-narration says "I added a
+     * foreach"; the audit says "edit: 0 successful calls". The audit
+     * always wins.
      */
-    private String renderDraftUnchangedFeedback(String priorFeedback) {
+    private String renderDraftUnchangedFeedback(String priorFeedback, ToolCallCounters counters) {
         StringBuilder sb = new StringBuilder();
         sb.append("DRAFT NOT MODIFIED.\n\n");
+        if (counters != null) {
+            sb.append("Tool-call audit for the previous attempt (from the runtime, not your reply):\n");
+            sb.append("  edit:        ").append(counters.edit.get()).append(" successful calls\n");
+            sb.append("  apply_patch: ").append(counters.applyPatch.get()).append(" successful calls\n");
+            sb.append("  write:       ").append(counters.write.get()).append(" successful calls\n");
+            sb.append("  write (rejected on retry): ").append(counters.rejectedWriteOnRetry.get()).append(" attempts\n\n");
+            sb.append("The audit is the authoritative record — it's incremented inside the\n");
+            sb.append("tool callback after a successful invocation. Zero mutating calls\n");
+            sb.append("means the draft on disk is byte-identical to before this attempt,\n");
+            sb.append("regardless of what your reply text claimed.\n\n");
+        }
         sb.append("Your previous reply claimed structural edits, but the draft file on disk\n");
         sb.append("is byte-identical to before the attempt — you did NOT call any of:\n");
         sb.append("  - edit(path, old_text, new_text)\n");
@@ -859,12 +917,33 @@ public class WorkflowBuilderService {
                     Set<String> skillAllowlist,
                     boolean initialAttempt,
                     String resumeFeedback,
-                    ChatMemory chatMemory) throws Exception;
+                    ChatMemory chatMemory,
+                    ToolCallCounters counters) throws Exception;
     }
 
     /** Test-only setter for swapping in a deterministic fake. */
     void setAgentInvoker(AgentInvoker invoker) {
         this.agentInvoker = invoker == null ? this::runAgent : invoker;
+    }
+
+    /**
+     * Per-attempt counters for the path-restricted draft-mutating tools.
+     * Created fresh by {@link #build} before each invocation and inspected
+     * after the agent returns to definitively distinguish a productive
+     * attempt (≥1 successful mutating call) from a no-op (model replied
+     * without calling any). The SHA-256 hash check remains as a defense-
+     * in-depth: edits that net out byte-identical (rare but possible) are
+     * still caught.
+     */
+    static final class ToolCallCounters {
+        final AtomicInteger write = new AtomicInteger();
+        final AtomicInteger edit = new AtomicInteger();
+        final AtomicInteger applyPatch = new AtomicInteger();
+        final AtomicInteger rejectedWriteOnRetry = new AtomicInteger();
+
+        int mutatingCalls() {
+            return write.get() + edit.get() + applyPatch.get();
+        }
     }
 
     // --- inner tool callbacks ----------------------------------------------
@@ -882,17 +961,20 @@ public class WorkflowBuilderService {
         private final String inputSchema;
         private final ToolExecutionService toolExecutionService;
         private final Path allowedAbsoluteFile;
+        private final AtomicInteger successCounter;
 
         PathRestrictedFsCallback(String name,
                                  String description,
                                  String inputSchema,
                                  ToolExecutionService toolExecutionService,
-                                 Path allowedAbsoluteFile) {
+                                 Path allowedAbsoluteFile,
+                                 AtomicInteger successCounter) {
             this.name = name;
             this.description = description;
             this.inputSchema = inputSchema;
             this.toolExecutionService = toolExecutionService;
             this.allowedAbsoluteFile = allowedAbsoluteFile.toAbsolutePath().normalize();
+            this.successCounter = successCounter;
         }
 
         @Override
@@ -937,6 +1019,9 @@ public class WorkflowBuilderService {
             if (!result.success()) {
                 return "{\"success\":false,\"error\":\"" + escape(result.error()) + "\"}";
             }
+            if (successCounter != null) {
+                successCounter.incrementAndGet();
+            }
             return result.body() == null ? "{\"success\":true}" : result.body();
         }
 
@@ -969,11 +1054,16 @@ public class WorkflowBuilderService {
         private final String name;
         private final String description;
         private final String responseBody;
+        private final AtomicInteger rejectionCounter;
 
-        RejectingToolCallback(String name, String description, String responseBody) {
+        RejectingToolCallback(String name,
+                              String description,
+                              String responseBody,
+                              AtomicInteger rejectionCounter) {
             this.name = name;
             this.description = description;
             this.responseBody = responseBody;
+            this.rejectionCounter = rejectionCounter;
         }
 
         @Override
@@ -987,11 +1077,14 @@ public class WorkflowBuilderService {
 
         @Override
         public String call(String jsonInput) {
-            return responseBody;
+            return call(jsonInput, null);
         }
 
         @Override
         public String call(String jsonInput, ToolContext toolContext) {
+            if (rejectionCounter != null) {
+                rejectionCounter.incrementAndGet();
+            }
             return responseBody;
         }
     }
