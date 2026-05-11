@@ -186,6 +186,35 @@ public class WorkflowArchitectService {
 
                 A workflow that does nothing (start → end) is correct if the turn
                 had no tool calls. A workflow with fictional steps is broken.
+
+                ========================================================================
+                ZERO-TOLERANCE PROHIBITION — PRESERVE INPUT SHAPE FROM execution-log
+                ========================================================================
+                For every AgentToolPlugin activity you emit, you MUST look up the
+                matching step in execution-log.steps (the one where step.tool ==
+                your toolName) and reproduce the top-level keys of step.input
+                VERBATIM in properties.input.
+
+                If step.input had two top-level keys {tableName, inputs}, your
+                properties.input must be a SecureSpel inline-map literal with
+                BOTH keys:
+
+                    "input": "#{ {'tableName': 'leg-sequence', 'inputs': #order} }"
+
+                You MUST NOT collapse a multi-key input to a single variable
+                reference like "#{#order}". That's the #1 way tools fail with
+                "<key> is required" errors on first dispatch.
+
+                Specific tools with known multi-key contracts:
+                  - decisionTableEvaluate: requires {tableName, inputs}
+                  - search/query tools: usually {query, limit?, filter?}
+                  - update/mutate tools: usually {id, body} or {id, ...fields}
+                  - paginated reads: {offset, limit, ...filter}
+
+                Default rule: if step.input has N top-level keys, your
+                properties.input literal MUST have N top-level keys with the
+                same names. Replace ONLY the leaf values with variable refs
+                (#someVar). Preserve the keys.
                 ========================================================================
 
                 You have a tiny toolbelt and must use it deliberately:

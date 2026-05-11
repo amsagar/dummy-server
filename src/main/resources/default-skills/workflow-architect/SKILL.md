@@ -13,7 +13,7 @@ You are designing a `ProcessDefDto` JSON artifact that will be saved by `Process
 
 ## 🛑 READ THIS FIRST — Zero-tolerance prohibitions
 
-Three failure modes have produced broken workflows in the past. Each is **non-negotiable**: violations cause the proposal to be rejected at review and embarrass the system in the UI.
+Four failure modes have produced broken workflows in the past. Each is **non-negotiable**: violations cause the proposal to be rejected at review and embarrass the system in the UI.
 
 ### 1. NO ghost / "Load …" / "Setup …" / "Init …" activities
 
@@ -53,9 +53,69 @@ Every `AgentToolPlugin` activity's `toolName` MUST be a literal string that appe
 
 Java only. Other languages are temporarily disabled in the runtime — emitting them guarantees a failed run.
 
+### 4. PRESERVE the exact input shape from `steps[i].input`
+
+This is where the architect most often loses fidelity. When the chat turn called a tool, the execution log captures the **exact input map** that was sent:
+
+```json
+{ "type": "tool", "tool": "decisionTableEvaluate",
+  "input": { "tableName": "leg-sequence", "inputs": { "orderId": 600030447, ... } } }
+```
+
+The architect's job is to **emit the same shape**, with literals replaced by variable references. You do NOT get to flatten, simplify, rename, or paraphrase. The runtime validates the resulting map against the tool's contract — if you drop a required key (`tableName`, `inputs`, `query`, `id`, …) the run fails on the first dispatch with `"<key> is required"`.
+
+**Mechanical filter — for every `AgentToolPlugin` activity:**
+
+```
+1. Find the matching step in execution-log.steps where step.tool == this.toolName.
+   (If multiple — they all share the same shape; use any one.)
+2. Read step.input. It is a Map<String, Object>.
+3. Build the activity's properties.input as a SecureSpel inline-map literal
+   that reproduces THAT MAP'S TOP-LEVEL KEYS exactly, replacing run-specific
+   values with variable references:
+
+       SecureSpel inline-map literal:  #{ {'key1': <expr>, 'key2': <expr>, ...} }
+
+4. Do NOT collapse a multi-key input to a single `#{#someVar}`. That is the
+   #1 way this rule gets violated.
+```
+
+**Worked example — `decisionTableEvaluate`** (real tool, requires `tableName` + `inputs`):
+
+The execution log shows:
+```json
+{ "tool": "decisionTableEvaluate",
+  "input": { "tableName": "leg-sequence", "inputs": { "originCity": "Houston", "destinationCity": "Dallas" } } }
+```
+
+✅ **Correct activity properties:**
+```json
+{
+  "toolName": "decisionTableEvaluate",
+  "input": "#{ {'tableName': 'leg-sequence', 'inputs': #order} }"
+}
+```
+
+❌ **Wrong — collapses to single var, drops `tableName`:**
+```json
+{ "toolName": "decisionTableEvaluate", "input": "#{#order}" }
+```
+This fails immediately: `IllegalStateException: tableName is required`. The tool received a map with no `tableName` key because you handed it the order map instead of the wrapped envelope.
+
+**Other common multi-key shapes you must preserve verbatim:**
+
+| Tool family | Required keys |
+|---|---|
+| `decisionTableEvaluate` | `tableName`, `inputs` |
+| Most "search" / "query" tools | `query` (often plus `limit`, `filter`) |
+| Update / mutation tools | `id` plus `body` or per-field updates |
+| Anything taking pagination | `offset`, `limit` alongside the filter |
+
+If the original `step.input` has N top-level keys, your `properties.input` literal must have N top-level keys. Never N=1 unless the log shows N=1.
+
 ---
 
-If any of the above three rules is unclear, default to emitting fewer activities, not more. The rest of this file fleshes out the schema and patterns, but **these three rules dominate everything else**.
+If any of the above four rules is unclear, default to emitting fewer activities, not more, and ALWAYS copy the tool's input shape verbatim from the execution log. The rest of this file fleshes out the schema and patterns, but **these four rules dominate everything else**.
 
 ---
 
@@ -720,6 +780,11 @@ See [references/workflow-patterns.md](references/workflow-patterns.md) for the f
    - If `pluginName == "AgentToolPlugin"`, confirm `properties.toolName` is a literal member of `summary.toolNames` from the execution log. If not → delete the activity AND its incident transitions, then rewire.
    - If the activity `name` starts with `Load `, `Init`, `Setup`, `Prepare`, `Bootstrap`, `Warmup`, `Validate Input`, `Normalize`, `Authenticate`, `Get Token`, `Log Result`, `Audit `, `Track`, `Finalize`, `Cleanup`, `Teardown`, `Notify`, `Emit Event` (case-insensitive) — and step above didn't already validate it — delete it.
    - The count of `AgentToolPlugin` activities you emit must equal the count of distinct agent-tool call-sites in the turn. Recount.
+0a. **Input-shape fidelity sweep** — for every `AgentToolPlugin` activity:
+   - Look up the matching `step` in `execution-log.steps` where `step.tool == this.toolName`.
+   - Count the top-level keys of `step.input`. Call that N.
+   - Your `properties.input` SecureSpel literal must have the same N top-level keys with the same names. If `step.input` was `{tableName, inputs}`, your literal must be `#{ {'tableName': ..., 'inputs': ...} }` — NOT `#{#order}` or any other single-var collapse.
+   - Replace run-specific values (UUIDs, ids, names) with variable references; preserve literal strings only when they're identifiers like `tableName` values that parameterize WHICH operation runs.
 1. JSON parses as `ProcessDefDto`. No prose, no fences, no trailing commas.
 2. Every `type` ∈ {`normal`, `tool`, `route`, `subflow`, `foreach`, `while`, `batch`, `ai_reasoning`}.
 3. Exactly one `isStart: true`.
