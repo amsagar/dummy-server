@@ -8,6 +8,7 @@ import { Plus, Play, Pencil, Loader2, List, Sparkles, Activity, Database, Termin
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CopyCurlDialog } from "@/components/workflow/CopyCurlDialog";
+import { RunWorkflowDialog } from "@/components/workflow/RunWorkflowDialog";
 import { workflowApi } from "@/services/workflowApi";
 import type {
   ProcessDef,
@@ -24,6 +25,7 @@ export default function WorkflowsPage() {
   const [name, setName] = useState("");
   const [search, setSearch] = useState("");
   const [curlForId, setCurlForId] = useState<string | null>(null);
+  const [runDialogForId, setRunDialogForId] = useState<string | null>(null);
 
   const list = useQuery<ProcessDef[]>({
     queryKey: ["workflows"],
@@ -75,10 +77,11 @@ export default function WorkflowsPage() {
     // the detail page then polls until terminal. Without async, the API blocks
     // until the run finishes and we'd land on the detail page after it's
     // already closed, missing all the live status updates.
-    mutationFn: (id: string) =>
-      workflowApi.runs.start({ processDefId: id }, { async: true }) as Promise<RunSummary>,
+    mutationFn: ({ id, initialVariables }: { id: string; initialVariables: Record<string, unknown> }) =>
+      workflowApi.runs.start({ processDefId: id, initialVariables }, { async: true }) as Promise<RunSummary>,
     onSuccess: (r) => {
       toast.success(`Run started: ${r.instanceId}`);
+      setRunDialogForId(null);
       navigate(`/workflows/runs/${r.instanceId}`);
     },
     onError: (e: Error) => toast.error(e.message ?? "Run failed"),
@@ -236,8 +239,8 @@ export default function WorkflowsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => wf.id && startRun.mutate(wf.id)}
-                  disabled={startRun.isPending}
+                  onClick={() => wf.id && setRunDialogForId(wf.id)}
+                  disabled={!wf.id}
                 >
                   <Play className="w-3.5 h-3.5 mr-1" /> Run
                 </Button>
@@ -286,6 +289,21 @@ export default function WorkflowsPage() {
         }
         open={!!curlForId}
         onOpenChange={(o) => !o && setCurlForId(null)}
+      />
+
+      <RunWorkflowDialog
+        processDef={
+          runDialogForId
+            ? (list.data ?? []).find((wf) => wf.id === runDialogForId) ?? null
+            : null
+        }
+        open={!!runDialogForId}
+        onOpenChange={(o) => !o && setRunDialogForId(null)}
+        onConfirm={(initialVariables) => {
+          if (!runDialogForId) return;
+          startRun.mutate({ id: runDialogForId, initialVariables });
+        }}
+        submitting={startRun.isPending}
       />
     </div>
   );

@@ -33,6 +33,7 @@ import { ExecutionRunList } from "@/components/workflow/run/ExecutionRunList";
 import { IOPanel } from "@/components/workflow/run/IOPanel";
 import { RunGantt } from "@/components/workflow/run/RunGantt";
 import { AuditTab } from "@/components/workflow/run/AuditTab";
+import { RunWorkflowDialog } from "@/components/workflow/RunWorkflowDialog";
 import { StateBadge } from "@/components/workflow/StateBadge";
 import { toast } from "sonner";
 import { getAuthUser } from "@/services/api";
@@ -61,6 +62,7 @@ export default function WorkflowRunsPage() {
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedActivityDefId, setSelectedActivityDefId] = useState<string | null>(null);
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
 
   const runSummary = useQuery<RunSummary>({
     queryKey: ["workflow-run", selectedRunId],
@@ -132,10 +134,12 @@ export default function WorkflowRunsPage() {
   const startRun = useMutation({
     // async=true so the API returns immediately while the run is still
     // open.running; polling on the right pane then shows live progress.
-    mutationFn: () => workflowApi.runs.start({ processDefId: id }, { async: true }),
+    mutationFn: (initialVariables: Record<string, unknown>) =>
+      workflowApi.runs.start({ processDefId: id, initialVariables }, { async: true }),
     onSuccess: (r) => {
       toast.success("Run started");
       setSelectedRunId(r.instanceId);
+      setRunDialogOpen(false);
       qc.invalidateQueries({ queryKey: ["wf-runs", id] });
     },
     onError: (e: Error) => toast.error(e.message ?? "Run failed"),
@@ -203,7 +207,7 @@ export default function WorkflowRunsPage() {
               Replay
             </Button>
           )}
-          <Button onClick={() => startRun.mutate()} disabled={startRun.isPending} size="sm">
+          <Button onClick={() => setRunDialogOpen(true)} disabled={!def.data} size="sm">
             <Play className="w-3.5 h-3.5 mr-1" /> Run
           </Button>
         </div>
@@ -352,6 +356,14 @@ export default function WorkflowRunsPage() {
           )}
         </div>
       </div>
+
+      <RunWorkflowDialog
+        processDef={def.data ?? null}
+        open={runDialogOpen}
+        onOpenChange={setRunDialogOpen}
+        onConfirm={(initialVariables) => startRun.mutate(initialVariables)}
+        submitting={startRun.isPending}
+      />
     </div>
   );
 }
