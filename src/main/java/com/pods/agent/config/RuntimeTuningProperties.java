@@ -62,6 +62,14 @@ public class RuntimeTuningProperties {
     private long codeExecutionMaxTimeoutMs = 15_000;
     private int codeExecutionDefaultMemoryLimitMb = 64;
     private int codeExecutionMaxMemoryLimitMb = 256;
+    /**
+     * Per-HTTP-call response timeout for the Azure OpenAI / Azure-deployed
+     * model client. The Azure SDK default is 60s — too tight for reasoning
+     * models (gpt-5, o-series) doing agentic tool loops where each round of
+     * planning + tool-result-ingest can take 90s+. Applied uniformly across
+     * every Azure model resolution.
+     */
+    private long azureResponseTimeoutMs = 300_000;
     private ToolRetrieval toolRetrieval = new ToolRetrieval();
     private StrictScope strictScope = new StrictScope();
 
@@ -541,6 +549,14 @@ public class RuntimeTuningProperties {
 
     public void setCodeExecutionMaxMemoryLimitMb(int codeExecutionMaxMemoryLimitMb) {
         this.codeExecutionMaxMemoryLimitMb = codeExecutionMaxMemoryLimitMb;
+    }
+
+    public long getAzureResponseTimeoutMs() {
+        return azureResponseTimeoutMs;
+    }
+
+    public void setAzureResponseTimeoutMs(long azureResponseTimeoutMs) {
+        this.azureResponseTimeoutMs = azureResponseTimeoutMs;
     }
 
 }

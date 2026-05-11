@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS agent.workflow_proposals (
     session_id               TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
     turn_id                  TEXT NOT NULL,
     user_id                  TEXT NOT NULL,
-    status                   TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'materialized', 'failed')),
+    status                   TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'building', 'rejected', 'materialized', 'failed')),
     reason                   TEXT,
     confidence               DOUBLE PRECISION,
     intent_signature         TEXT NOT NULL,
@@ -312,8 +312,11 @@ CREATE TABLE IF NOT EXISTS agent.workflow_proposals (
     user_prompt              TEXT,
     model_provider_id        TEXT,
     model_id                 TEXT,
-    proposed_workflow_json   JSONB NOT NULL,
+    proposed_workflow_json   JSONB,
     matched_tool_names_json  JSONB,
+    suggested_name           TEXT,
+    skill_names_json         JSONB,
+    build_attempts           INTEGER NOT NULL DEFAULT 0,
     decision_comment         TEXT,
     decided_by               TEXT,
     decided_at               BIGINT,
@@ -322,6 +325,31 @@ CREATE TABLE IF NOT EXISTS agent.workflow_proposals (
     created_at               BIGINT NOT NULL,
     updated_at               BIGINT NOT NULL
     );
+
+-- Backfill / migration block for installations created before the two-phase
+-- (classifier + builder) split. Each statement is idempotent so running the
+-- file repeatedly is safe.
+ALTER TABLE agent.workflow_proposals
+    ALTER COLUMN proposed_workflow_json DROP NOT NULL;
+ALTER TABLE agent.workflow_proposals
+    ADD COLUMN IF NOT EXISTS suggested_name TEXT;
+ALTER TABLE agent.workflow_proposals
+    ADD COLUMN IF NOT EXISTS skill_names_json JSONB;
+ALTER TABLE agent.workflow_proposals
+    ADD COLUMN IF NOT EXISTS build_attempts INTEGER NOT NULL DEFAULT 0;
+DO $$
+BEGIN
+    -- Replace the legacy CHECK constraint to add the 'building' transient state.
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'workflow_proposals_status_check'
+    ) THEN
+        ALTER TABLE agent.workflow_proposals DROP CONSTRAINT workflow_proposals_status_check;
+    END IF;
+    ALTER TABLE agent.workflow_proposals
+        ADD CONSTRAINT workflow_proposals_status_check
+        CHECK (status IN ('pending', 'approved', 'building', 'rejected', 'materialized', 'failed'));
+END$$;
 
 CREATE TABLE IF NOT EXISTS agent.hook_mappings (
                                                    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

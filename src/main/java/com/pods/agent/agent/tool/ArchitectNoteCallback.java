@@ -15,10 +15,10 @@ import tools.jackson.databind.ObjectMapper;
  * Native tool callback that lets the chat agent drop a short reasoning note
  * into the in-flight execution log. The note becomes an
  * {@code architect_note} step in the typed execution log produced at end of
- * turn, giving the {@link com.pods.agent.workflow.proposal.WorkflowArchitectService}
+ * turn, giving the {@link com.pods.agent.workflow.proposal.WorkflowBuilderService}
  * concrete intent annotations to anchor on (loop boundaries, condition
  * predicates, parallel fan-outs, decision points) when it converts the run
- * into a reusable workflow graph.
+ * into a reusable workflow graph at approval time.
  *
  * <p>Scope: write-only, restricted to the in-flight turn. The chat agent
  * cannot read existing notes back, list them, or write anywhere else on the

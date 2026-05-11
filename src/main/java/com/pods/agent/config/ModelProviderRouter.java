@@ -8,6 +8,7 @@ import com.anthropic.models.messages.ThinkingConfigAdaptive;
 import com.anthropic.models.messages.ThinkingConfigParam;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.azure.core.credential.AzureKeyCredential;
+import com.azure.core.util.HttpClientOptions;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.repository.ModelRepository;
 import com.pods.agent.service.EncryptionService;
@@ -27,6 +28,7 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
+import java.time.Duration;
 
 /**
  * Routes a ModelRef (providerID + modelID) to the correct ChatClient + ChatOptions.
@@ -185,9 +187,17 @@ public class ModelProviderRouter {
             }
 
             String normalizedEndpoint = normalizeAzureEndpoint(endpoint);
+            // Reasoning models (gpt-5, o-series) routinely take >60s per turn
+            // when ingesting tool results and planning the next step. The
+            // Azure SDK's default response timeout is 60s, so we override it
+            // explicitly via HttpClientOptions; the SDK propagates these to
+            // the auto-configured Netty HTTP client.
+            HttpClientOptions httpClientOptions = new HttpClientOptions()
+                    .setResponseTimeout(Duration.ofMillis(runtimeTuningProperties.getAzureResponseTimeoutMs()));
             OpenAIClientBuilder clientBuilder = new OpenAIClientBuilder()
                     .endpoint(normalizedEndpoint)
-                    .credential(new AzureKeyCredential(apiKey));
+                    .credential(new AzureKeyCredential(apiKey))
+                    .clientOptions(httpClientOptions);
             // Claude and other partner models may require newer Azure API versions.
             trySetAzurePreviewServiceVersion(clientBuilder);
 

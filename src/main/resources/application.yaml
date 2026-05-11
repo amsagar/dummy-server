@@ -10,9 +10,9 @@ spring:
       - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
       - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
   datasource:
-    url: jdbc:postgresql://psql-server-eus-ivoyant-global-spoke-nprd.postgres.database.azure.com:5432/pods_ai
-    username: psqladminuser
-    password: pU9_hvM2XRyDHTVRdeAd
+    url: jdbc:postgresql://localhost:5432/pods_ai_agent
+    username: postgres
+    password: ivoyant
     driver-class-name: org.postgresql.Driver
   ai:
     openai:
@@ -55,6 +55,12 @@ pods:
     code-execution-max-timeout-ms: 15000
     code-execution-default-memory-limit-mb: 64
     code-execution-max-memory-limit-mb: 256
+    # Azure SDK default response timeout is 60s, which is too tight for
+    # reasoning models (gpt-5, o-series) inside agentic tool loops where
+    # one turn may include tool-result ingestion + chain-of-thought + the
+    # next tool call. 5 minutes lets long turns finish without giving up
+    # on a genuinely stuck request.
+    azure-response-timeout-ms: 300000
     summary-token-threshold: 6000
     auto-routing-low-threshold: 400
     auto-routing-medium-threshold: 1400
@@ -102,6 +108,22 @@ pods:
       connection-string: "DefaultEndpointsProtocol=https;AccountName=openfga;AccountKey=3qRPjRUAleZDRiDuHaZxCcrPFLAABAeLK/lSIuIDPTTo1CBgnzFIg+TvPvynr1sL5EtL7aIofTix+AStN2labg==;EndpointSuffix=core.windows.net"
       container: "ai-skills"
       allow-in-memory-fallback: false
+  workflow:
+    proposal:
+      # Combined retry budget for the Phase-2 builder loop. Each attempt =
+      # one (read draft → structural validation → alignment check) pass.
+      max-build-attempts: 5
+      # Optional per-phase model overrides. Leave provider-id / model-id
+      # blank to use the model the chat agent used in the source turn.
+      classifier-model:
+        provider-id: ""
+        model-id: ""
+      builder-model:
+        provider-id: ""
+        model-id: ""
+      alignment-model:
+        provider-id: ""
+        model-id: ""
   cors:
     allowed-origins:
       - "http://localhost:3000"

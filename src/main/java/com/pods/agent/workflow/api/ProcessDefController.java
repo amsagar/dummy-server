@@ -251,15 +251,36 @@ public class ProcessDefController {
         return ResponseEntity.ok(Map.of("proposals", rows));
     }
 
+    /**
+     * Polling endpoint for the UI: returns the current state of a single
+     * proposal so a reviewer can watch the Phase-2 builder progress through
+     * {@code approved → building → materialized | failed} after they hit
+     * approve.
+     */
+    @GetMapping("/proposals/{id}")
+    public ResponseEntity<Map<String, Object>> getProposal(@PathVariable("id") String id) {
+        return workflowProposalService.getById(id)
+                .map(p -> {
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("proposal", toProposalPayload(p));
+                    return ResponseEntity.ok(payload);
+                })
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
     @PostMapping("/proposals/{id}/approve")
     public ResponseEntity<Map<String, Object>> approveProposal(@PathVariable("id") String id,
                                                                @RequestBody(required = false) Map<String, Object> body) {
         String userId = securityContextService.currentUserIdOrThrow();
         String comment = body == null ? null : String.valueOf(body.getOrDefault("comment", ""));
+        // approve() flips status to 'approved' synchronously and enqueues the
+        // Phase-2 build asynchronously. The builder pushes the row through
+        // 'building' and onward; clients should poll GET /proposals/{id}.
         return workflowProposalService.approve(id, userId, comment)
                 .map(p -> {
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("proposal", toProposalPayload(p));
+                    payload.put("buildState", "queued");
                     return ResponseEntity.ok(payload);
                 })
                 .orElseGet(() -> ResponseEntity.notFound().build());
@@ -290,7 +311,13 @@ public class ProcessDefController {
         row.put("intentSignature", proposal.getIntentSignature());
         row.put("traceRef", proposal.getTraceRef());
         row.put("userPrompt", proposal.getUserPrompt());
+        row.put("suggestedName", proposal.getSuggestedName());
+        row.put("skillNamesJson", proposal.getSkillNamesJson());
+        row.put("matchedToolNamesJson", proposal.getMatchedToolNamesJson());
+        row.put("buildAttempts", proposal.getBuildAttempts());
         row.put("decisionComment", proposal.getDecisionComment());
+        row.put("decidedBy", proposal.getDecidedBy());
+        row.put("decidedAt", proposal.getDecidedAt());
         row.put("materializedDefId", proposal.getMaterializedDefId());
         row.put("errorMessage", proposal.getErrorMessage());
         row.put("createdAt", proposal.getCreatedAt());

@@ -70,6 +70,26 @@ public class WorkflowProposalRepository {
                 (rs, n) -> map(rs));
     }
 
+    public List<WorkflowProposal> findApprovedReadyToBuild() {
+        return jdbc.query(
+                sql.getQuery("WORKFLOW_PROPOSAL.FIND_APPROVED_READY_TO_BUILD"),
+                new MapSqlParameterSource(),
+                (rs, n) -> map(rs));
+    }
+
+    /**
+     * Atomic counter bump used by the Phase-2 builder loop after every attempt
+     * so an external observer (UI poll, ops query) can see progress without
+     * pulling the full row.
+     */
+    public void incrementBuildAttempts(String id) {
+        jdbc.update(
+                sql.getQuery("WORKFLOW_PROPOSAL.INCREMENT_BUILD_ATTEMPTS"),
+                new MapSqlParameterSource()
+                        .addValue("id", id)
+                        .addValue("updatedAt", System.currentTimeMillis()));
+    }
+
     private MapSqlParameterSource params(WorkflowProposal proposal) {
         return new MapSqlParameterSource()
                 .addValue("id", proposal.getId())
@@ -84,8 +104,11 @@ public class WorkflowProposalRepository {
                 .addValue("userPrompt", blankToNull(proposal.getUserPrompt()))
                 .addValue("modelProviderId", blankToNull(proposal.getModelProviderId()))
                 .addValue("modelId", blankToNull(proposal.getModelId()))
-                .addValue("proposedWorkflowJson", proposal.getProposedWorkflowJson())
+                .addValue("proposedWorkflowJson", blankToNull(proposal.getProposedWorkflowJson()))
                 .addValue("matchedToolNamesJson", blankToNull(proposal.getMatchedToolNamesJson()))
+                .addValue("suggestedName", blankToNull(proposal.getSuggestedName()))
+                .addValue("skillNamesJson", blankToNull(proposal.getSkillNamesJson()))
+                .addValue("buildAttempts", proposal.getBuildAttempts())
                 .addValue("decisionComment", blankToNull(proposal.getDecisionComment()))
                 .addValue("decidedBy", blankToNull(proposal.getDecidedBy()))
                 .addValue("decidedAt", proposal.getDecidedAt())
@@ -115,6 +138,9 @@ public class WorkflowProposalRepository {
                 .modelId(rs.getString("model_id"))
                 .proposedWorkflowJson(rs.getString("proposed_workflow_json"))
                 .matchedToolNamesJson(rs.getString("matched_tool_names_json"))
+                .suggestedName(rs.getString("suggested_name"))
+                .skillNamesJson(rs.getString("skill_names_json"))
+                .buildAttempts(rs.getInt("build_attempts"))
                 .decisionComment(rs.getString("decision_comment"))
                 .decidedBy(rs.getString("decided_by"))
                 .decidedAt((Long) rs.getObject("decided_at"))
