@@ -28,6 +28,7 @@ export function SystemEventCard({ event, onAnswer, onApprove, onReject }: Props)
   );
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const heading = renderHeading(event);
   const tone = renderTone(event);
@@ -80,14 +81,30 @@ export function SystemEventCard({ event, onAnswer, onApprove, onReject }: Props)
           )}
           {event.type === "question" && !event.resolved && onAnswer && (
             <form
-              onSubmit={(e) => {
+              onSubmit={async (e) => {
                 e.preventDefault();
-                if (!answer.trim() || !event.callId) return;
+                setSubmitError(null);
+                const text = answer.trim();
+                if (!text) {
+                  setSubmitError("Type an answer first.");
+                  return;
+                }
+                if (!event.callId) {
+                  setSubmitError(
+                    "Missing requestId for this question. Try refreshing the chat.",
+                  );
+                  return;
+                }
                 setBusy(true);
-                onAnswer(event.callId, answer.trim()).finally(() => {
-                  setBusy(false);
+                try {
+                  await onAnswer(event.callId, text);
                   setAnswer("");
-                });
+                } catch (err) {
+                  const msg = (err as Error)?.message ?? String(err);
+                  setSubmitError(msg);
+                } finally {
+                  setBusy(false);
+                }
               }}
               className="space-y-2"
             >
@@ -103,6 +120,9 @@ export function SystemEventCard({ event, onAnswer, onApprove, onReject }: Props)
                   {busy ? <Loader2 className="size-3 animate-spin" /> : "Send"}
                 </Button>
               </div>
+              {submitError && (
+                <div className="text-[11px] text-error">{submitError}</div>
+              )}
             </form>
           )}
           {event.type === "approval_required" && !event.resolved && onApprove && onReject && (

@@ -391,26 +391,24 @@ export function AiChatPage() {
   };
 
   const onAnswer = async (requestId: string, answer: string) => {
-    if (!sessionId) return;
-    try {
-      await chatApi.replyToQuestion({ requestId, message: answer });
-      // Persist the user's answer locally so the card flips from waiting →
-      // answered + shows the reply immediately, without waiting for a
-      // session reload to pull `hitlResponse` back from the server.
-      markResolved(requestId, answer);
-    } catch (e) {
-      console.error("reply failed", e);
+    if (!sessionId) {
+      throw new Error("No active session — start a chat first.");
     }
+    // Let the caller (SystemEventCard) catch errors and surface them
+    // inline; previously we swallowed them to console only, which made
+    // failed replies look like "nothing happened" to the user.
+    await chatApi.replyToQuestion({ requestId, message: answer });
+    markResolved(requestId, answer);
   };
 
   const onApprove = async (requestId: string) => {
-    if (!sessionId) return;
+    if (!sessionId) throw new Error("No active session — start a chat first.");
     await chatApi.approve({ requestId });
     markResolved(requestId, "Approved");
   };
 
   const onReject = async (requestId: string) => {
-    if (!sessionId) return;
+    if (!sessionId) throw new Error("No active session — start a chat first.");
     await chatApi.reject({ requestId });
     markResolved(requestId, "Rejected");
   };
