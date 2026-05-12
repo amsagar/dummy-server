@@ -121,7 +121,36 @@ public class FrameworkToolPackService {
                 seed("websearch", "General web search. Prefer a domain-specific MCP/integration tool when the user's question is about a registered service (GitHub, Stripe, Linear, etc.).", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("codesearch", "Search code on the public web. Prefer a domain-specific MCP/integration tool when the user's question is about a known repo or service.", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("task", "Dispatch a background worker task within the agent runtime.", "workflow", "workflow", false, false, Map.of("task", "string"), false),
-                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false)
+                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false),
+
+                // Order-validation agent tools — base-injected so the
+                // ov-basic / ov-detailed agent profiles always see them.
+                seed("ovListRunsForOrder", "Find existing PODS order-validation runs by order id. Returns the list with overall + per-check status.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of("orderId", Map.of("type", "string")),
+                                "required", List.of("orderId")
+                        ), true),
+                seed("ovGetRunDetail", "Fetch the full per-check breakdown of a single validation run by its instance id.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of("instId", Map.of("type", "string")),
+                                "required", List.of("instId")
+                        ), true),
+                seed("ovStartValidation", "Start a NEW order-validation workflow run for the given order id. Returns the new instance id; the run executes asynchronously.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of("orderId", Map.of("type", "string")),
+                                "required", List.of("orderId")
+                        ), true),
+                seed("ovDashboardStats", "Aggregate order-validation stats (pass rate, failed count, avg duration) over a time range.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "fromTs", Map.of("type", "number"),
+                                        "toTs", Map.of("type", "number")
+                                )
+                        ), true)
         );
     }
 

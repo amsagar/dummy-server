@@ -20,8 +20,10 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-is": "^19.2.6",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.14.2",
     "recharts": "^3.8.1",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.1.14"
   },

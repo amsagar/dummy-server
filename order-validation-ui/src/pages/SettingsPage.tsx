@@ -1,15 +1,23 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { TopBar } from "@/components/layout/TopBar";
-import { decisionTablesApi, orderValidationApi } from "@/services/api";
+import {
+  decisionTablesApi,
+  orderValidationApi,
+  orderValidationSettingsApi,
+} from "@/services/api";
+import { chatApi } from "@/services/chatApi";
 import { useSettings } from "@/hooks/useSettings";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle, ArrowRight, Check, Table2 } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, Table2, Sparkles } from "lucide-react";
 
 export function SettingsPage() {
+  const qc = useQueryClient();
   const { workflowId, setWorkflowId } = useSettings();
+
   const { data: workflows, isLoading, error } = useQuery({
     queryKey: ["workflows"],
     queryFn: () => orderValidationApi.listWorkflows(),
@@ -18,23 +26,69 @@ export function SettingsPage() {
     queryKey: ["decision-tables"],
     queryFn: () => decisionTablesApi.list(),
   });
+  const { data: settings, isLoading: settingsLoading } = useQuery({
+    queryKey: ["ov-settings"],
+    queryFn: () => orderValidationSettingsApi.get(),
+  });
+  const { data: models, isLoading: modelsLoading, error: modelsError } = useQuery({
+    queryKey: ["chat-models"],
+    queryFn: () => chatApi.listModels(),
+  });
 
   const selected = workflows?.find((w) => w.id === workflowId);
 
+  const updateSettings = useMutation({
+    mutationFn: (next: {
+      chatModelRef?: string | null;
+      responseMode?: "basic" | "detailed";
+      workflowId?: string | null;
+    }) =>
+      orderValidationSettingsApi.update({
+        chatModelRef: next.chatModelRef ?? settings?.chatModelRef ?? null,
+        responseMode: next.responseMode ?? settings?.responseMode ?? "basic",
+        workflowId: next.workflowId ?? settings?.workflowId ?? null,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ov-settings"] }),
+  });
+
+  // Reconcile server-stored workflowId into local state on first load —
+  // the AI agent tools resolve the workflow from settings, so the two must
+  // agree.
+  useEffect(() => {
+    if (!settings) return;
+    if (settings.workflowId && settings.workflowId !== workflowId) {
+      setWorkflowId(settings.workflowId);
+    } else if (!settings.workflowId && workflowId) {
+      // Push local choice up if server has nothing yet.
+      updateSettings.mutate({ workflowId });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.workflowId]);
+
+  const onWorkflowChange = (id: string | null) => {
+    setWorkflowId(id);
+    updateSettings.mutate({ workflowId: id });
+  };
+
+  const onModelChange = (ref: string) => {
+    updateSettings.mutate({ chatModelRef: ref || null });
+  };
+
+  const onResponseModeChange = (mode: string) => {
+    updateSettings.mutate({ responseMode: (mode as "basic" | "detailed") || "basic" });
+  };
+
   return (
     <>
-      <TopBar title="Settings" subtitle="Workflow configuration" />
+      <TopBar title="Settings" subtitle="Workflow + AI configuration" />
       <main className="flex-1 p-6 overflow-auto">
         <div className="max-w-2xl space-y-6">
           <Card>
             <CardHeader>
               <CardTitle>Validation Workflow</CardTitle>
               <CardDescription>
-                Pick the workflow whose completed runs feed the analytics. Runs are read from the
-                workflow engine's <code className="text-pods-blue">process_inst</code> table; their
-                <code className="text-pods-blue"> resultJson</code> must follow the
-                <code className="text-pods-blue"> pods-order-validation</code> Step 7 output shape
-                ({"{ orderId, legSequence, serviceability[], containerAvailability[] }"}).
+                Pick the workflow whose completed runs feed the analytics. The AI assistant also
+                uses this id when it triggers new validation runs on your behalf.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -49,7 +103,7 @@ export function SettingsPage() {
                 <div className="space-y-3">
                   <Select
                     value={workflowId ?? ""}
-                    onChange={(e) => setWorkflowId(e.target.value || null)}
+                    onChange={(e) => onWorkflowChange(e.target.value || null)}
                     className="w-full"
                   >
                     <option value="">— Select a workflow —</option>
@@ -78,6 +132,69 @@ export function SettingsPage() {
               )}
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Sparkles className="size-4 text-pods-blue" />
+                <CardTitle>AI Assistant</CardTitle>
+              </div>
+              <CardDescription>
+                Pick the chat model and response style for the in-app AI assistant. These values
+                are stored server-side and apply to all viewers of the dashboard.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {settingsLoading || modelsLoading ? (
+                <Skeleton className="h-20 w-full" />
+              ) : modelsError ? (
+                <div className="flex items-center gap-2 text-sm text-error">
+                  <AlertCircle className="size-4" />
+                  Failed to load models: {(modelsError as Error).message}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-foreground/80">Chat model</span>
+                    <Select
+                      value={settings?.chatModelRef ?? ""}
+                      onChange={(e) => onModelChange(e.target.value)}
+                      className="w-full"
+                    >
+                      <option value="">— Select a model —</option>
+                      {(models ?? [])
+                        .filter((m) => m.modelKind !== "embedding")
+                        .map((m) => {
+                          const ref = `${m.providerID}/${m.modelID}`;
+                          return (
+                            <option key={ref} value={ref}>
+                              {m.displayName || m.modelID} · {m.providerID}
+                            </option>
+                          );
+                        })}
+                    </Select>
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-foreground/80">Response mode</span>
+                    <Select
+                      value={settings?.responseMode ?? "basic"}
+                      onChange={(e) => onResponseModeChange(e.target.value)}
+                      className="w-full"
+                    >
+                      <option value="basic">Basic — one-paragraph headline summary</option>
+                      <option value="detailed">Detailed — per-check breakdown with bullets</option>
+                    </Select>
+                  </label>
+                  {updateSettings.error && (
+                    <div className="text-xs text-error">
+                      Failed to save: {(updateSettings.error as Error).message}
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Decision Tables</CardTitle>
@@ -108,9 +225,7 @@ export function SettingsPage() {
                         <Table2 className="size-3.5 text-muted-foreground" />
                         {t.name}
                       </span>
-                      <span className="text-xs text-muted-foreground">
-                        {t.hitPolicy}
-                      </span>
+                      <span className="text-xs text-muted-foreground">{t.hitPolicy}</span>
                     </Link>
                   ))}
                   <Link
@@ -123,13 +238,14 @@ export function SettingsPage() {
               )}
             </CardContent>
           </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>About</CardTitle>
               <CardDescription>
-                Read-only analytics over completed order-validation runs. The workflow definition is
-                never modified from this dashboard; decision tables can be edited under the Decision
-                Tables section above.
+                Analytics over completed order-validation runs, plus an order-validation-scoped AI
+                assistant. The workflow definition is never modified from this dashboard; decision
+                tables and AI settings can be edited above.
               </CardDescription>
             </CardHeader>
           </Card>

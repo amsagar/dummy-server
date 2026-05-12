@@ -40,6 +40,7 @@ public class SecurityConfig {
                         // auth flow. The endpoints expose only aggregates of completed
                         // workflow runs — see OrderValidationAnalyticsController.
                         .requestMatchers(HttpMethod.GET, "/api/v1/order-validation/**").permitAll()
+                        .requestMatchers(HttpMethod.PUT, "/api/v1/order-validation/settings").permitAll()
                         // Order-validation UI also drives workflow runs (Submit order
                         // button) and decision-table CRUD (Settings → Decision Tables).
                         // Kept under permitAll to match the standalone-UI posture above.
@@ -47,6 +48,13 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/decision-tables/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/decision-tables").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/decision-tables").permitAll()
+                        // AI Chat surface for the standalone order-validation-ui.
+                        // Sessions/models endpoints expose data scoped to the
+                        // default user the controller falls back to when no JWT
+                        // is present (see SecurityContextService.currentUserIdOrDefault).
+                        .requestMatchers("/api/v1/chat/**").permitAll()
+                        .requestMatchers("/api/v1/sessions/**").permitAll()
+                        .requestMatchers("/api/v1/models/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter.class)

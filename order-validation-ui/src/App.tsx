@@ -9,6 +9,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { RunDetailPage } from "@/pages/RunDetailPage";
 import { DecisionTablesPage } from "@/pages/DecisionTablesPage";
 import { DecisionTableEditorPage } from "@/pages/DecisionTableEditorPage";
+import { AiChatPage } from "@/pages/AiChatPage";
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/container-availability" element={<ContainerAvailabilityPage />} />
         <Route path="/decision-tables" element={<DecisionTablesPage />} />
         <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
+        <Route path="/ai" element={<AiChatPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>

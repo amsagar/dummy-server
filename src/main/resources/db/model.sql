@@ -478,3 +478,17 @@ CREATE INDEX IF NOT EXISTS idx_workflow_api_key_prefix
 CREATE INDEX IF NOT EXISTS idx_workflow_api_key_owner
     ON agent.workflow_api_key (owner_id, revoked_at);
 
+-- ── Order-validation UI settings ──────────────────────────────────────────
+-- Singleton (id='singleton') row that the order-validation-ui reads/writes
+-- as a global, cross-browser config. Holds the active chat model ref
+-- (providerId/modelId), the AI assistant response mode (basic|detailed),
+-- and the workflow id the assistant should target when starting new
+-- validations. Created lazily on first read.
+CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
+    id              TEXT PRIMARY KEY,
+    chat_model_ref  TEXT,
+    response_mode   TEXT NOT NULL DEFAULT 'basic',
+    workflow_id     TEXT,
+    updated_at      BIGINT NOT NULL
+);
+

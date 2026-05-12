@@ -176,4 +176,10 @@ public final class OrderValidationDtos {
             Object output,
             String errorMessage
     ) {}
+
+    public record UiSettings(
+            String chatModelRef,
+            String responseMode,
+            String workflowId
+    ) {}
 }

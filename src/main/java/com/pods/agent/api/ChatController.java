@@ -95,7 +95,7 @@ public class ChatController {
     @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @Operation(summary = "Send a message and receive a streaming SSE response")
     public SseEmitter chat(@Valid @RequestBody ChatRequest request, jakarta.servlet.http.HttpServletResponse response) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (!request.hasMessageOrAttachments()) {
             throw new IllegalArgumentException("Message or attachments are required");
         }
@@ -157,7 +157,7 @@ public class ChatController {
     @DeleteMapping("/messages/{messageId}")
     @Operation(summary = "Delete a single chat message by ID")
     public ResponseEntity<?> deleteMessage(@PathVariable String messageId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         var message = messageRepository.findById(messageId);
         if (message.isEmpty()) {
             return ResponseEntityFactory.notFound("Message not found: " + messageId);
@@ -172,7 +172,7 @@ public class ChatController {
     @PostMapping("/sessions/{sessionId}/cancel")
     @Operation(summary = "Cancel the active streaming turn for a session")
     public ResponseEntity<?> cancelTurn(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -193,7 +193,7 @@ public class ChatController {
     @Operation(summary = "Truncate chat history from a message (inclusive) within the same session")
     public ResponseEntity<?> truncateFromMessage(@PathVariable String sessionId,
                                                  @Valid @RequestBody ChatTruncateRequest request) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -220,7 +220,7 @@ public class ChatController {
     public ResponseEntity<?> history(@PathVariable String sessionId,
                                      @RequestParam(defaultValue = "100") int limit,
                                      @RequestParam(defaultValue = "0") int offset) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -252,7 +252,7 @@ public class ChatController {
     @GetMapping("/cost/{sessionId}")
     @Operation(summary = "Get session cost and token usage")
     public ResponseEntity<?> cost(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -266,7 +266,7 @@ public class ChatController {
     @GetMapping("/pending/{sessionId}")
     @Operation(summary = "List pending HITL interactions for session")
     public ResponseEntity<?> pending(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -279,7 +279,7 @@ public class ChatController {
     @GetMapping("/pending/system-toolchains")
     @Operation(summary = "List pending system toolchain approvals for current user")
     public ResponseEntity<?> pendingSystemToolchainApprovals() {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         var approvals = systemToolChainProposalRepository.findPendingByUser(userId).stream()
                 .map(p -> {
                     var row = new LinkedHashMap<String, Object>();
@@ -300,7 +300,7 @@ public class ChatController {
     @GetMapping("/events/{sessionId}")
     @Operation(summary = "Get session event trace (tool calls, questions, approvals)")
     public ResponseEntity<?> sessionEvents(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -335,7 +335,7 @@ public class ChatController {
     }
 
     private ResponseEntity<?> ensureInteractionOwnership(String requestId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         var interaction = hitlInteractionRepository.findById(requestId);
         if (interaction.isEmpty()) {
             return ResponseEntityFactory.notFound("Interaction not found: " + requestId);

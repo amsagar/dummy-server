@@ -7,6 +7,7 @@ import {
   Settings as SettingsIcon,
   Route as RouteIcon,
   Table2,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,10 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { to: "/serviceability", label: "Serviceability", icon: MapPin },
       { to: "/container-availability", label: "Container Avail.", icon: Boxes },
     ],
+  },
+  {
+    title: "Assistant",
+    items: [{ to: "/ai", label: "AI Assistant", icon: Sparkles }],
   },
   {
     title: "Config",

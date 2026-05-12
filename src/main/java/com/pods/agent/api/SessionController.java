@@ -53,7 +53,7 @@ public class SessionController {
             @RequestParam(defaultValue = "100") int limit,
             @RequestParam(defaultValue = "0") int offset,
             @RequestParam(required = false) Boolean archived) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         List<Map<String, Object>> sessions = sessionRepository.findAllByUser(userId, limit, offset, archived);
         long total = sessionRepository.countAllByUser(userId, archived);
         return ResponseEntity.ok(Map.of(
@@ -70,7 +70,7 @@ public class SessionController {
     @Operation(summary = "Rename a session's title")
     public ResponseEntity<?> renameSession(@PathVariable String sessionId,
                                            @RequestBody Map<String, String> body) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         String title = body.get("title");
         if (title == null || title.isBlank()) {
             return ResponseEntityFactory.badRequest("title is required");
@@ -87,7 +87,7 @@ public class SessionController {
     @Operation(summary = "Archive or restore a session")
     public ResponseEntity<?> archiveSession(@PathVariable String sessionId,
                                             @RequestBody(required = false) Map<String, Object> body) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -101,7 +101,7 @@ public class SessionController {
     @GetMapping("/{sessionId}")
     @Operation(summary = "Get session metadata")
     public ResponseEntity<?> getSession(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         return sessionRepository.findByUserIdAndSessionId(userId, sessionId)
                 .<ResponseEntity<?>>map(session -> {
                     Map<String, Object> body = new LinkedHashMap<>();
@@ -121,7 +121,7 @@ public class SessionController {
     public ResponseEntity<?> getMessages(@PathVariable String sessionId,
                                          @RequestParam(defaultValue = "100") int limit,
                                          @RequestParam(defaultValue = "0") int offset) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }
@@ -153,7 +153,7 @@ public class SessionController {
     @DeleteMapping("/{sessionId}")
     @Operation(summary = "Delete a session and all its messages")
     public ResponseEntity<?> deleteSession(@PathVariable String sessionId) {
-        String userId = securityContextService.currentUserIdOrThrow();
+        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
         if (sessionRepository.findByUserIdAndSessionId(userId, sessionId).isEmpty()) {
             return ResponseEntityFactory.notFound("Session not found: " + sessionId);
         }

@@ -250,19 +250,32 @@ public class ChatService {
                     log.warn("[ChatService] Failed to write execution log for turn={}: {}",
                             turnId, e.getMessage());
                 }
-                try {
-                    workflowProposalAsyncService.enqueue(new WorkflowProposalAsyncService.Job(
-                            sessionId,
-                            turnId,
-                            request.getMessage(),
-                            response,
-                            userId,
-                            state.getModel(),
-                            turnFilePath
-                    ));
-                } catch (Exception e) {
-                    log.warn("[ChatService] Failed to enqueue workflow proposal job for turn={}: {}",
-                            turnId, e.getMessage());
+                // Workflow-proposal classification is opt-out for narrow,
+                // single-purpose agent profiles (e.g. order-validation-ui's
+                // ov-basic / ov-detailed). Those turns are already shaped to
+                // a fixed playbook — proposing yet another workflow off them
+                // just creates noise. The general assistant still gets
+                // classification on every turn.
+                String activeProfileId = state.getAgentProfileId();
+                boolean skipProposal = activeProfileId != null && activeProfileId.startsWith("ov-");
+                if (skipProposal) {
+                    log.debug("[ChatService] skipping workflow proposal for turn={} profile={}",
+                            turnId, activeProfileId);
+                } else {
+                    try {
+                        workflowProposalAsyncService.enqueue(new WorkflowProposalAsyncService.Job(
+                                sessionId,
+                                turnId,
+                                request.getMessage(),
+                                response,
+                                userId,
+                                state.getModel(),
+                                turnFilePath
+                        ));
+                    } catch (Exception e) {
+                        log.warn("[ChatService] Failed to enqueue workflow proposal job for turn={}: {}",
+                                turnId, e.getMessage());
+                    }
                 }
                 sender.complete();
                 session.setActiveEmitter(null);

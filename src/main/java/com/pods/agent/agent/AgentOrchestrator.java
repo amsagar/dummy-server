@@ -3,8 +3,10 @@ package com.pods.agent.agent;
 import com.pods.agent.api.dto.ChatState;
 import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuntimeTuningProperties;
+import com.pods.agent.domain.AgentProfile;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
+import com.pods.agent.repository.AgentProfileRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.instruction.InstructionLoaderService;
@@ -49,6 +51,7 @@ public class AgentOrchestrator {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final RuntimeEventRepository runtimeEventRepository;
     private final ObjectMapper objectMapper;
+    private final AgentProfileRepository agentProfileRepository;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
 
@@ -58,7 +61,8 @@ public class AgentOrchestrator {
                              MemoryService memoryService,
                              RuntimeTuningProperties runtimeTuningProperties,
                              RuntimeEventRepository runtimeEventRepository,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper,
+                             AgentProfileRepository agentProfileRepository) {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.instructionLoaderService = instructionLoaderService;
@@ -66,6 +70,7 @@ public class AgentOrchestrator {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.runtimeEventRepository = runtimeEventRepository;
         this.objectMapper = objectMapper;
+        this.agentProfileRepository = agentProfileRepository;
         this.baseSystemPrompt = loadBaseSystemPrompt();
         this.memoryToolsPrompt = loadPromptResource("prompts/AUTO_MEMORY_TOOLS_SYSTEM_PROMPT.md");
     }
@@ -177,6 +182,30 @@ public class AgentOrchestrator {
     }
 
     private String buildSystemPrompt(ChatState state, AgentSession session) {
+        // When an agent profile is explicitly selected (e.g. ov-basic /
+        // ov-detailed from the order-validation-ui), its system_prompt
+        // *replaces* the base prompt and the skill catalog. This lets a
+        // narrow assistant fully scope its own behavior without competing
+        // with skill instructions baked into the default prompt. We still
+        // append timezone + memory-tools so the profile can call the
+        // memory tools and reason about "today's date" correctly.
+        String profileId = state == null ? null : state.getAgentProfileId();
+        if (profileId != null && !profileId.isBlank()) {
+            AgentProfile profile = agentProfileRepository.findById(profileId).orElse(null);
+            if (profile != null && profile.getSystemPrompt() != null && !profile.getSystemPrompt().isBlank()) {
+                StringBuilder p = new StringBuilder(profile.getSystemPrompt());
+                p.append("\n\nCurrent date: ");
+                String ptz = (state != null && state.getTimezone() != null) ? state.getTimezone() : "America/New_York";
+                try {
+                    p.append(ZonedDateTime.now(ZoneId.of(ptz)).format(DateTimeFormatter.RFC_1123_DATE_TIME));
+                } catch (Exception e) {
+                    p.append(ZonedDateTime.now().format(DateTimeFormatter.RFC_1123_DATE_TIME));
+                }
+                p.append("\n");
+                return p.toString();
+            }
+        }
+
         StringBuilder prompt = new StringBuilder(baseSystemPrompt);
 
         // Date/time

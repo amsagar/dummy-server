@@ -601,6 +601,28 @@ public class AgentRuntimeService {
         ModelRef embeddingModelRef = embeddingAutoRouterService.pickEmbeddingModel(state);
 
         List<AgentTool> tools = selectTurnTools(userText, baseTools, baseIds, memorySignals, embeddingModelRef, session.getSessionId());
+
+        // Narrow-scope agent profiles (ov-basic, ov-detailed) demand a hard
+        // allow-list: the assistant must NEVER see Get_OrderID,
+        // Serviceability, ContainerAvailability or any framework
+        // tool — only the ov* analytics tools + the HITL question tool.
+        // Selecting one of these profiles also disables the skill-first
+        // gate so the model can't fall through to the pods-order-validation
+        // skill flow.
+        String profileId = state == null ? null : state.getAgentProfileId();
+        boolean isOrderValidationProfile = profileId != null && profileId.startsWith("ov-");
+        if (isOrderValidationProfile) {
+            Set<String> allowed = Set.of(
+                    "ovListRunsForOrder",
+                    "ovGetRunDetail",
+                    "ovStartValidation",
+                    "ovDashboardStats",
+                    "question");
+            tools = tools.stream()
+                    .filter(t -> t != null && t.getName() != null && allowed.contains(t.getName()))
+                    .toList();
+        }
+
         // Skip the skill-first gate in toolchain_designer mode — the architect skill is already
         // injected as the system prompt, and the gate would otherwise block read/edit/apply_patch
         // calls that VFS-edit mode depends on, returning a "call skill first" string instead of
@@ -608,6 +630,7 @@ public class AgentRuntimeService {
         boolean designerMode = isToolChainDesignerMode(state.getRuntimeMode())
                 || isToolChainArchitectRuntimeMode(state.getRuntimeMode());
         boolean enforceSkillFirst = !designerMode
+                && !isOrderValidationProfile
                 && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
         String selectedSkillContext = buildSelectedSkillContext(session, userText, state);

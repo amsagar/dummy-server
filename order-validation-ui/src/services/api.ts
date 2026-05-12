@@ -102,6 +102,21 @@ export const orderValidationApi = {
   },
 };
 
+export interface OrderValidationUiSettings {
+  chatModelRef: string | null;
+  responseMode: "basic" | "detailed";
+  workflowId: string | null;
+}
+
+export const orderValidationSettingsApi = {
+  get(): Promise<OrderValidationUiSettings> {
+    return get<OrderValidationUiSettings>("/settings");
+  },
+  update(s: OrderValidationUiSettings): Promise<OrderValidationUiSettings> {
+    return send<OrderValidationUiSettings>("PUT", "/settings", s, BASE);
+  },
+};
+
 const WORKFLOW_BASE = "/api/v1/workflow";
 
 export const workflowRunsApi = {
