@@ -169,6 +169,27 @@ public class WorkflowAlignmentJudge {
                     a list fallback, that is the canonical, correct form and
                     MUST NOT be flagged as misaligned.
 
+                    SpEL SANDBOX — `T(...)` is FORBIDDEN. The engine runs
+                    SpEL with a sandbox that rejects type references at
+                    parse time with `Access to types is forbidden`. Even
+                    behind an Elvis short-circuit (`?:`), the parse-time
+                    guard fires and the whole activity fails with
+                    `errorClass=EXPRESSION` before any tool runs. Therefore:
+                      - `T(String).valueOf(#x)` is WRONG. The correct
+                        idiom for "stringify any value" is
+                        `(#x == null ? null : '' + #x)` — SpEL's `'' + ...`
+                        coerces numbers/booleans to their string form
+                        without touching a type.
+                      - `T(java.time.LocalDate).now()...` is WRONG. Any
+                        date / time / type-static-method computation must
+                        be pre-computed inside a CodeExec activity (plain
+                        Java, not SpEL) and exposed as a plain field the
+                        downstream SpEL reads via property access.
+                    If the draft uses `T(...)`, that is a high-severity
+                    misalignment and your critique must say so —
+                    regardless of whether the rest of the activity looks
+                    correct. Never suggest a `T(...)` expression as a fix.
+
                     Output contract — return ONLY this JSON, no prose, no fences:
 
                     {

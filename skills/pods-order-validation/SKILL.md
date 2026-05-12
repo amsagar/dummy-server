@@ -48,6 +48,33 @@ outputVariable per CodeExec activity, plus `.output` sub-paths
 downstream** — same pattern workflow-architect's
 `templates/foreach-accumulate.json` uses for `#details?.output`.
 
+### SpEL sandbox — NO `T(...)` type references
+
+The workflow engine evaluates `#{ ... }` expressions inside a SpEL
+sandbox that **forbids type references**. Any `T(SomeClass)` syntax
+fails at PARSE time with
+`EvaluationException: Access to types is forbidden`, before the
+expression runs — Elvis short-circuit (`?:`) does NOT rescue it.
+The whole activity fails with `errorClass=EXPRESSION`, the tool is
+never invoked, and accumulators that branch on the (null) result
+silently record skipped rows.
+
+The skeleton avoids the trap in two ways:
+- **String-of-anything**: `(#x == null ? null : '' + #x)` instead of
+  `T(String).valueOf(#x)`. SpEL string concatenation with `''`
+  coerces numbers/booleans to their `toString()` form without a type
+  reference.
+- **Date computation**: today's ISO date is computed inside the
+  `prepareContainerCheck` CodeExec (`java.time.LocalDate.now()` — fine
+  inside CodeExec because that's plain Java, not SpEL) and stored on
+  each toCheck line as `_referenceDate`. The downstream
+  `callContainerAvailability` SpEL just reads
+  `#currentContainerLine._referenceDate` — a property access, no type.
+
+Pattern for future skills: **anything that needs `T(...)` in SpEL must
+be pre-computed in a CodeExec activity** and exposed as a plain field
+the downstream SpEL can read.
+
 ## Required resources
 
 | Resource | Type | When to call |
