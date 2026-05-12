@@ -1,6 +1,8 @@
 package com.pods.agent.workflow.persistence;
 
 import com.pods.agent.repository.SqlQueryLoader;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +46,38 @@ public class ActivityInstRepository {
     public List<ActivityInstRow> findByInstId(String instId) {
         return jdbc.query(sql.getQuery("WORKFLOW_ACTIVITY_INST.FIND_BY_INST_ID"),
                 new MapSqlParameterSource("instId", instId), RowMappers.ACTIVITY_INST);
+    }
+
+    public List<ActivityInstRow> findByInstIdAndDefIdOrdered(String instId, String activityDefId) {
+        return jdbc.query(sql.getQuery("WORKFLOW_ACTIVITY_INST.FIND_BY_INST_ID_AND_DEF_ID"),
+                new MapSqlParameterSource()
+                        .addValue("instId", instId)
+                        .addValue("activityDefId", activityDefId),
+                RowMappers.ACTIVITY_INST);
+    }
+
+    /**
+     * Batch lookup for output snapshots: returns a map of {@code inst_id} →
+     * {@code output_snapshot} JSON text for the given activity definition.
+     * Used by analytics to fold per-activity payloads (e.g. {@code fetchOrder}'s
+     * order JSON) back into per-run views without an N+1 query.
+     */
+    public Map<String, String> findOutputSnapshotsByInstIdsAndDefId(Collection<String> instIds,
+                                                                   String activityDefId) {
+        if (instIds == null || instIds.isEmpty()) return Map.of();
+        return jdbc.query(
+                sql.getQuery("WORKFLOW_ACTIVITY_INST.FIND_OUTPUT_BY_INST_IDS_AND_DEF_ID"),
+                new MapSqlParameterSource()
+                        .addValue("instIds", instIds)
+                        .addValue("activityDefId", activityDefId),
+                rs -> {
+                    Map<String, String> out = new HashMap<>();
+                    while (rs.next()) {
+                        String snap = rs.getString("output_snapshot");
+                        if (snap != null) out.put(rs.getString("inst_id"), snap);
+                    }
+                    return out;
+                });
     }
 
     public java.util.List<java.util.Map<String, Object>> failureHotspots(int limit) {

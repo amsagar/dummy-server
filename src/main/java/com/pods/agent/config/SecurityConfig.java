@@ -35,6 +35,18 @@ public class SecurityConfig {
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
+                        // Order-validation analytics: read-only, intentionally public
+                        // so the standalone order-validation-ui can render without an
+                        // auth flow. The endpoints expose only aggregates of completed
+                        // workflow runs — see OrderValidationAnalyticsController.
+                        .requestMatchers(HttpMethod.GET, "/api/v1/order-validation/**").permitAll()
+                        // Order-validation UI also drives workflow runs (Submit order
+                        // button) and decision-table CRUD (Settings → Decision Tables).
+                        // Kept under permitAll to match the standalone-UI posture above.
+                        .requestMatchers(HttpMethod.POST, "/api/v1/workflow/runs").permitAll()
+                        .requestMatchers("/api/v1/decision-tables/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/decision-tables").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/decision-tables").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter.class)

@@ -23,7 +23,7 @@ import {
   type BoardEdgeData,
   type BoardNodeData,
 } from "@/lib/workflowSerializer";
-import { loadLayout } from "@/lib/workflowLayout";
+import { getOrComputeLayout } from "@/lib/workflowLayout";
 import { workflowNodeTypes } from "@/components/workflow/designer/nodes";
 import { ExecutionStatusProvider } from "./ExecutionStatusContext";
 import type { ActivityInst, ProcessDef } from "@/types/workflow";
@@ -55,7 +55,7 @@ function ExecutionCanvasInner({
   // Build nodes/edges + overlay metadata.
   const { nodes, edges, joinProgress, ranActivityIds } = useMemo(() => {
     const { nodes: rawNodes, edges: rawEdges } = deserializeProcessDef(def);
-    const layout = loadLayout(def.id);
+    const layout = getOrComputeLayout(def.id, rawNodes, rawEdges, { persist: false });
 
     // Last attempt per activity_def_id.
     const lastAttempt = new Map<string, ActivityInst>();
@@ -87,13 +87,13 @@ function ExecutionCanvasInner({
     }
 
     // Style + layout each node.
-    const styledNodes: Node<BoardNodeData>[] = rawNodes.map((n, i) => ({
+    const styledNodes: Node<BoardNodeData>[] = rawNodes.map((n) => ({
       ...n,
       draggable: false,
       connectable: false,
       selectable: true,
       selected: n.id === selectedActivityDefId,
-      position: layout[n.id] ?? { x: 80 + i * 220, y: 120 },
+      position: layout[n.id] ?? { x: 0, y: 0 },
     }));
 
     // Style edges: bolded if both endpoints ran, dimmed otherwise. Error

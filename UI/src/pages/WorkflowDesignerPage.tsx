@@ -35,7 +35,7 @@ import {
   type BoardEdgeData,
   type BoardNodeData,
 } from "@/lib/workflowSerializer";
-import { loadLayout, saveLayout } from "@/lib/workflowLayout";
+import { getOrComputeLayout, saveLayout } from "@/lib/workflowLayout";
 import type { ActivityType, ProcessDef, VariableSpec } from "@/types/workflow";
 import {
   DRAG_MIME,
@@ -85,16 +85,16 @@ function DesignerInner({ initialDef, id }: DesignerInnerProps) {
   const [jsonOpen, setJsonOpen] = useState(false);
   const [varsOpen, setVarsOpen] = useState(false);
 
-  // Hydrate once the definition loads. Layout x/y is restored from
-  // localStorage (per-workflow); fresh nodes fall back to a horizontal lane.
+  // Hydrate once the definition loads. Saved drags win; un-positioned nodes
+  // get auto-laid-out via dagre (see workflowAutoLayout).
   useEffect(() => {
     if (!initialDef) return;
     const { nodes: n, edges: e } = deserializeProcessDef(initialDef);
-    const layout = loadLayout(id);
+    const layout = getOrComputeLayout(id, n, e);
     setNodes(
-      n.map((node, i) => ({
+      n.map((node) => ({
         ...node,
-        position: layout[node.id] ?? { x: 80 + i * 220, y: 120 },
+        position: layout[node.id] ?? { x: 0, y: 0 },
       })),
     );
     setEdges(e);
@@ -328,7 +328,8 @@ function DesignerInner({ initialDef, id }: DesignerInnerProps) {
 
   function applyJson(def: ProcessDef) {
     const { nodes: n, edges: e } = deserializeProcessDef(def);
-    setNodes(n.map((nd, i) => ({ ...nd, position: { x: 80 + i * 220, y: 120 } })));
+    const layout = getOrComputeLayout(id, n, e);
+    setNodes(n.map((nd) => ({ ...nd, position: layout[nd.id] ?? { x: 0, y: 0 } })));
     setEdges(e);
     if (def.name) setName(def.name);
     if (def.version) setVersion(def.version);

@@ -1,0 +1,265 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Poppins', ui-sans-serif, system-ui, sans-serif;
+
+  --color-pods-red: #E31837;
+  --color-pods-blue: #005CB9;
+  --color-pods-blue-dark: #00458C;
+  --color-pods-navy: #0A1628;
+  --color-pods-orange: #F47920;
+
+  --color-status-pass: #16a34a;
+  --color-status-warning: #d97706;
+  --color-status-fail: #dc2626;
+  --color-status-escalated: #7c3aed;
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+/* Light theme — default. Applied when no [data-theme] attribute is present
+   or when [data-theme="light"] is explicitly set on <html>. Sidebar stays
+   dark navy on both themes (intentional brand affordance). */
+:root,
+:root[data-theme="light"] {
+  --background: #f3f4f6;
+  --foreground: #111827;
+  --card: #ffffff;
+  --card-foreground: #111827;
+  --primary: #005CB9;
+  --primary-foreground: #ffffff;
+  /* `--muted` is the surface color for secondary buttons / chips sitting
+     inside white cards. It must be visibly darker than `--card` (#ffffff)
+     or those controls disappear. gray-200 reads as a clear pill. */
+  --muted: #e5e7eb;
+  --muted-foreground: #374151;
+  --accent: rgba(0,0,0,0.06);
+  --accent-foreground: #111827;
+  --destructive: #dc2626;
+  --border: #d1d5db;
+  --input: #e5e7eb;
+  --ring: #005CB9;
+  --radius: 0.625rem;
+
+  --sidebar: #0A1628;
+  --sidebar-foreground: rgba(255,255,255,0.9);
+  --sidebar-accent: rgba(255,255,255,0.08);
+  --sidebar-border: rgba(255,255,255,0.06);
+
+  --pill-pass-bg: #ecfdf5;
+  --pill-pass-fg: #047857;
+  --pill-pass-border: #a7f3d0;
+
+  --pill-fail-bg: #fef2f2;
+  --pill-fail-fg: #b91c1c;
+  --pill-fail-border: #fecaca;
+
+  --pill-warn-bg: #fffbeb;
+  --pill-warn-fg: #b45309;
+  --pill-warn-border: #fde68a;
+
+  --pill-info-bg: #eff6ff;
+  --pill-info-fg: #1d4ed8;
+  --pill-info-border: #bfdbfe;
+
+  --pill-muted-bg: #f3f4f6;
+  --pill-muted-fg: #374151;
+  --pill-muted-border: #e5e7eb;
+
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-border: #e5e7eb;
+  --chart-axis: #374151;
+  --chart-grid: rgba(0,0,0,0.06);
+  --chart-success: #16a34a;
+  --chart-failure: #dc2626;
+}
+
+/* Dark theme — opt-in via [data-theme="dark"] on <html>. */
+:root[data-theme="dark"] {
+  --background: #0f1419;
+  --foreground: rgba(255,255,255,0.92);
+  --card: #1a1f26;
+  --card-foreground: rgba(255,255,255,0.92);
+  --primary: #005CB9;
+  --primary-foreground: #ffffff;
+  --muted: #232830;
+  --muted-foreground: rgba(255,255,255,0.55);
+  --accent: rgba(255,255,255,0.08);
+  --accent-foreground: rgba(255,255,255,0.92);
+  --destructive: #ef4444;
+  --border: rgba(255,255,255,0.08);
+  --input: rgba(255,255,255,0.08);
+  --ring: #005CB9;
+
+  --sidebar: #0A1628;
+  --sidebar-foreground: rgba(255,255,255,0.9);
+  --sidebar-accent: rgba(255,255,255,0.08);
+  --sidebar-border: rgba(255,255,255,0.06);
+
+  --pill-pass-bg: rgba(22,163,74,0.15);
+  --pill-pass-fg: #4ade80;
+  --pill-pass-border: rgba(22,163,74,0.25);
+
+  --pill-fail-bg: rgba(220,38,38,0.15);
+  --pill-fail-fg: #f87171;
+  --pill-fail-border: rgba(220,38,38,0.25);
+
+  --pill-warn-bg: rgba(217,119,6,0.15);
+  --pill-warn-fg: #fbbf24;
+  --pill-warn-border: rgba(217,119,6,0.25);
+
+  --pill-info-bg: rgba(59,130,246,0.15);
+  --pill-info-fg: #60a5fa;
+  --pill-info-border: rgba(59,130,246,0.25);
+
+  --pill-muted-bg: rgba(255,255,255,0.05);
+  --pill-muted-fg: rgba(255,255,255,0.55);
+  --pill-muted-border: rgba(255,255,255,0.08);
+
+  --chart-tooltip-bg: #1a1f26;
+  --chart-tooltip-border: rgba(255,255,255,0.1);
+  --chart-axis: rgba(255,255,255,0.4);
+  --chart-grid: rgba(255,255,255,0.06);
+  --chart-success: #4ade80;
+  --chart-failure: #ef4444;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'Poppins', ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: "ss01" on, "cv11" on;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  .stat-card {
+    background: var(--card);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    padding: 18px 20px;
+  }
+
+  .stat-label {
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--muted-foreground);
+    line-height: 1.3;
+  }
+
+  .stat-value {
+    font-size: 1.85rem;
+    font-weight: 700;
+    color: var(--foreground);
+    line-height: 1.1;
+    margin-top: 4px;
+  }
+
+  .stat-delta-up   { color: var(--pill-pass-fg); font-size: 0.78rem; font-weight: 500; }
+  .stat-delta-down { color: var(--pill-fail-fg); font-size: 0.78rem; font-weight: 500; }
+  .stat-delta-muted { color: var(--muted-foreground); font-size: 0.78rem; font-weight: 500; }
+
+  .panel-card {
+    background: var(--card);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    padding: 20px;
+  }
+
+  .panel-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  .panel-subtitle {
+    font-size: 0.78rem;
+    color: var(--muted-foreground);
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .pill-pass  { background: var(--pill-pass-bg);  color: var(--pill-pass-fg);  border: 1px solid var(--pill-pass-border); }
+  .pill-fail  { background: var(--pill-fail-bg);  color: var(--pill-fail-fg);  border: 1px solid var(--pill-fail-border); }
+  .pill-warn  { background: var(--pill-warn-bg);  color: var(--pill-warn-fg);  border: 1px solid var(--pill-warn-border); }
+  .pill-info  { background: var(--pill-info-bg);  color: var(--pill-info-fg);  border: 1px solid var(--pill-info-border); }
+  .pill-muted { background: var(--pill-muted-bg); color: var(--pill-muted-fg); border: 1px solid var(--pill-muted-border); }
+
+  /* Semantic helpers — readable on both themes via the pill CSS vars. */
+  .text-error    { color: var(--pill-fail-fg); }
+  .text-success  { color: var(--pill-pass-fg); }
+  .icon-success  { color: var(--pill-pass-fg); }
+  .icon-error    { color: var(--pill-fail-fg); }
+
+  .error-banner {
+    background: var(--pill-fail-bg);
+    border: 1px solid var(--pill-fail-border);
+    color: var(--pill-fail-fg);
+  }
+  .error-banner-title { color: var(--pill-fail-fg); font-weight: 500; }
+  .error-banner-body  { color: var(--pill-fail-fg); opacity: 0.85; }
+}
+
+/* Native HTML element resets so unstyled <button> / <select> still inherit Poppins */
+button, input, select, textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+input[type="date"] {
+  color: var(--foreground);
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.8;
+}
+
+:root[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+
+/* Guarantees readable label text on brand blue action buttons. */
+.btn-primary-text {
+  color: #ffffff !important;
+}
