@@ -569,12 +569,37 @@ public class ToolExecutionService {
                         "edit: old_text matches multiple locations. Include enough surrounding context to make the match unique.");
             }
             String patched = body.substring(0, first) + newText + body.substring(first + oldText.length());
+            // Refuse byte-identical edits. The model has been observed
+            // issuing placeholder edits (old_text == new_text, or
+            // semantically identical content) to satisfy a "you must edit
+            // before replying" instruction; writing identical bytes back
+            // succeeds at the OS level but leaves the SHA-256 hash
+            // unchanged, which the builder loop then flags as a no-op.
+            // Returning success here would make the audit report
+            // "edit: 1 successful calls" alongside "draft unchanged" — a
+            // self-contradiction that misleads the model on the next
+            // retry. Surface the no-op explicitly instead.
+            if (patched.equals(body)) {
+                return new ExecutionResult(false, null,
+                        "edit: no-op — old_text and new_text produce identical content (or are equal). "
+                                + "Replying without editing is the correct action when the file is already correct; "
+                                + "do not issue placeholder edits to satisfy a retry instruction.");
+            }
             Files.writeString(path, patched, StandardCharsets.UTF_8);
             return new ExecutionResult(true, "ok", null);
         }
         String content = stringArg(args, "content", null);
         if (content == null) {
             return new ExecutionResult(false, null, "edit: provide either (old_text, new_text) or content");
+        }
+        // Full-file rewrite branch: refuse when the supplied content equals
+        // the existing file bytes. Same rationale as the surgical-edit
+        // guard above — surface no-op rewrites so the loop sees the truth.
+        String existing = Files.readString(path, StandardCharsets.UTF_8);
+        if (content.equals(existing)) {
+            return new ExecutionResult(false, null,
+                    "edit: no-op — content is byte-identical to the file on disk. "
+                            + "Reply with a one-line confirmation instead of re-writing the same bytes.");
         }
         Files.writeString(path, content, StandardCharsets.UTF_8);
         return new ExecutionResult(true, "ok", null);
@@ -613,7 +638,8 @@ public class ToolExecutionService {
             return new ExecutionResult(false, null,
                     "apply_patch: no hunks found. Use blocks of <<<<<<< ORIGINAL / ======= / >>>>>>> UPDATED.");
         }
-        String body = Files.readString(path, StandardCharsets.UTF_8);
+        String originalBody = Files.readString(path, StandardCharsets.UTF_8);
+        String body = originalBody;
         int applied = 0;
         for (String[] hunk : hunks) {
             String original = hunk[0];
@@ -633,6 +659,16 @@ public class ToolExecutionService {
             }
             body = body.substring(0, first) + updated + body.substring(first + original.length());
             applied++;
+        }
+        // Refuse a multi-hunk patch whose net effect is byte-identical to
+        // the original file. Same rationale as fsEdit's no-op guard —
+        // returning success here would lie to the no-op detector in
+        // WorkflowBuilderService and start a retry spiral.
+        if (body.equals(originalBody)) {
+            return new ExecutionResult(false, null,
+                    "apply_patch: no-op — all hunks net out to byte-identical content. "
+                            + "If the file is already correct, reply with a one-line confirmation instead of "
+                            + "re-issuing an identical patch.");
         }
         Files.writeString(path, body, StandardCharsets.UTF_8);
         return new ExecutionResult(true, "ok (" + applied + " hunk" + (applied == 1 ? "" : "s") + " applied)", null);

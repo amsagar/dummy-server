@@ -77,6 +77,95 @@ class ToolExecutionServiceTest {
         }
     }
 
+    /**
+     * Regression for the alignment death-spiral: the model has been
+     * observed issuing placeholder {@code edit(old_text, new_text)} calls
+     * where {@code old_text == new_text} (or otherwise net out to
+     * identical bytes) to satisfy a "you must edit before replying"
+     * retry instruction. Returning success on such a write made the
+     * per-attempt audit lie ("edit: 1 successful calls" alongside
+     * "draft unchanged"), confusing the model on subsequent retries.
+     * The tool must refuse the call so the no-op detector sees the truth.
+     */
+    @Test
+    void editRefusesNoOpWhenOldAndNewProduceIdenticalContent() throws Exception {
+        ToolExecutionService service = new ToolExecutionService(new ObjectMapper());
+        Path temp = Path.of("target/tool-execution-noop-edit-test.txt").toAbsolutePath();
+        Files.createDirectories(temp.getParent());
+        Files.writeString(temp, "hello world");
+
+        AgentTool editTool = AgentTool.builder()
+                .id("100")
+                .name("edit")
+                .executionKind("filesystem")
+                .enabled(true)
+                .build();
+
+        String json = "{\"path\":\"" + temp.toString().replace("\\", "\\\\") + "\","
+                + "\"old_text\":\"hello\",\"new_text\":\"hello\"}";
+        var result = service.execute(editTool, json);
+
+        assertFalse(result.success(), "no-op edit must report failure, not success");
+        assertTrue(result.error() != null && result.error().contains("no-op"),
+                "error must explain it's a no-op, was: " + result.error());
+        assertTrue(Files.readString(temp).equals("hello world"),
+                "file must be untouched after a refused no-op edit");
+    }
+
+    @Test
+    void editRefusesFullRewriteWhenContentMatchesExisting() throws Exception {
+        ToolExecutionService service = new ToolExecutionService(new ObjectMapper());
+        Path temp = Path.of("target/tool-execution-noop-rewrite-test.txt").toAbsolutePath();
+        Files.createDirectories(temp.getParent());
+        Files.writeString(temp, "alpha\nbeta\n");
+
+        AgentTool editTool = AgentTool.builder()
+                .id("101")
+                .name("edit")
+                .executionKind("filesystem")
+                .enabled(true)
+                .build();
+
+        String json = "{\"path\":\"" + temp.toString().replace("\\", "\\\\") + "\","
+                + "\"content\":\"alpha\\nbeta\\n\"}";
+        var result = service.execute(editTool, json);
+
+        assertFalse(result.success(), "full-file rewrite that matches existing bytes must report failure");
+        assertTrue(result.error() != null && result.error().contains("no-op"),
+                "error must mention no-op, was: " + result.error());
+    }
+
+    @Test
+    void applyPatchRefusesWhenHunksNetOutToIdenticalContent() throws Exception {
+        ToolExecutionService service = new ToolExecutionService(new ObjectMapper());
+        Path temp = Path.of("target/tool-execution-noop-patch-test.txt").toAbsolutePath();
+        Files.createDirectories(temp.getParent());
+        Files.writeString(temp, "alpha\nbeta\ngamma\n");
+
+        AgentTool patchTool = AgentTool.builder()
+                .id("102")
+                .name("apply_patch")
+                .executionKind("filesystem")
+                .enabled(true)
+                .build();
+
+        // ORIGINAL == UPDATED → applying the patch must produce a body
+        // byte-identical to the input. The guard refuses it.
+        String patchContent = "<<<<<<< ORIGINAL\nbeta\n=======\nbeta\n>>>>>>> UPDATED";
+        String escapedPatch = patchContent.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n");
+        String json = "{\"path\":\"" + temp.toString().replace("\\", "\\\\") + "\","
+                + "\"content\":\"" + escapedPatch + "\"}";
+        var result = service.execute(patchTool, json);
+
+        assertFalse(result.success(), "apply_patch with net-zero hunks must report failure");
+        assertTrue(result.error() != null && result.error().contains("no-op"),
+                "error must mention no-op, was: " + result.error());
+        assertTrue(Files.readString(temp).equals("alpha\nbeta\ngamma\n"),
+                "file must remain unchanged after a refused no-op patch");
+    }
+
     @Test
     void mcpIntegrationTreatsIsErrorPayloadAsFailure() {
         McpClientService mcpClientService = mock(McpClientService.class);

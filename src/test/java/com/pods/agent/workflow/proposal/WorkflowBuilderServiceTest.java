@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.pods.agent.config.WorkflowProposalProperties;
+import com.pods.agent.domain.Skill;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.workspace.ExecutionLogService;
@@ -27,7 +28,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -429,6 +432,59 @@ class WorkflowBuilderServiceTest {
         // the next attempt's audit block.
         assertEquals(3, rejected.get(),
                 "rejection counter must record every attempted invocation, regardless of overload");
+    }
+
+    /**
+     * Regression for the alignment death-spiral: when the seeded skeleton is
+     * already the canonical answer and the model leaves it untouched, the
+     * builder must finalize on the first attempt WITHOUT consulting the
+     * alignment judge. The judge has been observed hallucinating
+     * "diverges from skeleton" critiques against a draft that IS the
+     * skeleton verbatim (typically by misreading the SpEL empty-list
+     * literal `{}` as a JSON empty-object), which starts an unwinnable
+     * retry loop. The verbatim-skeleton short-circuit is the structural
+     * escape hatch.
+     */
+    @Test
+    void buildShortCircuitsAlignmentWhenDraftIsVerbatimSkeleton(@TempDir Path workspace) throws IOException {
+        Fixture fx = new Fixture(workspace);
+        // Stub the skill registry to return a snapshot whose files map
+        // contains a workflow-template entry. This triggers the pre-
+        // populate path in WorkflowBuilderService.build, seeding the
+        // draft from the skeleton AND caching its SHA-256 for the
+        // short-circuit comparison.
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("SKILL.md", "# Order validation");
+        files.put("templates/validate-order-workflow.json", VALID_DRAFT);
+        SkillRegistryService.SkillSnapshot snapshot = new SkillRegistryService.SkillSnapshot(
+                Skill.builder().id("sk-1").name("order-validation").enabled(true).build(),
+                files);
+        when(fx.skillRegistryService.getEnabledSkillByName("order-validation"))
+                .thenReturn(snapshot);
+
+        WorkflowProposal proposal = fx.persistedPending();
+
+        // Fake agent: do NOT modify the draft. The seeded skeleton IS
+        // already the canonical answer; per the builder system prompt
+        // "often zero edits are required and the pre-populated draft is
+        // the answer". The short-circuit must finalize successfully
+        // without invoking the alignment judge.
+        AtomicInteger invocations = new AtomicInteger();
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters, prePop) -> {
+            invocations.incrementAndGet();
+            assertTrue(prePop, "draftPrePopulated must be true when the skill ships a template");
+            assertTrue(initial, "verbatim-skeleton path should succeed on the initial attempt");
+            // Intentionally leave the draft byte-identical to the seed.
+        });
+
+        WorkflowProposal result = fx.builder.build(proposal);
+
+        assertEquals("materialized", result.getStatus(),
+                "verbatim-skeleton path must finalize successfully");
+        assertEquals(1, invocations.get(),
+                "build must complete in a single attempt — no retry needed when the seed is correct");
+        verify(fx.alignmentJudge, never()).judge(anyString(), any(), any(), any(), any());
+        verify(fx.processDefService, times(1)).save(any());
     }
 
     @Test

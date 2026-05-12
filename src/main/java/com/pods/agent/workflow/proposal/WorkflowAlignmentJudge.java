@@ -147,6 +147,28 @@ public class WorkflowAlignmentJudge {
                     judgement on the classifier reasoning + execution log,
                     still applying the anti-enumeration rule above.
 
+                    SpEL syntax primer (READ THIS — it prevents a documented
+                    false-positive class). Workflow expressions embedded in
+                    JSON strings between `#{ ... }` are Spring Expression
+                    Language, NOT JSON. SpEL collection literals are
+                    intentionally different from JSON:
+                      - `{}`  is the empty LIST literal (NOT an empty object).
+                      - `{:}` is the empty MAP literal.
+                      - `{1, 2, 3}` is a list; `{'k': 'v'}` is a map.
+                      - `?:`  is the Elvis (null-coalesce) operator.
+                      - `#var?.field` is null-safe navigation.
+                    Therefore an expression like
+                      `(#someResults?.output ?: {})`
+                    means "the variable's `.output` if present, else an EMPTY
+                    LIST" — it is the correct way to return `[]` for an empty
+                    collection from SpEL, and matches a JSON output schema
+                    that requires an array. Do NOT critique `?: {}` as
+                    "returning an empty object instead of an empty array".
+                    Do NOT demand `?: []` — `[]` is not valid SpEL syntax
+                    and will fail to parse. If the skeleton uses `?: {}` for
+                    a list fallback, that is the canonical, correct form and
+                    MUST NOT be flagged as misaligned.
+
                     Output contract — return ONLY this JSON, no prose, no fences:
 
                     {
