@@ -2,6 +2,8 @@ package com.pods.agent.orderValidation;
 
 import com.pods.agent.workflow.api.ProcessDefService;
 import com.pods.agent.workflow.engine.WorkflowManager;
+import com.pods.agent.workflow.persistence.ProcessInstRepository;
+import com.pods.agent.workflow.persistence.ProcessInstRow;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,21 +27,31 @@ import tools.jackson.databind.ObjectMapper;
 @Component
 public class OrderValidationAgentTools {
 
+    // Block the tool call for at most this long while waiting for the
+    // freshly-started validation workflow to reach a closed state. The
+    // validate-order pipeline typically completes in ~25-30s; we cap at
+    // 90s so a stuck run doesn't pin the agent's SSE connection.
+    private static final long START_VALIDATION_TIMEOUT_MS = 90_000L;
+    private static final long START_VALIDATION_POLL_MS = 1_500L;
+
     private final OrderValidationAnalyticsService analytics;
     private final OrderValidationSettingsRepository settingsRepo;
     private final ProcessDefService processDefService;
     private final WorkflowManager workflowManager;
+    private final ProcessInstRepository processInstRepo;
     private final ObjectMapper objectMapper;
 
     public OrderValidationAgentTools(OrderValidationAnalyticsService analytics,
                                      OrderValidationSettingsRepository settingsRepo,
                                      @Lazy ProcessDefService processDefService,
                                      @Lazy WorkflowManager workflowManager,
+                                     ProcessInstRepository processInstRepo,
                                      ObjectMapper objectMapper) {
         this.analytics = analytics;
         this.settingsRepo = settingsRepo;
         this.processDefService = processDefService;
         this.workflowManager = workflowManager;
+        this.processInstRepo = processInstRepo;
         this.objectMapper = objectMapper;
     }
 
@@ -100,20 +112,87 @@ public class OrderValidationAgentTools {
                 return jsonError("workflow_not_found",
                         "Configured workflow id " + workflowId + " was not found in the engine.");
             }
+            long startedAt = Instant.now().toEpochMilli();
             String instanceId = workflowManager.startProcessAsync(
                     defOpt.get(), Map.of("orderId", orderId), "order-validation-agent");
+
+            // Block the tool call until the workflow reaches a closed state
+            // (or until the timeout fires). This means the agent gets the
+            // full run detail back in the same turn and can produce a
+            // summary without the user having to come back. The chat SSE
+            // stream stays open while we poll.
+            ProcessInstRow finalRow = waitForCompletion(instanceId);
+
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("instId", instanceId);
             out.put("orderId", orderId);
             out.put("workflowId", workflowId);
-            out.put("state", "running");
-            out.put("startedAt", Instant.now().toEpochMilli());
-            out.put("message", "Validation started; poll ovGetRunDetail with the returned instId for status.");
+            out.put("startedAt", startedAt);
+
+            if (finalRow == null) {
+                // Timed out without closing — give the agent enough info to
+                // tell the user it's still running and they should re-ask
+                // for a summary later.
+                out.put("state", "running");
+                out.put("timedOut", true);
+                out.put("message",
+                        "Workflow has not finished within " + (START_VALIDATION_TIMEOUT_MS / 1000) +
+                        "s. Tell the user the validation is still running and they can ask to summarize order " +
+                        orderId + " in a moment.");
+                return objectMapper.writeValueAsString(out);
+            }
+
+            out.put("state", finalRow.state());
+            out.put("endedAt", finalRow.endedAt());
+            out.put("durationMs",
+                    finalRow.endedAt() != null && finalRow.startedAt() != null
+                            ? Math.max(0L, finalRow.endedAt() - finalRow.startedAt())
+                            : null);
+
+            // Fold the full per-check breakdown into the tool result so the
+            // agent has everything it needs to produce the summary right
+            // here, no follow-up tool call required.
+            Optional<OrderValidationDtos.RunDetail> detail = analytics.runDetail(instanceId);
+            if (detail.isPresent()) {
+                out.put("runDetail", detail.get());
+                out.put("message",
+                        "Workflow completed. Use runDetail to produce the summary now — DO NOT call ovGetRunDetail again.");
+            } else {
+                out.put("message",
+                        "Workflow finished but no detail row found. Tell the user something went wrong.");
+            }
             return objectMapper.writeValueAsString(out);
         } catch (Exception e) {
             log.warn("ovStartValidation failed: {}", e.getMessage());
             return jsonError("error", e.getMessage());
         }
+    }
+
+    /**
+     * Polls {@code process_inst} for the given instance id every
+     * {@link #START_VALIDATION_POLL_MS} ms, returning the row once {@code
+     * state} is in a closed phase (anything starting with "closed.") or
+     * {@code null} if {@link #START_VALIDATION_TIMEOUT_MS} elapses first.
+     */
+    private ProcessInstRow waitForCompletion(String instanceId) {
+        long deadline = System.currentTimeMillis() + START_VALIDATION_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            Optional<ProcessInstRow> rowOpt = processInstRepo.findById(instanceId);
+            if (rowOpt.isPresent()) {
+                ProcessInstRow row = rowOpt.get();
+                String state = row.state();
+                if (state != null && state.startsWith("closed.")) {
+                    return row;
+                }
+            }
+            try {
+                Thread.sleep(START_VALIDATION_POLL_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        return null;
     }
 
     public String dashboardStats(Long fromTs, Long toTs) {

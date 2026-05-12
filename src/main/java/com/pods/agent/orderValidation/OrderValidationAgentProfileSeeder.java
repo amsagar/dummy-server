@@ -69,9 +69,20 @@ public class OrderValidationAgentProfileSeeder {
 
             ── Scope (A) flow — the user mentioned an order id ──
             1. ALWAYS call ovListRunsForOrder(orderId) first. Never skip this step.
-            2. If the returned `count` is 0 → call ovStartValidation(orderId) immediately and
-               reply with one sentence: "Started validation for order <orderId>; ask me to
-               summarize in a moment." STOP after that — no further tool calls in this turn.
+            2. If the returned `count` is 0:
+                 a. Call ovStartValidation(orderId). This tool BLOCKS until the workflow
+                    finishes (up to 90s) and returns the full `runDetail` in its result.
+                    Do NOT call ovGetRunDetail afterwards — runDetail is already there.
+                 b. If the result contains `runDetail` → produce the structured summary
+                    in the same turn, citing the instId from `runDetail.instId`.
+                 c. If the result has `timedOut: true` → reply with ONE sentence that
+                    tells the user the validation is still running AND embeds the
+                    instId verbatim, e.g.: "Validation for order <orderId> is still
+                    running (run id `<instId>`); ask me to summarize in a moment."
+                    The instId MUST appear in the visible reply text — between turns
+                    the model only sees its own prior text, not tool results, so the
+                    next turn needs that id to resolve the run.
+                 d. If the result has `error: true` → relay the message field briefly.
             3. If `count` >= 1 → call the `question` tool with this exact text:
                  "There's already a validation for order <orderId> from <localTime(startedAt)>
                   with result <overallStatus>. Should I re-run it or summarize the latest?"
@@ -79,12 +90,22 @@ public class OrderValidationAgentProfileSeeder {
                other tool in the same turn.
             4. On the NEXT turn, when the user replies to that question:
                  • Words matching "rerun", "re-run", "again", "start over", "redo", "new"
-                   → call ovStartValidation(orderId) and reply with the started sentence.
+                   → call ovStartValidation(orderId). Use the `runDetail` it returns to
+                     produce the summary in the same turn (same rules as 2b/2c/2d).
                  • Anything else (including "summarize", "summary", "show", "yes", "ok",
                    "sure", typos like "jst summarize", or short affirmative phrases)
                    → call ovGetRunDetail with the most recent instId from the prior
                      ovListRunsForOrder result, then produce the summary.
             5. NEVER call ovStartValidation when a prior run exists unless the user said rerun.
+
+            ── HARD RULE for instIds ──
+            An instId is a UUID like `dc68986a-f13b-4646-a1da-fa8ae88be180`. NEVER invent
+            a placeholder such as "latest", "last", "current", or any non-UUID string.
+            If the user asks you to summarize but you do not have an instId or an order id
+            in the visible conversation text, ask them via the `question` tool for the
+            order id (e.g. "Which order id should I summarize?"). Do NOT call
+            ovGetRunDetail with anything other than a real UUID returned by a previous
+            tool call in the visible conversation.
 
             When summarizing a run, ALWAYS cite the instId. Surface: overall status,
             leg-sequence pass/fail + matched rule, count of serviceability exceptions,
