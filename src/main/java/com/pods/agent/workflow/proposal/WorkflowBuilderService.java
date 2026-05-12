@@ -156,11 +156,36 @@ public class WorkflowBuilderService {
         // the template_structure_drift validator check AND the
         // canonical-shape reference the alignment judge sees. Generic — works
         // for any skill that ships templates, not just one.
-        List<ProcessDefDto> skeletonTemplates = collectSkeletonTemplates(skillAllowlist);
+        List<SkeletonTemplate> skeletonTemplates = collectSkeletonTemplates(skillAllowlist);
+        List<ProcessDefDto> skeletonDtos = skeletonTemplates.stream()
+                .map(SkeletonTemplate::dto).toList();
         if (!skeletonTemplates.isEmpty()) {
             log.info("[WorkflowBuilder] proposal {} loaded {} workflow skeleton template(s) from skills: {}",
                     proposal.getId(), skeletonTemplates.size(),
-                    skeletonTemplates.stream().map(ProcessDefDto::name).toList());
+                    skeletonDtos.stream().map(ProcessDefDto::name).toList());
+        }
+
+        // PRE-POPULATE: if any skill ships a skeleton, write the first
+        // template's raw JSON to the draft file BEFORE the agent runs. This
+        // eliminates the most common failure mode by construction — the model
+        // can't synthesize a wrong shape from scratch when the right shape is
+        // already on disk. The model's first attempt is then "read the
+        // draft, parameterize field values, stop"; it cannot regress to a
+        // minimal stub. write() is also blocked for the whole build when
+        // pre-populated (see runAgent), so the only path is edit/apply_patch
+        // on the existing skeleton.
+        boolean draftPrePopulated = false;
+        if (!skeletonTemplates.isEmpty()) {
+            SkeletonTemplate seed = skeletonTemplates.get(0);
+            try {
+                Files.writeString(draftFile, seed.rawJson(), StandardCharsets.UTF_8);
+                draftPrePopulated = true;
+                log.info("[WorkflowBuilder] proposal {} pre-populated draft from skeleton '{}' ({} bytes); write tool is blocked for this build",
+                        proposal.getId(), seed.path(), seed.rawJson().length());
+            } catch (Exception e) {
+                log.warn("[WorkflowBuilder] proposal {} failed to pre-populate draft from skeleton '{}': {} — falling back to from-scratch synthesis",
+                        proposal.getId(), seed.path(), e.getMessage());
+            }
         }
 
         int maxAttempts = Math.max(1, properties.getMaxBuildAttempts());
@@ -218,7 +243,8 @@ public class WorkflowBuilderService {
                         initialAttempt,
                         resumeFeedback,
                         chatMemory,
-                        counters);
+                        counters,
+                        draftPrePopulated);
             } catch (Exception e) {
                 log.warn("[WorkflowBuilder] proposal {} attempt {} agent invocation failed: {}",
                         proposal.getId(), displayAttempt, e.getMessage());
@@ -274,12 +300,24 @@ public class WorkflowBuilderService {
             }
 
             ValidationReport report = validator.validate(
-                    draftJson, proposal.getUserPrompt(), skeletonTemplates);
+                    draftJson, proposal.getUserPrompt(), skeletonDtos);
             if (!report.ok()) {
                 lastFailureSummary = renderStructuralFeedback(report.errors());
+                // Log the codes at INFO for at-a-glance grep, then dump
+                // each error's full message at INFO too so a user reading
+                // logs can see WHY drift fired (which activity is missing,
+                // which trigger was invalid, etc.) without having to
+                // re-derive it from the feedback prompt.
                 log.info("[WorkflowBuilder] proposal {} attempt {} structural validation FAILED ({} error(s)): {}",
                         proposal.getId(), displayAttempt, report.errors().size(),
                         report.errors().stream().map(ValidationError::code).toList());
+                for (ValidationError ve : report.errors()) {
+                    log.info("[WorkflowBuilder] proposal {} attempt {}   - [{}]{} {}",
+                            proposal.getId(), displayAttempt,
+                            ve.code(),
+                            ve.path() == null ? "" : " at " + ve.path(),
+                            ve.message());
+                }
                 continue;
             }
             log.debug("[WorkflowBuilder] proposal {} attempt {} structural validation passed",
@@ -327,9 +365,9 @@ public class WorkflowBuilderService {
      * fires when a SKILL the proposal touches explicitly bundles its own
      * workflow skeleton, e.g. pods-order-validation/templates/*.json).
      */
-    private List<ProcessDefDto> collectSkeletonTemplates(Set<String> skillAllowlist) {
+    private List<SkeletonTemplate> collectSkeletonTemplates(Set<String> skillAllowlist) {
         if (skillAllowlist == null || skillAllowlist.isEmpty()) return List.of();
-        List<ProcessDefDto> out = new ArrayList<>();
+        List<SkeletonTemplate> out = new ArrayList<>();
         for (String skillName : skillAllowlist) {
             // workflow-architect ships generic reference templates
             // (foreach-accumulate.json etc.) that DESCRIBE patterns rather
@@ -348,7 +386,7 @@ public class WorkflowBuilderService {
                 if (!lower.startsWith("templates/") || !lower.endsWith(".json")) continue;
                 try {
                     ProcessDefDto dto = validator.parseProcessDefDtoFlexible(file.getValue());
-                    out.add(dto);
+                    out.add(new SkeletonTemplate(dto, file.getValue(), path));
                 } catch (Exception e) {
                     log.warn("[WorkflowBuilder] failed to parse skeleton template {} from skill {}: {}",
                             path, skillName, e.getMessage());
@@ -406,7 +444,8 @@ public class WorkflowBuilderService {
                           boolean initialAttempt,
                           String resumeFeedback,
                           ChatMemory chatMemory,
-                          ToolCallCounters counters) throws Exception {
+                          ToolCallCounters counters,
+                          boolean draftPrePopulated) throws Exception {
         ModelProviderRouter.Spec spec = modelProviderRouter.resolve(modelRef, true);
         ChatClient client = spec.client();
 
@@ -455,7 +494,14 @@ public class WorkflowBuilderService {
         // surgical edits made during prior attempts (we observed gpt-5.2-chat
         // dropping required fields like trigger / maxIterations / outputVariables
         // when allowed to write on a retry, producing 18 structural errors).
-        if (initialAttempt) {
+        // write is allowed ONLY on the initial attempt AND only when the
+        // draft was NOT pre-populated from a skeleton. If a skeleton seeded
+        // the draft, write is blocked for the entire build — the model
+        // must use edit/apply_patch on the pre-populated content. This
+        // eliminates the "model regenerates from scratch and drifts from
+        // the skeleton" failure mode we observed in production.
+        boolean writeAllowed = initialAttempt && !draftPrePopulated;
+        if (writeAllowed) {
             tools.add(new PathRestrictedFsCallback("write",
                     "Write the full workflow JSON to the proposal draft file. ONLY available on the initial attempt; on retries the tool is replaced and rejects all calls.",
                     """
@@ -469,14 +515,28 @@ public class WorkflowBuilderService {
                     toolExecutionService, draftFile,
                     counters == null ? null : counters.write));
         } else {
+            String rejectDescription;
+            String rejectBody;
+            if (draftPrePopulated) {
+                rejectDescription = "Forbidden because the draft was pre-populated from a skill-supplied workflow skeleton. Use `edit` (surgical replace) or `apply_patch` (multi-hunk diff) on the existing draft content. A full rewrite would erase the skeleton and trigger `template_structure_drift` immediately.";
+                rejectBody = "{\"success\":false,\"error\":\"write_forbidden_skeleton_seeded\","
+                        + "\"hint\":\"The draft file has already been pre-populated from a "
+                        + "skill-supplied workflow skeleton (see the REQUIRED WORKFLOW SKELETON "
+                        + "banner from skill_load). You MUST adapt the existing content via "
+                        + "edit(old_text, new_text) or apply_patch — write is blocked for this "
+                        + "entire build to prevent the regenerate-from-scratch failure mode.\"}";
+            } else {
+                rejectDescription = "Forbidden on retry attempts. Use `edit` (surgical replace) or `apply_patch` (multi-hunk diff) instead — they preserve fields you've already set correctly. A full rewrite is rejected to prevent dropping required fields like trigger / maxIterations / outputVariables.";
+                rejectBody = "{\"success\":false,\"error\":\"write_forbidden_on_retry\","
+                        + "\"hint\":\"write is only available on the initial attempt; "
+                        + "on retries you MUST use edit(old_text, new_text) for surgical "
+                        + "changes or apply_patch for multi-hunk diffs. Regenerating the file "
+                        + "from scratch would erase the structural fields (triggers, "
+                        + "maxIterations, outputVariables) you've already set correctly.\"}";
+            }
             tools.add(new RejectingToolCallback("write",
-                    "Forbidden on retry attempts. Use `edit` (surgical replace) or `apply_patch` (multi-hunk diff) instead — they preserve fields you've already set correctly. A full rewrite is rejected to prevent dropping required fields like trigger / maxIterations / outputVariables.",
-                    "{\"success\":false,\"error\":\"write_forbidden_on_retry\","
-                            + "\"hint\":\"write is only available on the initial attempt; "
-                            + "on retries you MUST use edit(old_text, new_text) for surgical "
-                            + "changes or apply_patch for multi-hunk diffs. Regenerating the file "
-                            + "from scratch would erase the structural fields (triggers, "
-                            + "maxIterations, outputVariables) you've already set correctly.\"}",
+                    rejectDescription,
+                    rejectBody,
                     counters == null ? null : counters.rejectedWriteOnRetry));
         }
         tools.add(new PathRestrictedFsCallback("edit",
@@ -507,9 +567,10 @@ public class WorkflowBuilderService {
                 counters == null ? null : counters.applyPatch));
         tools.add(new SkillLoadCallback(skillRegistryService, objectMapper, skillAllowlist));
 
-        String system = buildSystemPrompt(skillAllowlist, draftRelString, logRel.toString().replace('\\', '/'));
+        String system = buildSystemPrompt(skillAllowlist, draftRelString,
+                logRel.toString().replace('\\', '/'), draftPrePopulated);
         String user = initialAttempt
-                ? buildInitialUserPrompt(proposal, draftRelString, logRel)
+                ? buildInitialUserPrompt(proposal, draftRelString, logRel, draftPrePopulated)
                 : buildResumeUserPrompt(proposal, draftRelString, resumeFeedback);
 
         // The memory advisor prepends the prior conversation to every prompt
@@ -536,7 +597,42 @@ public class WorkflowBuilderService {
         });
     }
 
-    private String buildSystemPrompt(Set<String> skillAllowlist, String draftPath, String executionLogPath) {
+    private String buildSystemPrompt(Set<String> skillAllowlist, String draftPath,
+                                     String executionLogPath, boolean draftPrePopulated) {
+        String prePopBlock = draftPrePopulated
+                ? """
+
+                ============================================================
+                DRAFT PRE-POPULATED FROM SKILL SKELETON
+                ============================================================
+                The draft file at the path above has ALREADY been written
+                from a skill-supplied `templates/*.json` workflow skeleton.
+                On your first action, read the draft to confirm; then use
+                `edit` or `apply_patch` to adjust ONLY the field values
+                that need to differ for this proposal (e.g. the workflow's
+                `name`, `description`, default `orderId`, anything the
+                Phase-1 classifier reasoning specifically called out).
+
+                The `write` tool is BLOCKED for this entire build —
+                calling it returns `write_forbidden_skeleton_seeded`. Do
+                not try to regenerate the file; you will fail every retry.
+
+                Activity IDs, types, foreach wiring, transition edges,
+                outputVariables shape, and tool input expressions are
+                ALL part of the skeleton contract. The
+                `template_structure_drift` validator and the alignment
+                judge BOTH check that the skeleton's exact set of
+                activity IDs is preserved. Deleting `prepareLegLines`,
+                renaming `iterateServiceability`, collapsing a foreach,
+                or rewiring transitions will fail validation on every
+                attempt until you put them back. The fastest path to a
+                green build is: read draft, adjust the 1-3 field values
+                that obviously need changing for this proposal, stop
+                with a one-line confirmation. Often zero edits are
+                required and the pre-populated draft is the answer.
+                ============================================================
+                """
+                : "";
         return """
                 You are the Workflow Builder. You convert one chat turn's
                 execution log + the skills the chat agent used into a
@@ -545,7 +641,7 @@ public class WorkflowBuilderService {
                 You operate ONLY on a single draft file:
 
                     %s
-
+                %s
                 You MUST not write to any other path. The write/edit/apply_patch
                 tools will reject any other path with a clear error.
 
@@ -556,9 +652,10 @@ public class WorkflowBuilderService {
                   - glob(glob)   — list workspace files
                   - grep(pattern)— search workspace file contents
                   - write(path,content) — full file rewrite of the draft.
-                    INITIAL ATTEMPT ONLY. On retries the tool is replaced
-                    by a rejecting stub that returns
-                    `write_forbidden_on_retry`; you cannot call it then.
+                    INITIAL ATTEMPT ONLY, and only when the draft was NOT
+                    pre-populated from a skeleton. When a skeleton seeded
+                    the draft (see the banner above), write is blocked
+                    for the entire build.
                   - edit(path,old_text,new_text) — surgical edit. REQUIRED on retries.
                   - apply_patch(path,content)    — multi-hunk diff against the draft.
 
@@ -717,10 +814,11 @@ public class WorkflowBuilderService {
                   - Only AFTER at least one successful edit/apply_patch
                     call, stop calling tools and reply with a one-line
                     confirmation describing what you actually changed.
-                """.formatted(draftPath, skillAllowlist, executionLogPath);
+                """.formatted(draftPath, prePopBlock, skillAllowlist, executionLogPath);
     }
 
-    private String buildInitialUserPrompt(WorkflowProposal proposal, String draftPath, Path executionLogPath) {
+    private String buildInitialUserPrompt(WorkflowProposal proposal, String draftPath,
+                                          Path executionLogPath, boolean draftPrePopulated) {
         StringBuilder sb = new StringBuilder();
         sb.append("Build the workflow for proposal `").append(proposal.getId()).append("`.\n\n");
         sb.append("Suggested name (from Phase-1 classifier): ")
@@ -749,9 +847,39 @@ public class WorkflowBuilderService {
         sb.append(proposal.getSkillNamesJson() == null ? "(none)\n" : proposal.getSkillNamesJson() + "\n");
         sb.append("\nExecution log file: ").append(executionLogPath).append("\n");
         sb.append("Draft target file: ").append(draftPath).append("\n\n");
-        sb.append("Begin by calling skill_load(name=\"workflow-architect\"). Then read the\n");
-        sb.append("execution log, then load each remaining skill, then write the workflow\n");
-        sb.append("JSON to the draft file. Stop with a one-line confirmation.\n");
+        if (draftPrePopulated) {
+            sb.append("============================================================\n");
+            sb.append("DRAFT ALREADY SEEDED FROM SKELETON — DO NOT REGENERATE\n");
+            sb.append("============================================================\n");
+            sb.append("The draft file above has already been written from the\n");
+            sb.append("skill's `templates/*.json` workflow skeleton. Your task is\n");
+            sb.append("NOT to compose a workflow from scratch — that path is\n");
+            sb.append("blocked (`write` returns `write_forbidden_skeleton_seeded`).\n");
+            sb.append("\n");
+            sb.append("Procedure (target: 1 attempt, no edits required in the\n");
+            sb.append("common case):\n");
+            sb.append("  1. read(\"").append(draftPath).append("\") to see the seeded skeleton.\n");
+            sb.append("  2. (Optional) skill_load(\"workflow-architect\") and the\n");
+            sb.append("     skill that ships this skeleton only IF you genuinely\n");
+            sb.append("     do not understand a field you intend to edit.\n");
+            sb.append("  3. If the Phase-1 classifier hint above calls out a\n");
+            sb.append("     specific value to change (e.g. a different default\n");
+            sb.append("     orderId or workflow name), use\n");
+            sb.append("     edit(path, old_text, new_text) to change ONLY that\n");
+            sb.append("     field. Otherwise make NO edits — the skeleton is\n");
+            sb.append("     the final answer.\n");
+            sb.append("  4. Stop with a one-line confirmation. Do not delete\n");
+            sb.append("     activities, do not rename activity IDs, do not\n");
+            sb.append("     collapse foreach loops, do not change outputVariables\n");
+            sb.append("     shape, do not rewire transitions. The validator's\n");
+            sb.append("     `template_structure_drift` rule and the alignment\n");
+            sb.append("     judge will both reject any structural deviation\n");
+            sb.append("     from the skeleton, and the build will fail.\n");
+        } else {
+            sb.append("Begin by calling skill_load(name=\"workflow-architect\"). Then read the\n");
+            sb.append("execution log, then load each remaining skill, then write the workflow\n");
+            sb.append("JSON to the draft file. Stop with a one-line confirmation.\n");
+        }
         return sb.toString();
     }
 
@@ -1018,8 +1146,18 @@ public class WorkflowBuilderService {
                     boolean initialAttempt,
                     String resumeFeedback,
                     ChatMemory chatMemory,
-                    ToolCallCounters counters) throws Exception;
+                    ToolCallCounters counters,
+                    boolean draftPrePopulated) throws Exception;
     }
+
+    /**
+     * Pair of (parsed DTO, raw JSON text, source path) for a skeleton
+     * template file. Raw JSON is preserved so the builder can pre-populate
+     * the draft file byte-for-byte from the skeleton — re-serializing the
+     * DTO would lose comments, formatting, and any embedded CodeExec source
+     * with significant whitespace.
+     */
+    record SkeletonTemplate(ProcessDefDto dto, String rawJson, String path) {}
 
     /** Test-only setter for swapping in a deterministic fake. */
     void setAgentInvoker(AgentInvoker invoker) {

@@ -413,11 +413,52 @@ public class WorkflowJsonValidator {
         List<ProcessDefDto.ActivityDto> draftActivities = draft.activities() == null
                 ? List.of() : draft.activities();
 
-        // 1. Collect every (toolName, pluginName) pair appearing in the
-        //    template's tool activities. We key on the toolName because that
-        //    is the contract the skeleton declares (which tool gets called
-        //    in this slot). pluginName is part of the identity so AgentToolPlugin
-        //    vs CodeExecPlugin with the same toolName remain distinguishable.
+        // 1. ACTIVITY-ID congruence (strongest check). Every activity id in
+        //    the template must appear in the draft with the same type. This
+        //    is the contract: the skeleton's activity ids ARE the schema.
+        //    Models that "rebuild" the workflow by inventing new ids fail
+        //    here immediately, not after the alignment judge has burned a
+        //    retry on critique. Type match prevents the also-common
+        //    failure where the model keeps an id like 'iterateServiceability'
+        //    but changes its type from foreach to something else.
+        Map<String, ProcessDefDto.ActivityDto> draftById = new LinkedHashMap<>();
+        for (ProcessDefDto.ActivityDto a : draftActivities) {
+            if (a != null && a.id() != null) draftById.put(a.id(), a);
+        }
+        for (ProcessDefDto.ActivityDto templateActivity : template.activities()) {
+            if (templateActivity == null || templateActivity.id() == null) continue;
+            String id = templateActivity.id();
+            ProcessDefDto.ActivityDto draftMatch = draftById.get(id);
+            if (draftMatch == null) {
+                errors.add(new ValidationError(
+                        "template_structure_drift",
+                        "skill-supplied skeleton requires activity id '" + id
+                                + "' (type=" + templateActivity.type()
+                                + ") but the draft has no activity with that id."
+                                + " Activity ids ARE part of the skeleton contract — do not rename,"
+                                + " delete, or replace them. If your edits removed this activity,"
+                                + " re-add it from the skeleton under templates/*.json verbatim."
+                                + " Template: '" + safeName(template) + "'.",
+                        "activities[" + id + "]"));
+            } else if (templateActivity.type() != null && draftMatch.type() != null
+                    && !templateActivity.type().equalsIgnoreCase(draftMatch.type())) {
+                errors.add(new ValidationError(
+                        "template_structure_drift",
+                        "skill-supplied skeleton declares activity '" + id + "' as type='"
+                                + templateActivity.type() + "' but the draft has it as type='"
+                                + draftMatch.type() + "'. Activity type is part of the skeleton"
+                                + " contract — changing foreach to normal or tool to ai_reasoning"
+                                + " is forbidden. Template: '" + safeName(template) + "'.",
+                        "activities[" + id + "].type"));
+            }
+        }
+
+        // 2. (toolName, pluginName) pair coverage. Backstop in case the
+        //    activity-id check passes (e.g. model kept ids but swapped
+        //    properties.toolName from decisionTableEvaluate to something
+        //    else, or changed pluginName from AgentToolPlugin to a custom
+        //    plugin). Tool activities with blank toolName are tracked by
+        //    pluginName alone so CodeExecPlugin activities stay in scope.
         Set<String> templatePairs = collectToolPluginPairs(template);
         Set<String> draftPairs = collectToolPluginPairs(draft);
         Set<String> missing = new LinkedHashSet<>(templatePairs);
@@ -426,7 +467,7 @@ public class WorkflowJsonValidator {
             errors.add(new ValidationError(
                     "template_structure_drift",
                     "skill-supplied workflow skeleton declares tool activity "
-                            + pair + " but the draft has no matching (toolName, pluginName) pair."
+                            + pair + " but the draft has no matching pair."
                             + " Start your draft from the skeleton under templates/*.json (surfaced"
                             + " by skill_load with a 'REQUIRED WORKFLOW SKELETON(S)' banner) and"
                             + " edit field values rather than synthesizing a different layout."
@@ -434,9 +475,10 @@ public class WorkflowJsonValidator {
                     null));
         }
 
-        // 2. Count foreach activities in template vs draft. The draft must
+        // 3. Count foreach activities in template vs draft. The draft must
         //    have at least the template's count so the model can't quietly
-        //    replace a foreach with a single activity.
+        //    replace a foreach with a single activity (caught by #1 if ids
+        //    were renamed, by this if ids stayed but types changed).
         long templateForeachCount = template.activities().stream()
                 .filter(a -> a != null && a.type() != null
                         && "foreach".equalsIgnoreCase(a.type().trim()))
@@ -465,10 +507,21 @@ public class WorkflowJsonValidator {
             if (a == null || a.type() == null || !"tool".equalsIgnoreCase(a.type().trim())) continue;
             Map<String, Object> props = a.properties();
             Object toolNameValue = props == null ? null : props.get("toolName");
-            if (!(toolNameValue instanceof String toolName) || toolName.isBlank()) continue;
             String plugin = a.pluginName() == null ? "" : a.pluginName().trim();
-            out.add("(toolName='" + toolName.trim().toLowerCase(Locale.ROOT)
-                    + "', pluginName='" + plugin.toLowerCase(Locale.ROOT) + "')");
+            if (toolNameValue instanceof String toolName && !toolName.isBlank()) {
+                out.add("(toolName='" + toolName.trim().toLowerCase(Locale.ROOT)
+                        + "', pluginName='" + plugin.toLowerCase(Locale.ROOT) + "')");
+            } else if (!plugin.isBlank()) {
+                // tool activities without a toolName (e.g. CodeExecPlugin
+                // which is identified by its `code` rather than a tool
+                // registry name) — key on activity id + plugin so they
+                // still participate in the pair-coverage check. Without
+                // this the model could delete every CodeExec activity
+                // and still pass the (toolName, pluginName) check.
+                String id = a.id() == null ? "" : a.id().trim();
+                out.add("(activityId='" + id.toLowerCase(Locale.ROOT)
+                        + "', pluginName='" + plugin.toLowerCase(Locale.ROOT) + "')");
+            }
         }
         return out;
     }
