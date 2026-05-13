@@ -67,6 +67,16 @@ public class ToolExecutionService {
         this.orderValidationAgentTools = tools;
     }
 
+    // Optional — vendor rationalization tool pack
+    private com.pods.agent.vendorRationalization.VendorRationalizationAgentTools vendorRationalizationAgentTools;
+
+    @Autowired(required = false)
+    public void setVendorRationalizationAgentTools(
+            @org.springframework.context.annotation.Lazy
+            com.pods.agent.vendorRationalization.VendorRationalizationAgentTools tools) {
+        this.vendorRationalizationAgentTools = tools;
+    }
+
     public ToolExecutionService(ObjectMapper objectMapper) {
         this(objectMapper, null, null, null, null, null);
     }
@@ -453,13 +463,48 @@ public class ToolExecutionService {
                                 orderValidationAgentTools.dashboardStats(fromTs, toTs), null);
                     }
                     default -> {
-                        // fall through
+                        // fall through to vendor rationalization
                     }
                 }
             } catch (Exception e) {
                 log.warn("Order-validation tool {} failed: {}", name, e.getMessage());
                 return new ExecutionResult(false, null,
                         "Order-validation tool failed: " + e.getMessage());
+            }
+        }
+        // Vendor rationalization tools
+        if (vendorRationalizationAgentTools != null) {
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                switch (name) {
+                    case "vrsearchvendors" -> {
+                        String query = stringArg(args, "query", "");
+                        Integer limit = args.get("limit") instanceof Number n ? n.intValue() : 20;
+                        return new ExecutionResult(true,
+                                vendorRationalizationAgentTools.vrSearchVendors(query, limit), null);
+                    }
+                    case "vrgetcategoryinsight" -> {
+                        String categoryName = stringArg(args, "categoryName", null);
+                        return new ExecutionResult(true,
+                                vendorRationalizationAgentTools.vrGetCategoryInsight(categoryName), null);
+                    }
+                    case "vrgetdashboardstats" -> {
+                        return new ExecutionResult(true,
+                                vendorRationalizationAgentTools.vrGetDashboardStats(), null);
+                    }
+                    case "vrgetsavingsopportunities" -> {
+                        Integer topN = args.get("topN") instanceof Number n ? n.intValue() : 10;
+                        return new ExecutionResult(true,
+                                vendorRationalizationAgentTools.vrGetSavingsOpportunities(topN), null);
+                    }
+                    default -> {
+                        // fall through
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Vendor-rationalization tool {} failed: {}", name, e.getMessage());
+                return new ExecutionResult(false, null,
+                        "Vendor-rationalization tool failed: " + e.getMessage());
             }
         }
         if ("decisiontableevaluate".equals(name)) {

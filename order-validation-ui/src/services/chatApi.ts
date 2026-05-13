@@ -9,13 +9,20 @@ import type {
 
 const BASE = "/api/v1";
 
+// X-OV-Client tells the backend which standalone UI this request came from.
+// SecurityContextService falls back to this header (when no JWT is present)
+// to choose the user id under which sessions / messages / HITL interactions
+// are persisted — so the order-validation-ui sidebar doesn't surface
+// vendor-rationalization-ui chats and vice versa.
+const CLIENT_HEADER = { "X-OV-Client": "order-validation-ui" } as const;
+
 async function jget<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v != null && v !== "") qs.set(k, String(v));
   }
   const url = qs.toString() ? `${BASE}${path}?${qs.toString()}` : `${BASE}${path}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json", ...CLIENT_HEADER } });
   if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text().catch(() => "")) || res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -23,7 +30,7 @@ async function jget<T>(path: string, params: Record<string, unknown> = {}): Prom
 async function jsend<T>(method: "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...CLIENT_HEADER },
     body: body == null ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text().catch(() => "")) || res.statusText}`);
@@ -83,7 +90,11 @@ export const chatApi = {
   ): Promise<void> {
     const res = await fetch(`${BASE}/chat`, {
       method: "POST",
-      headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+        ...CLIENT_HEADER,
+      },
       body: JSON.stringify(req),
       signal,
     });

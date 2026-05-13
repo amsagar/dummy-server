@@ -492,3 +492,18 @@ CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
     updated_at      BIGINT NOT NULL
 );
 
+-- ── Vendor-rationalization tunable config ───────────────────────────────
+-- Singleton (id='singleton') row that holds the business-tunable knobs
+-- used by the VR analytics service and the executive dashboard: the
+-- category→lever map, savings buckets, KPI targets, insight thresholds
+-- + templates, and the Pareto threshold. Everything lives inside one
+-- JSON blob so the Settings admin page can edit the whole config as a
+-- unit. Seeded with `VendorRationalizationConfigDefaults` on first boot;
+-- subsequent restarts never overwrite an existing row (business edits
+-- must survive).
+CREATE TABLE IF NOT EXISTS agent.vendor_rationalization_config (
+    id              TEXT PRIMARY KEY,
+    payload_json    TEXT NOT NULL,
+    updated_at      BIGINT NOT NULL
+);
+

@@ -52,6 +52,10 @@ public class SecurityConfig {
                         // Sessions/models endpoints expose data scoped to the
                         // default user the controller falls back to when no JWT
                         // is present (see SecurityContextService.currentUserIdOrDefault).
+                        // Vendor rationalization portal: read-only analytics + reload + tunable config editor
+                        .requestMatchers(HttpMethod.GET, "/api/v1/vendor-rationalization/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/vendor-rationalization/reload").permitAll()
+                        .requestMatchers(HttpMethod.PUT, "/api/v1/vendor-rationalization/config").permitAll()
                         .requestMatchers("/api/v1/chat/**").permitAll()
                         .requestMatchers("/api/v1/sessions/**").permitAll()
                         .requestMatchers("/api/v1/models/**").permitAll()
