@@ -29,7 +29,7 @@ export function AssistantBubble({ content, streaming, streamingVerb, onRegenerat
         <Bot className="size-3.5 text-primary" />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="prose prose-sm dark:prose-invert max-w-none text-sm leading-relaxed text-foreground">
+        <div className="assistant-md max-w-none text-sm leading-relaxed text-foreground">
           {content ? (
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
           ) : streaming ? (

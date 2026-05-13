@@ -263,3 +263,85 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .btn-primary-text {
   color: #ffffff !important;
 }
+
+/* ── Assistant message markdown ──────────────────────────────────────────────
+   react-markdown + remark-gfm output for the AI assistant. Tailwind's
+   `prose` classes need the typography plugin (not installed here), so we
+   hand-roll the essentials: h2/h3 spacing, GFM tables, blockquote callouts,
+   inline code chips. Scoped to `.assistant-md` so nothing else gets styled.
+*/
+.assistant-md > * + * { margin-top: 0.6rem; }
+.assistant-md h2 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--foreground);
+  margin-top: 0.4rem;
+  margin-bottom: 0.25rem;
+  letter-spacing: -0.01em;
+}
+.assistant-md h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--foreground);
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+  text-transform: none;
+}
+.assistant-md p { line-height: 1.55; }
+.assistant-md strong { font-weight: 600; color: var(--foreground); }
+.assistant-md ul, .assistant-md ol {
+  padding-left: 1.1rem;
+  margin: 0.25rem 0;
+}
+.assistant-md ul { list-style: disc; }
+.assistant-md ol { list-style: decimal; }
+.assistant-md li { margin: 0.15rem 0; }
+.assistant-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+}
+.assistant-md pre {
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: var(--muted);
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.assistant-md pre code { padding: 0; background: transparent; }
+.assistant-md blockquote {
+  border-left: 3px solid var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0 6px 6px 0;
+  color: var(--foreground);
+  font-style: normal;
+}
+.assistant-md blockquote > * + * { margin-top: 0.3rem; }
+.assistant-md table {
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.assistant-md thead {
+  background: var(--muted);
+}
+.assistant-md th, .assistant-md td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+}
+.assistant-md th { font-weight: 600; }
+.assistant-md a { color: var(--primary); text-decoration: underline; }
+.assistant-md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0.75rem 0;
+}

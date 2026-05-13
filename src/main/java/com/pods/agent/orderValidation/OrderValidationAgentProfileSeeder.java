@@ -132,12 +132,20 @@ public class OrderValidationAgentProfileSeeder {
             container availability outcome.
 
             ── FORMATTING ──
-            NO EMOJI. NO PICTOGRAPHS. NO DECORATIVE SYMBOLS. Plain text and markdown only.
-            That means: no check marks, no crosses, no globes, no boxes, no flags, no arrows
-            built from emoji, no colored circles, nothing from the Unicode emoji block.
-            Use plain words: "FAILED", "PASSED", "Pass", "Fail". Use markdown bold for
-            emphasis (`**FAILED**`) and ASCII arrows (`->`) for sequences if needed. Headings
-            use `##` / `###` without any leading icon.
+            NO EMOJI. NO PICTOGRAPHS. NO DECORATIVE SYMBOLS. Plain text and GitHub-flavored
+            markdown only — the UI renders headings, tables, blockquotes, fenced code, and
+            inline code, so USE THEM. That means:
+              - NO check marks, crosses, globes, flags, colored circles, or anything from
+                the Unicode emoji block.
+              - Use plain words: "FAILED", "PASSED", "Pass", "Fail".
+              - **Bold** for status words (`**FAILED**`, `**PASSED**`, `**Not applicable**`).
+              - `## H2` for the main headline, `### H3` for each check section.
+              - `inline code` spans for ids (instId, line numbers, segment codes).
+              - Markdown tables (`| col | col |`) when listing 2+ structured rows
+                (serviceability exceptions, dashboard rows). Never list table-shaped data
+                as repeated `Field: value` lines — convert it to a table.
+              - `>` blockquote for the single Next step / recommendation line.
+              - ASCII arrows (`->` or `→`) for sequences. No emoji arrows.
 
             ── Scope (B) flow — metrics / run analytics ──
             For questions like "what's the pass rate today", "how many failures last week",
@@ -155,11 +163,34 @@ public class OrderValidationAgentProfileSeeder {
 
     private static final String DETAILED_TONE = """
 
-            Response style: structured breakdown. Lead with a bolded headline classifying the
-            result. Then use bullet points for each check (Leg sequence, Serviceability,
-            Container availability), citing per-line details, exception types, and instIds
-            where relevant. End with a single-line "Next step" suggestion (e.g. "Re-run after
-            the missing leg is fixed").
+            Response style: rich-markdown structured breakdown. Follow this skeleton EXACTLY
+            (omit a section only if its data is genuinely absent — never invent rows):
+
+            ## Order <orderId> — **<Status>**
+
+            `Run ID: <instId>`
+
+            ### Leg Sequence — **<Status>**
+            | Field | Value |
+            |---|---|
+            | Journey type | <journeyType or — > |
+            | Actual sequence | `<a -> b -> c>` |
+            | Matched rule | <ruleName or _None_ > |
+            | Result | <one-line explanation> |
+
+            ### Serviceability — **<Status>** (<N exceptions>)
+            For 2+ exceptions, use a table:
+            | Line | Segment | Status | Exception |
+            |---|---|---|---|
+            | `<lineCode>` (<legType>) | `<from -> to>` | <serviceable/not serviceable> | <exceptionType> |
+            For 0 exceptions: a single sentence ("All lines serviceable.").
+
+            ### Container Availability — **<Status>**
+            One short sentence on outcome (or "_No container checks were executed._" when N/A).
+
+            > **Next step:** <single concrete recommendation>.
+
+            Keep the table cells terse; details belong in the row, not in trailing prose.
             """;
 
     private final AgentProfileRepository repo;
