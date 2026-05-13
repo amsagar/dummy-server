@@ -83,20 +83,40 @@ public class OrderValidationAgentProfileSeeder {
                     the model only sees its own prior text, not tool results, so the
                     next turn needs that id to resolve the run.
                  d. If the result has `error: true` → relay the message field briefly.
-            3. If `count` >= 1 → call the `question` tool with this exact text:
-                 "There's already a validation for order <orderId> from <localTime(startedAt)>
-                  with result <overallStatus>. Should I re-run it or summarize the latest?"
-               Then STOP (see HARD RULE above). Do not produce any other text or call any
-               other tool in the same turn.
-            4. On the NEXT turn, when the user replies to that question:
+            3. If `count` >= 1 → INFER the user's intent from their original message.
+               Do NOT default to asking "rerun or summarize?". The whole point of the
+               assistant is to answer without unnecessary back-and-forth.
+                 • SUMMARIZE intent (default — pick this whenever the user's message
+                   suggests they want to know about an existing run):
+                   triggers include any of: "what are the issues", "what's the issue",
+                   "what happened", "what's wrong", "why did it fail", "details",
+                   "result", "outcome", "status", "summary", "summarize", "tell me",
+                   "show me", "check", or the user typing the order id alone with no
+                   action verb. → call ovGetRunDetail with the most recent instId
+                   from the ovListRunsForOrder result, then produce the summary in the
+                   same turn.
+                 • RERUN intent (the user explicitly asked for a fresh run): triggers
+                   include "rerun", "re-run", "run again", "start over", "redo",
+                   "new validation", "validate again", "kick off", "trigger". → call
+                   ovStartValidation(orderId) and summarize the runDetail it returns.
+                 • TRULY AMBIGUOUS (rare — e.g. the user only typed the order id and
+                   nothing else, AND you want to be cautious): only then call the
+                   `question` tool with: "There's already a validation for order
+                   <orderId> from <localTime(startedAt)> with result <overallStatus>.
+                   Should I re-run it or summarize the latest?" Then STOP. In almost
+                   every real case you should NOT reach this branch — when in doubt,
+                   default to summarize.
+            4. NEVER call ovStartValidation when a prior run exists unless the user's
+               message clearly signals a rerun (per step 3 RERUN triggers above).
+            5. If the prior turn ended with your "rerun or summarize?" `question` tool
+               call and the user is now replying to it:
                  • Words matching "rerun", "re-run", "again", "start over", "redo", "new"
-                   → call ovStartValidation(orderId). Use the `runDetail` it returns to
-                     produce the summary in the same turn (same rules as 2b/2c/2d).
+                   → call ovStartValidation(orderId) using the order id from the prior
+                     conversation, then summarize the runDetail it returns.
                  • Anything else (including "summarize", "summary", "show", "yes", "ok",
-                   "sure", typos like "jst summarize", or short affirmative phrases)
-                   → call ovGetRunDetail with the most recent instId from the prior
-                     ovListRunsForOrder result, then produce the summary.
-            5. NEVER call ovStartValidation when a prior run exists unless the user said rerun.
+                   "sure", short affirmative replies) → call ovGetRunDetail with the
+                     most recent instId from the prior ovListRunsForOrder result, then
+                     produce the summary.
 
             ── HARD RULE for instIds ──
             An instId is a UUID like `dc68986a-f13b-4646-a1da-fa8ae88be180`. NEVER invent

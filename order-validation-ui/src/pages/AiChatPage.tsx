@@ -327,9 +327,16 @@ export function AiChatPage() {
 
   const handleSseEvent = (event: Record<string, unknown>, assistantId: string, systemId: string) => {
     const type = String(event.type ?? "");
-    if (type === "session" || type === "session.updated") {
-      const sid = (event.sessionId ?? event.id) as string | undefined;
-      if (sid && sid !== sessionId) setSessionId(sid);
+    // Every SSE envelope carries `sessionId`. Backends rarely emit a dedicated
+    // session/session.updated event for a fresh chat — we'd previously miss the
+    // id on the initial `connected` envelope and end up with sessionId=null for
+    // the whole turn, which broke HITL replies ("No active session"). Adopt the
+    // id from any envelope that has one.
+    const embeddedSid = (event.sessionId ?? event.id) as string | undefined;
+    if (embeddedSid && embeddedSid !== sessionId) {
+      setSessionId(embeddedSid);
+    }
+    if (type === "session" || type === "session.updated" || type === "connected") {
       // Backend often auto-generates a session title shortly after creation.
       // Refresh the sidebar so the new title replaces "Untitled chat" without
       // a full page reload.
