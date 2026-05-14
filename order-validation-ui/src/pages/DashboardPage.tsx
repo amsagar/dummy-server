@@ -29,6 +29,12 @@ function statusPill(status: ResultStatus | OverallStatus) {
   return <Badge variant={map[status] ?? "muted"}>{formatStatus(status)}</Badge>;
 }
 
+function containerPill(status: ResultStatus) {
+  if (status === "fail" || status === "exception")
+    return <Badge variant="warn">Need Rescheduling</Badge>;
+  return statusPill(status);
+}
+
 export function DashboardPage() {
   const { workflowId, dateRange } = useSettings();
   const navigate = useNavigate();
@@ -194,7 +200,7 @@ export function DashboardPage() {
                           <TableCell>{r.journeyType ?? "—"}</TableCell>
                           <TableCell>{statusPill(r.legSequenceStatus)}</TableCell>
                           <TableCell>{statusPill(r.serviceabilityStatus)}</TableCell>
-                          <TableCell>{statusPill(r.containerStatus)}</TableCell>
+                          <TableCell>{containerPill(r.containerStatus)}</TableCell>
                           <TableCell>{statusPill(r.overallStatus)}</TableCell>
                         </TableRow>
                       ))}

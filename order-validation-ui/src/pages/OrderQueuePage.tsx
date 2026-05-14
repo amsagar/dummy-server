@@ -43,6 +43,12 @@ function statusPill(status: ResultStatus | OverallStatus) {
   return <Badge variant={map[status] ?? "muted"}>{formatStatus(status)}</Badge>;
 }
 
+function containerPill(status: ResultStatus) {
+  if (status === "fail" || status === "exception")
+    return <Badge variant="warn">Need Rescheduling</Badge>;
+  return statusPill(status);
+}
+
 const QUEUE_PAGE_SIZE = 25;
 
 export function OrderQueuePage() {
@@ -198,7 +204,7 @@ export function OrderQueuePage() {
                             <TableCell className="text-right">{r.legLines ?? "—"}</TableCell>
                             <TableCell>{statusPill(r.legSequenceStatus)}</TableCell>
                             <TableCell>{statusPill(r.serviceabilityStatus)}</TableCell>
-                            <TableCell>{statusPill(r.containerStatus)}</TableCell>
+                            <TableCell>{containerPill(r.containerStatus)}</TableCell>
                             <TableCell>{statusPill(r.overallStatus)}</TableCell>
                           </TableRow>
                         ))}
