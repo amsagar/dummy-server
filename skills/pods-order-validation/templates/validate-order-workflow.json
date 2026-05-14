@@ -283,7 +283,7 @@
       "type": "route",
       "pluginName": null,
       "properties": {
-        "result": "#{ {'orderId': #orderId, 'legSequence': #legSequenceResult, 'serviceability': (#serviceabilityResults?.output ?: {}), 'containerAvailability': (#containerAvailabilityResults?.output ?: {})} }"
+        "result": "#{ {'orderId': #orderId, 'journeyType': (#legData?.output?.journeyType ?: ''), 'actualSequence': (#legData?.output?.actualSequence ?: {}), 'legSequence': #legSequenceResult, 'serviceability': (#serviceabilityResults?.output ?: {}), 'containerAvailability': (#containerAvailabilityResults?.output ?: {})} }"
       },
       "inputSchema": {},
       "outputSchema": {},
