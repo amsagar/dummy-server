@@ -23,11 +23,11 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Builds and maintains the per-turn <strong>execution log</strong> — the
- * "GOLD" structured trace that the Workflow Architect consumes to convert
- * one exploratory chat turn into a reusable workflow definition.
+ * "GOLD" structured trace that drafting flows consume to convert one
+ * exploratory chat turn into a reusable toolchain definition.
  *
  * <p>Output shape (single JSON document at
- * {@code <sessionWorkspace>/.pods-agent/workflow/execution-log-<turnId>.json}):
+ * {@code <sessionWorkspace>/.pods-agent/toolchains/execution-log-<turnId>.json}):
  * <pre>
  * {
  *   "executionId": &lt;turnId&gt;,
@@ -65,7 +65,7 @@ import tools.jackson.databind.node.ObjectNode;
  *       the LLM during the turn.</li>
  *   <li>Reserved for future phases: {@code loop}, {@code condition},
  *       {@code parallel}, {@code ai_reasoning}. Phase C will populate these
- *       from engine-side typed events when materialized workflows execute.</li>
+ *       from engine-side typed events when materialized chains execute.</li>
  *   <li>{@code other} — fallback bucket for unrecognised event types so the
  *       log stays comprehensive without forcing a schema change every time a
  *       new event type is introduced.</li>
@@ -80,8 +80,8 @@ import tools.jackson.databind.node.ObjectNode;
 @Slf4j
 public class ExecutionLogService {
 
-    /** Root directory inside the session VFS for all workflow-related files. */
-    public static final String WORKFLOW_DIR = ".pods-agent/workflow";
+    /** Root directory inside the session VFS for execution-log artifacts. */
+    public static final String EXECUTION_LOG_DIR = ".pods-agent/toolchains";
 
     public static final String STEP_TOOL = "tool";
     public static final String STEP_STATE_TRANSITION = "state_transition";
@@ -155,7 +155,7 @@ public class ExecutionLogService {
         try {
             Path file = workspaceService.ensureFile(
                     workspace,
-                    WORKFLOW_DIR + "/execution-log-" + turnId + ".json");
+                    EXECUTION_LOG_DIR + "/execution-log-" + turnId + ".json");
             // Write to a sibling temp file then atomically move into place so
             // a partial write can never be observed by the architect subagent.
             Path temp = file.resolveSibling(file.getFileName().toString() + ".tmp");
@@ -179,7 +179,7 @@ public class ExecutionLogService {
         if (sessionId == null || turnId == null) return Optional.empty();
         Path workspace = workspaceService.get(sessionId);
         if (workspace == null) return Optional.empty();
-        Path file = workspace.resolve(WORKFLOW_DIR).resolve("execution-log-" + turnId + ".json");
+        Path file = workspace.resolve(EXECUTION_LOG_DIR).resolve("execution-log-" + turnId + ".json");
         if (!Files.isRegularFile(file)) return Optional.empty();
         try {
             return Optional.of(objectMapper.readTree(file.toFile()));
@@ -196,7 +196,7 @@ public class ExecutionLogService {
     public Path approvedProposalPath(String sessionId, String defId) {
         Path workspace = workspaceService.getOrCreate(sessionId);
         return workspaceService.ensureFile(
-                workspace, WORKFLOW_DIR + "/proposals/" + defId + ".json");
+                workspace, EXECUTION_LOG_DIR + "/proposals/" + defId + ".json");
     }
 
     /**

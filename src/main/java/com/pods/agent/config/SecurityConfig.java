@@ -15,19 +15,13 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @Configuration
 public class SecurityConfig {
     private final JwtAuthFilter jwtAuthFilter;
-    private final ApiKeyAuthFilter apiKeyAuthFilter;
 
-    public SecurityConfig(JwtAuthFilter jwtAuthFilter, ApiKeyAuthFilter apiKeyAuthFilter) {
+    public SecurityConfig(JwtAuthFilter jwtAuthFilter) {
         this.jwtAuthFilter = jwtAuthFilter;
-        this.apiKeyAuthFilter = apiKeyAuthFilter;
     }
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        // API-key filter runs first so an explicit X-API-Key header takes
-        // precedence over any JWT that might also be present (e.g. when a
-        // shell user copy-pastes both). JwtAuthFilter still handles the
-        // common in-app case.
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -41,10 +35,6 @@ public class SecurityConfig {
                         // workflow runs — see OrderValidationAnalyticsController.
                         .requestMatchers(HttpMethod.GET, "/api/v1/order-validation/**").permitAll()
                         .requestMatchers(HttpMethod.PUT, "/api/v1/order-validation/settings").permitAll()
-                        // Order-validation UI also drives workflow runs (Submit order
-                        // button) and decision-table CRUD (Settings → Decision Tables).
-                        // Kept under permitAll to match the standalone-UI posture above.
-                        .requestMatchers(HttpMethod.POST, "/api/v1/workflow/runs").permitAll()
                         .requestMatchers("/api/v1/decision-tables/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/decision-tables").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/decision-tables").permitAll()
@@ -61,7 +51,6 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/models/**").permitAll()
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }

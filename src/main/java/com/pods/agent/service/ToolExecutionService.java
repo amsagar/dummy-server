@@ -105,7 +105,7 @@ public class ToolExecutionService {
             case "filesystem" -> executeFilesystem(tool, userText);
             case "shell" -> executeShell(tool, userText);
             case "web" -> executeWeb(tool, userText);
-            case "workflow" -> executeWorkflow(tool, userText);
+            case "workflow" -> executeIntegration(tool, userText);
             case "memory" -> executeMemory(tool, userText);
             case "integration" -> executeIntegration(tool, userText);
             default -> executeHttpProxy(tool, userText);
@@ -379,21 +379,6 @@ public class ToolExecutionService {
         return text == null ? null : String.valueOf(text);
     }
 
-    private ExecutionResult executeWorkflow(AgentTool tool, String userText) {
-        Map<String, Object> args = parseArgs(userText);
-        String name = tool.getName().toLowerCase();
-        return switch (name) {
-            case "question" -> new ExecutionResult(true, "approval_required:" + stringArg(args, "question", stringArg(args, "query", "Approval required")), null);
-            case "plan_exit" -> new ExecutionResult(true, "{\"status\":\"plan_exit\",\"message\":\"Plan completed\"}", null);
-            case "task" -> new ExecutionResult(true, "{\"status\":\"task_dispatched\",\"task\":\"" + sanitize(stringArg(args, "task", stringArg(args, "query", "task"))) + "\"}", null);
-            case "parallel_task" -> new ExecutionResult(true, "{\"status\":\"parallel_dispatched\"}", null);
-            case "batch" -> new ExecutionResult(true, "{\"status\":\"batch_dispatched\"}", null);
-            case "pipeline" -> new ExecutionResult(true, "{\"status\":\"pipeline_dispatched\"}", null);
-            case "todowrite" -> new ExecutionResult(true, "{\"status\":\"todo_updated\"}", null);
-            default -> new ExecutionResult(false, null, "Unsupported workflow tool: " + tool.getName());
-        };
-    }
-
     private ExecutionResult executeMemory(AgentTool tool, String userText) {
         Map<String, Object> args = parseArgs(userText);
         String name = tool.getName().toLowerCase();
@@ -571,6 +556,14 @@ public class ToolExecutionService {
             } catch (Exception e) {
                 return new ExecutionResult(false, null, "MCP integration failed: " + e.getMessage());
             }
+        }
+        if ("question".equals(name)) {
+            Map<String, Object> args = parseArgs(userText);
+            String prompt = stringArg(args, "question", stringArg(args, "query", "Approval required"));
+            return new ExecutionResult(true, "approval_required:" + prompt, null);
+        }
+        if (Set.of("plan_exit", "task", "parallel_task", "batch", "pipeline", "todowrite").contains(name)) {
+            return new ExecutionResult(true, "{\"status\":\"ok\",\"tool\":\"" + name + "\"}", null);
         }
         if (Set.of("agent_send", "agent_receive", "skill", "lsp").contains(name)) {
             return new ExecutionResult(true, "{\"status\":\"ok\",\"tool\":\"" + name + "\"}", null);
@@ -854,7 +847,6 @@ public class ToolExecutionService {
         if (Set.of("read", "glob", "grep", "write", "edit", "apply_patch").contains(name)) return "filesystem";
         if ("bash".equals(name)) return "shell";
         if (Set.of("webfetch", "websearch", "codesearch").contains(name)) return "web";
-        if (Set.of("question", "plan_exit", "task", "parallel_task", "batch", "pipeline", "todowrite").contains(name)) return "workflow";
         if (Set.of("memory_save", "memory_search", "memoryview", "memorycreate", "memorystrreplace", "memoryinsert", "memorydelete", "memoryrename").contains(name)) return "memory";
         if (Set.of("lsp", "agent_send", "agent_receive", "skill").contains(name)) return "integration";
         return "http_proxy";

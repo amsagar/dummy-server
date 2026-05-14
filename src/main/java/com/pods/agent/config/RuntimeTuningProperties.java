@@ -40,7 +40,7 @@ public class RuntimeTuningProperties {
     private boolean persistInternalEvents = false;
     private boolean enableExperimentalTools = false;
     private List<String> enabledExperimentalToolNames = new ArrayList<>();
-    private List<String> allowedPermissionScopes = new ArrayList<>(List.of("filesystem", "shell", "web", "workflow", "memory", "integration", "http_proxy"));
+    private List<String> allowedPermissionScopes = new ArrayList<>(List.of("filesystem", "shell", "web", "memory", "integration", "http_proxy"));
     private boolean dynamicToolExposureEnabled = false;
     private boolean baseOnlyDefaultToolInjectionEnabled = true;
     private int toolShortlistDefaultSize = 24;

@@ -18,10 +18,6 @@ import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.RuntimeTraceRepository;
 import com.pods.agent.service.mcp.McpRuntimeAdapter;
 import com.pods.agent.service.tool.ToolEmbeddingIndexService;
-import com.pods.agent.workflow.api.ProcessDefService;
-import com.pods.agent.workflow.persistence.WorkflowVariableRepository;
-import com.pods.agent.workflow.proposal.WorkflowProposalService;
-import com.pods.agent.workflow.engine.WorkflowManager;
 import org.springframework.stereotype.Service;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -78,10 +74,6 @@ public class AgentRuntimeService {
     private final ToolChainRuntimeService toolChainRuntimeService;
     private final ToolChainService toolChainService;
     private final ChainParameterExtractor chainParameterExtractor;
-    private final WorkflowProposalService workflowProposalService;
-    private final ProcessDefService processDefService;
-    private final WorkflowManager workflowManager;
-    private final WorkflowVariableRepository workflowVariableRepository;
     private final Map<String, Map<String, Double>> toolMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> toolDomainMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> skillMemorySignals = new ConcurrentHashMap<>();
@@ -108,11 +100,7 @@ public class AgentRuntimeService {
                                EmbeddingAutoRouterService embeddingAutoRouterService,
                                ToolChainRuntimeService toolChainRuntimeService,
                                ToolChainService toolChainService,
-                               ChainParameterExtractor chainParameterExtractor,
-                               WorkflowProposalService workflowProposalService,
-                               ProcessDefService processDefService,
-                               WorkflowManager workflowManager,
-                               WorkflowVariableRepository workflowVariableRepository) {
+                               ChainParameterExtractor chainParameterExtractor) {
         this.orchestrator = orchestrator;
         this.toolRegistryService = toolRegistryService;
         this.policyEngine = policyEngine;
@@ -136,10 +124,6 @@ public class AgentRuntimeService {
         this.toolChainRuntimeService = toolChainRuntimeService;
         this.toolChainService = toolChainService;
         this.chainParameterExtractor = chainParameterExtractor;
-        this.workflowProposalService = workflowProposalService;
-        this.processDefService = processDefService;
-        this.workflowManager = workflowManager;
-        this.workflowVariableRepository = workflowVariableRepository;
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender) {
@@ -156,39 +140,9 @@ public class AgentRuntimeService {
 
         if (!isToolChainDesignerMode(runtimeMode)
                 && !isToolChainArchitectRuntimeMode(runtimeMode)
-                && (state.getWorkflowDefId() == null || state.getWorkflowDefId().isBlank())
                 && (state.getToolChainId() == null || state.getToolChainId().isBlank())
-                && !normalizedUserText.isBlank()) {
-            maybeResolveWorkflowByIntent(session, normalizedUserText, state, sender, turnId);
-        }
-
-        if (!isToolChainDesignerMode(runtimeMode)
-                && !isToolChainArchitectRuntimeMode(runtimeMode)
-                && (state.getToolChainId() == null || state.getToolChainId().isBlank())
-                && (state.getWorkflowDefId() == null || state.getWorkflowDefId().isBlank())
                 && !normalizedUserText.isBlank()) {
             maybeResolveToolChainByIntent(session, normalizedUserText, state, sender, turnId);
-        }
-
-        if (shouldExecuteWorkflow(state)) {
-            transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "workflow-execution");
-            try {
-                String response = executeWorkflowSelection(session, normalizedUserText, state, sender, turnId);
-                transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "workflow-execution-done");
-                return response;
-            } catch (Exception e) {
-                log.warn("[AgentRuntime] Workflow execution failed, falling back to dynamic flow: {}", e.getMessage());
-                if (state.isWorkflowSelectedByUser() || "strict".equalsIgnoreCase(runtimeMode)) {
-                    String error = "Workflow execution failed: " + e.getMessage();
-                    sender.sendError(error);
-                    session.getMessages().add(new AssistantMessage(error));
-                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE,
-                            state.isWorkflowSelectedByUser() ? "workflow-failed-user-selected" : "workflow-failed-strict");
-                    return error;
-                }
-                state.setWorkflowDefId(null);
-                state.setWorkflowSelectedByUser(false);
-            }
         }
 
         if (shouldExecuteToolChain(state)) {
@@ -319,77 +273,9 @@ public class AgentRuntimeService {
     private boolean shouldExecuteToolChain(ChatState state) {
         if (state == null) return false;
         if (isToolChainDesignerMode(state.getRuntimeMode()) || isToolChainArchitectRuntimeMode(state.getRuntimeMode())) return false;
-        if (state.getWorkflowDefId() != null && !state.getWorkflowDefId().isBlank()) return false;
         if (state.getToolChainId() != null && !state.getToolChainId().isBlank()) return true;
         String mode = state.getRuntimeMode();
         return mode != null && mode.toLowerCase(Locale.ROOT).contains("toolchain");
-    }
-
-    private boolean shouldExecuteWorkflow(ChatState state) {
-        if (state == null) return false;
-        if (isToolChainDesignerMode(state.getRuntimeMode()) || isToolChainArchitectRuntimeMode(state.getRuntimeMode())) return false;
-        return state.getWorkflowDefId() != null && !state.getWorkflowDefId().isBlank();
-    }
-
-    private String executeWorkflowSelection(AgentSession session,
-                                            String userText,
-                                            ChatState state,
-                                            SseEventSender sender,
-                                            String turnId) {
-        String defId = state.getWorkflowDefId();
-        if (defId == null || defId.isBlank()) {
-            throw new IllegalStateException("No workflow selected");
-        }
-        var def = processDefService.loadDomainById(defId)
-                .orElseThrow(() -> new IllegalStateException("Workflow definition not found"));
-        Map<String, Object> initialVariables = new LinkedHashMap<>();
-        initialVariables.put("userPrompt", userText);
-        var run = workflowManager.startProcess(def, initialVariables, UserContextHolder.currentUserId());
-        Map<String, Object> bound = new LinkedHashMap<>();
-        bound.put("sessionId", session.getSessionId());
-        bound.put("workflowDefId", defId);
-        bound.put("runId", run.instanceId());
-        bound.put("status", run.state().wire());
-        sender.sendCustom("workflow.run.bound", bound);
-        runtimeEventRepository.save(RuntimeEvent.builder()
-                .sessionId(session.getSessionId())
-                .turnId(turnId)
-                .eventType("workflow.run.bound")
-                .payload(toJsonSafe(bound))
-                .build());
-        String output = extractWorkflowResponse(run.instanceId());
-        String response = output == null || output.isBlank()
-                ? "Workflow executed successfully. Run id: " + run.instanceId()
-                : output;
-        session.getMessages().add(new AssistantMessage(response));
-        state.setWorkflowDefId(null);
-        state.setWorkflowSelectedByUser(false);
-        return response;
-    }
-
-    private String extractWorkflowResponse(String instanceId) {
-        try {
-            var vars = workflowVariableRepository.findByInstAndScope(instanceId, instanceId);
-            String fallback = null;
-            for (var row : vars) {
-                String name = row.name() == null ? "" : row.name().toLowerCase(Locale.ROOT);
-                String valueJson = row.valueJson();
-                if (valueJson == null || valueJson.isBlank()) continue;
-                String normalized = valueJson;
-                if (normalized.startsWith("\"") && normalized.endsWith("\"")) {
-                    normalized = normalized.substring(1, normalized.length() - 1);
-                }
-                if ("assistantresponse".equals(name) || "finalresponse".equals(name) || "summary".equals(name)) {
-                    return normalized;
-                }
-                if (fallback == null && !normalized.isBlank()) {
-                    fallback = normalized;
-                }
-            }
-            return fallback;
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     private void maybeResolveToolChainByIntent(AgentSession session,
@@ -442,44 +328,6 @@ public class AgentRuntimeService {
         state.setToolChainId(selectedToolChainId);
         state.setToolChainVersion(selectedVersion);
         state.setToolChainSelectedByUser(true);
-    }
-
-    private void maybeResolveWorkflowByIntent(AgentSession session,
-                                              String userText,
-                                              ChatState state,
-                                              SseEventSender sender,
-                                              String turnId) {
-        String userId = UserContextHolder.currentUserId();
-        List<WorkflowProposalService.IntentMatch> matches =
-                workflowProposalService.findIntentMatches(userId, userText, 3);
-        if (matches.isEmpty()) return;
-        String selectedDefId;
-        if (matches.size() == 1) {
-            WorkflowProposalService.IntentMatch hit = matches.get(0);
-            String question = "I found a matching workflow \"" + hit.name()
-                    + "\" for this request. Use it or continue normal AI loop?";
-            String requestId = askToolChainQuestion(session, sender, turnId, question, List.of(
-                    new PendingInteractionService.QuestionOption("workflow:" + hit.processDefId(), "Use " + hit.name()),
-                    new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop")
-            ));
-            String choice = awaitSelection(requestId);
-            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
-            selectedDefId = hit.processDefId();
-        } else {
-            List<PendingInteractionService.QuestionOption> options = new ArrayList<>();
-            for (WorkflowProposalService.IntentMatch hit : matches) {
-                String label = hit.name() + " (score " + String.format(Locale.ROOT, "%.2f", hit.score()) + ")";
-                options.add(new PendingInteractionService.QuestionOption("workflow:" + hit.processDefId(), label));
-            }
-            options.add(new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop"));
-            String question = "I found these matching workflows. Which one should I run?";
-            String requestId = askToolChainQuestion(session, sender, turnId, question, options);
-            String choice = awaitSelection(requestId);
-            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
-            selectedDefId = choice.replace("workflow:", "");
-        }
-        state.setWorkflowDefId(selectedDefId);
-        state.setWorkflowSelectedByUser(true);
     }
 
     private String askToolChainQuestion(AgentSession session,

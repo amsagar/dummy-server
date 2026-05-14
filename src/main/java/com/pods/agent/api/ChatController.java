@@ -10,7 +10,6 @@ import com.pods.agent.repository.ChatSessionRepository;
 import com.pods.agent.repository.CostUsageRepository;
 import com.pods.agent.repository.HitlInteractionRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
-import com.pods.agent.repository.SystemToolChainProposalRepository;
 import com.pods.agent.agent.AgentSession;
 import com.pods.agent.agent.AgentSessionManager;
 import com.pods.agent.service.ChatService;
@@ -43,7 +42,7 @@ public class ChatController {
             "question", "approval_required",
             "reasoning",
             "task.started", "task.done",
-            "toolchain.run.bound", "workflow.run.bound"
+            "toolchain.run.bound"
     );
 
     private final ChatService chatService;
@@ -54,7 +53,6 @@ public class ChatController {
     private final CostUsageRepository costUsageRepository;
     private final RuntimeEventRepository runtimeEventRepository;
     private final HitlInteractionRepository hitlInteractionRepository;
-    private final SystemToolChainProposalRepository systemToolChainProposalRepository;
     private final SecurityContextService securityContextService;
     private final ObjectMapper objectMapper;
 
@@ -66,7 +64,6 @@ public class ChatController {
                           CostUsageRepository costUsageRepository,
                           RuntimeEventRepository runtimeEventRepository,
                           HitlInteractionRepository hitlInteractionRepository,
-                          SystemToolChainProposalRepository systemToolChainProposalRepository,
                           SecurityContextService securityContextService,
                           ObjectMapper objectMapper) {
         this.chatService = chatService;
@@ -77,7 +74,6 @@ public class ChatController {
         this.costUsageRepository = costUsageRepository;
         this.runtimeEventRepository = runtimeEventRepository;
         this.hitlInteractionRepository = hitlInteractionRepository;
-        this.systemToolChainProposalRepository = systemToolChainProposalRepository;
         this.securityContextService = securityContextService;
         this.objectMapper = objectMapper;
     }
@@ -273,27 +269,6 @@ public class ChatController {
         return ResponseEntity.ok(Map.of(
                 "sessionId", sessionId,
                 "pending", pendingInteractionService.listPendingBySession(sessionId)
-        ));
-    }
-
-    @GetMapping("/pending/system-toolchains")
-    @Operation(summary = "List pending system toolchain approvals for current user")
-    public ResponseEntity<?> pendingSystemToolchainApprovals() {
-        String userId = securityContextService.currentUserIdOrDefault("order-validation-ui");
-        var approvals = systemToolChainProposalRepository.findPendingByUser(userId).stream()
-                .map(p -> {
-                    var row = new LinkedHashMap<String, Object>();
-                    row.put("requestId", p.getId());
-                    row.put("sessionId", p.getSessionId());
-                    row.put("turnId", p.getTurnId());
-                    row.put("type", "approval_required");
-                    row.put("prompt", "Create a reusable toolchain from this turn? " + (p.getReason() == null ? "" : p.getReason()));
-                    row.put("createdAt", p.getCreatedAt());
-                    return row;
-                })
-                .toList();
-        return ResponseEntity.ok(Map.of(
-                "approvals", approvals
         ));
     }
 

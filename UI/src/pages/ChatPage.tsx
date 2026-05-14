@@ -433,8 +433,8 @@ export default function ChatPage() {
           content = payload.question || payload.prompt || questionFromNested || '';
         } else if (e.eventType === 'approval_required') {
           content = payload.reason || '';
-        } else if (e.eventType === 'toolchain.run.bound' || e.eventType === 'workflow.run.bound') {
-          content = `Workflow run #${String(payload.runId || '').slice(0, 8)}`;
+        } else if (e.eventType === 'toolchain.run.bound') {
+          content = `Run #${String(payload.runId || '').slice(0, 8)}`;
         } else {
           return null as any;
         }
@@ -811,8 +811,8 @@ export default function ChatPage() {
           case 'plan.created':
             break;
           case 'task.started':
-            // Workflow runtime emits one task.started per node. Render as a system
-            // chip so the user sees the chain's nodes execute live in the chat.
+            // Runtime emits one task.started per node. Render as a system
+            // chip so the user sees node execution live in chat.
             if (ev.taskName || ev.taskId) {
               appendSystemMessage('task.started', `Running node: ${ev.taskName || ev.taskId}`, undefined, {
                 taskId: ev.taskId,
@@ -835,13 +835,11 @@ export default function ChatPage() {
             }
             break;
           case 'toolchain.run.bound':
-          case 'workflow.run.bound':
             appendSystemMessage(ev.type,
-              `Workflow run #${String(ev.runId || '').slice(0, 8)}`,
+              `Run #${String(ev.runId || '').slice(0, 8)}`,
               undefined,
               {
                 toolChainId: ev.toolChainId,
-                workflowDefId: ev.workflowDefId,
                 runId: ev.runId,
                 version: ev.version,
                 status: ev.status,

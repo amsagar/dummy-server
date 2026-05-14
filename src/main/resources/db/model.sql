@@ -299,57 +299,17 @@ CREATE TABLE IF NOT EXISTS agent.hitl_interactions (
     resolved_at   BIGINT
     );
 
-CREATE TABLE IF NOT EXISTS agent.workflow_proposals (
-                                                        id                       TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    session_id               TEXT NOT NULL REFERENCES agent.chat_sessions (session_id) ON DELETE CASCADE,
-    turn_id                  TEXT NOT NULL,
-    user_id                  TEXT NOT NULL,
-    status                   TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'building', 'rejected', 'materialized', 'failed')),
-    reason                   TEXT,
-    confidence               DOUBLE PRECISION,
-    intent_signature         TEXT NOT NULL,
-    trace_ref                TEXT,
-    user_prompt              TEXT,
-    model_provider_id        TEXT,
-    model_id                 TEXT,
-    proposed_workflow_json   JSONB,
-    matched_tool_names_json  JSONB,
-    suggested_name           TEXT,
-    skill_names_json         JSONB,
-    build_attempts           INTEGER NOT NULL DEFAULT 0,
-    decision_comment         TEXT,
-    decided_by               TEXT,
-    decided_at               BIGINT,
-    materialized_def_id      TEXT,
-    error_message            TEXT,
-    created_at               BIGINT NOT NULL,
-    updated_at               BIGINT NOT NULL
-    );
-
--- Backfill / migration block for installations created before the two-phase
--- (classifier + builder) split. Each statement is idempotent so running the
--- file repeatedly is safe.
-ALTER TABLE agent.workflow_proposals
-    ALTER COLUMN proposed_workflow_json DROP NOT NULL;
-ALTER TABLE agent.workflow_proposals
-    ADD COLUMN IF NOT EXISTS suggested_name TEXT;
-ALTER TABLE agent.workflow_proposals
-    ADD COLUMN IF NOT EXISTS skill_names_json JSONB;
-ALTER TABLE agent.workflow_proposals
-    ADD COLUMN IF NOT EXISTS build_attempts INTEGER NOT NULL DEFAULT 0;
-DO $$
-BEGIN
-    -- Replace the legacy CHECK constraint to add the 'building' transient state.
-    IF EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'workflow_proposals_status_check'
-    ) THEN
-        ALTER TABLE agent.workflow_proposals DROP CONSTRAINT workflow_proposals_status_check;
-    END IF;
-    ALTER TABLE agent.workflow_proposals
-        ADD CONSTRAINT workflow_proposals_status_check
-        CHECK (status IN ('pending', 'approved', 'building', 'rejected', 'materialized', 'failed'));
-END$$;
+-- Workflow support removed: drop legacy workflow proposal and engine tables.
+DROP TABLE IF EXISTS agent.workflow_proposals;
+DROP TABLE IF EXISTS agent.pending_approval;
+DROP TABLE IF EXISTS agent.activity_pin;
+DROP TABLE IF EXISTS agent.process_link;
+DROP TABLE IF EXISTS agent.audit_trail;
+DROP TABLE IF EXISTS agent.workflow_variable;
+DROP TABLE IF EXISTS agent.activity_inst;
+DROP TABLE IF EXISTS agent.process_def_runs_recent;
+DROP TABLE IF EXISTS agent.process_inst;
+DROP TABLE IF EXISTS agent.process_def;
 
 CREATE TABLE IF NOT EXISTS agent.hook_mappings (
                                                    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -407,8 +367,6 @@ CREATE INDEX IF NOT EXISTS idx_runtime_events_session_id ON agent.runtime_events
 CREATE INDEX IF NOT EXISTS idx_runtime_events_turn_id ON agent.runtime_events (turn_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cost_usage_session_id ON agent.cost_usage (session_id);
 CREATE INDEX IF NOT EXISTS idx_hitl_interactions_session_id ON agent.hitl_interactions (session_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_proposals_user_status ON agent.workflow_proposals (user_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_workflow_proposals_intent ON agent.workflow_proposals (user_id, intent_signature, status);
 CREATE INDEX IF NOT EXISTS idx_hook_mappings_hook_point ON agent.hook_mappings (hook_point);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_id ON agent.runtime_traces (session_id);
 
@@ -454,43 +412,22 @@ CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
     ON agent.agent_tool_embeddings
     USING hnsw (embedding halfvec_cosine_ops);
 
--- ── Workflow API keys ─────────────────────────────────────────────────────────
--- Scoped credentials for triggering workflow runs from outside the app
--- (curl, Postman, CI, etc.) without leaking a user's JWT. Each key is
--- restricted to a fixed allowlist of process_def_ids: it can only start runs
--- of workflows in `process_def_ids`. We store key_hash (sha-256) for
--- verification and key_prefix (the first 12 chars of the plaintext) for
--- O(1) lookup at auth time; the plaintext key is shown to the user exactly
--- once at creation.
-CREATE TABLE IF NOT EXISTS agent.workflow_api_key (
-    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    name            TEXT NOT NULL,
-    key_prefix      TEXT NOT NULL,
-    key_hash        TEXT NOT NULL,
-    owner_id        TEXT NOT NULL,
-    process_def_ids TEXT NOT NULL,
-    created_at      BIGINT NOT NULL,
-    last_used_at    BIGINT,
-    revoked_at      BIGINT
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_api_key_prefix
-    ON agent.workflow_api_key (key_prefix);
-CREATE INDEX IF NOT EXISTS idx_workflow_api_key_owner
-    ON agent.workflow_api_key (owner_id, revoked_at);
+-- ── Removed: workflow API keys (feature cleanup) ──────────────────────────────
+-- Keep this drop idempotent so old environments can be cleaned in-place.
+DROP TABLE IF EXISTS agent.workflow_api_key;
 
 -- ── Order-validation UI settings ──────────────────────────────────────────
 -- Singleton (id='singleton') row that the order-validation-ui reads/writes
 -- as a global, cross-browser config. Holds the active chat model ref
--- (providerId/modelId), the AI assistant response mode (basic|detailed),
--- and the workflow id the assistant should target when starting new
--- validations. Created lazily on first read.
+-- (providerId/modelId) and the AI assistant response mode (basic|detailed).
+-- Created lazily on first read.
 CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
     id              TEXT PRIMARY KEY,
     chat_model_ref  TEXT,
     response_mode   TEXT NOT NULL DEFAULT 'basic',
-    workflow_id     TEXT,
     updated_at      BIGINT NOT NULL
 );
+ALTER TABLE agent.order_validation_settings DROP COLUMN IF EXISTS workflow_id;
 
 -- ── Vendor-rationalization tunable config ───────────────────────────────
 -- Singleton (id='singleton') row that holds the business-tunable knobs

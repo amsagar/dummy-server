@@ -103,7 +103,7 @@ pods:
     persist-internal-events: false
     enable-experimental-tools: true
     enabled-experimental-tool-names: [ ]
-    allowed-permission-scopes: [ filesystem, shell, web, workflow, memory, integration, http_proxy ]
+    allowed-permission-scopes: [ filesystem, shell, web, memory, integration, http_proxy ]
     # Observe during staged rollout:
     # - tool-match precision
     # - low-signal tool result rate
@@ -114,26 +114,6 @@ pods:
       connection-string: "DefaultEndpointsProtocol=https;AccountName=openfga;AccountKey=3qRPjRUAleZDRiDuHaZxCcrPFLAABAeLK/lSIuIDPTTo1CBgnzFIg+TvPvynr1sL5EtL7aIofTix+AStN2labg==;EndpointSuffix=core.windows.net"
       container: "ai-skills"
       allow-in-memory-fallback: false
-  workflow:
-    proposal:
-      # Combined retry budget for the Phase-2 builder loop. Each attempt =
-      # one (read draft → structural validation → alignment check) pass.
-      # Bumped to 7 because the alignment judge legitimately surfaces 2-3
-      # new fine-grained critiques per round (custTrackingId conversion,
-      # AddressType filtering, end-result shape, etc.) and we'd rather
-      # absorb that churn than fail an otherwise correct workflow.
-      max-build-attempts: 7
-      # Optional per-phase model overrides. Leave provider-id / model-id
-      # blank to use the model the chat agent used in the source turn.
-      classifier-model:
-        provider-id: ""
-        model-id: ""
-      builder-model:
-        provider-id: ""
-        model-id: ""
-      alignment-model:
-        provider-id: ""
-        model-id: ""
   cors:
     allowed-origins:
       - "http://localhost:3000"

@@ -4,6 +4,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties({RuntimeTuningProperties.class, WorkflowProposalProperties.class})
+@EnableConfigurationProperties({RuntimeTuningProperties.class})
 public class RuntimeConfig {
 }
