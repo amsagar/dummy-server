@@ -123,12 +123,35 @@ public class AgentToolCallback implements ToolCallback {
         String toolCallSignature = buildToolCallSignature(tool.getName(), payload);
 
         if (!isSkillTool && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
-            // Soft gate: don't block the first domain tool call. Hard-blocking causes
-            // noisy duplicate calls and stalls practical flows when the model has already
-            // enough context from system prompt/skill catalog.
-            log.info("[AgentToolCallback] soft-bypassing skill-first gate for tool={} sessionId={} turnId={}",
-                    tool.getName(), sessionId, turnId);
-            skillExecutionGate.markSkillLoaded();
+            // Hard gate: the planner picked at least one skill that lexically matches the
+            // user request, so the SKILL.md content carries business rules / tool-call
+            // sequencing the catalog description alone cannot convey (e.g. ItemCode->
+            // ServiceCode mappings, completion checklists, foreach patterns). Block the
+            // first non-skill tool call with an actionable error rather than letting the
+            // model summarise off the first tool's response and skip the rest of the flow.
+            //
+            // The previous soft-bypass implementation produced visible regressions —
+            // pods-order-validation runs would stop after Get_OrderID because the model
+            // had enough info in the order JSON to write a "summary" but had never read
+            // the rules requiring Serviceability + decisionTableEvaluate + Container
+            // checks. We accept the documented downside (a possible duplicate tool call
+            // when the model re-invokes after loading the skill) — that is far cheaper
+            // than silently incomplete validations.
+            java.util.List<String> suggested = skillExecutionGate.getSuggestedSkillNames();
+            String hint = suggested == null || suggested.isEmpty()
+                    ? "Call the `skill` tool first to load the matching skill before invoking domain tools."
+                    : "Call the `skill` tool first with one of: "
+                            + suggested
+                            + ". The skill's SKILL.md carries business rules and tool-call sequencing"
+                            + " you need before invoking `" + tool.getName() + "`.";
+            String blocked = "skill_first_required: " + hint;
+            sender.sendToolCall(sessionId, callId, tool.getName(), payload);
+            saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+            sender.sendToolResult(sessionId, callId, tool.getName(), blocked, "blocked");
+            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"blocked\",\"output\":" + json(blocked) + "}");
+            log.info("[AgentToolCallback] hard-blocking skill-first gate for tool={} sessionId={} turnId={} suggested={}",
+                    tool.getName(), sessionId, turnId, suggested);
+            return blocked;
         }
 
         GuardrailPolicyEngine.Decision decision = policyEngine.evaluateTool(tool);

@@ -650,6 +650,16 @@ public class AgentRuntimeService {
                 && !isOrderValidationProfile
                 && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
+        if (enforceSkillFirst) {
+            // Surface the lexically-matched skill names so the gate's
+            // block-error message can name them. Saves the model an extra
+            // round-trip guessing which skill to load from the catalog.
+            skillExecutionGate.setSuggestedSkillNames(
+                    fallbackSelectSkills(userText, skillRegistryService.getEnabledSkills(), 3).stream()
+                            .map(s -> s == null || s.skill() == null ? null : s.skill().getName())
+                            .filter(n -> n != null && !n.isBlank())
+                            .toList());
+        }
         String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
         if (isToolChainArchitectRuntimeMode(state.getRuntimeMode())) {
             selectedSkillContext = "";
