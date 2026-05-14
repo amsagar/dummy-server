@@ -81,6 +81,16 @@ public class EmbeddingModelController {
         return ResponseEntity.ok(Map.of("status", "ok"));
     }
 
+    @DeleteMapping("/{providerID}/{modelID}")
+    public ResponseEntity<?> delete(@PathVariable String providerID, @PathVariable String modelID) {
+        modelRepository.delete(providerID, modelID);
+        return ResponseEntity.ok(Map.of(
+                "deleted", true,
+                "providerID", providerID,
+                "modelID", modelID
+        ));
+    }
+
     @lombok.Data
     public static class EmbeddingRegisterRequest extends ModelRegisterRequest {
         private Integer dimensions;

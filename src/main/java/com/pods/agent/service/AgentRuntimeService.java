@@ -138,13 +138,6 @@ public class AgentRuntimeService {
         String normalizedUserText = userText == null ? "" : userText.trim();
         session.getMessages().add(new UserMessage(normalizedUserText));
 
-        if (!isToolChainDesignerMode(runtimeMode)
-                && !isToolChainArchitectRuntimeMode(runtimeMode)
-                && (state.getToolChainId() == null || state.getToolChainId().isBlank())
-                && !normalizedUserText.isBlank()) {
-            maybeResolveToolChainByIntent(session, normalizedUserText, state, sender, turnId);
-        }
-
         if (shouldExecuteToolChain(state)) {
             transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "toolchain-execution");
             try {
@@ -278,108 +271,6 @@ public class AgentRuntimeService {
         return mode != null && mode.toLowerCase(Locale.ROOT).contains("toolchain");
     }
 
-    private void maybeResolveToolChainByIntent(AgentSession session,
-                                               String userText,
-                                               ChatState state,
-                                               SseEventSender sender,
-                                               String turnId) {
-        List<ToolChainService.IntentMatch> matches;
-        try {
-            matches = toolChainService.findIntentMatches(userText, 0.30, 3);
-        } catch (Exception e) {
-            // Legacy ToolChain tables may be removed after workflow-only cutover.
-            // Keep chat path healthy by skipping toolchain intent probing.
-            log.debug("[AgentRuntime] Skipping ToolChain intent resolution: {}", e.getMessage());
-            return;
-        }
-        if (matches.isEmpty()) return;
-        String selectedToolChainId;
-        Integer selectedVersion;
-        if (matches.size() == 1) {
-            ToolChainService.IntentMatch hit = matches.get(0);
-            String question = "I found a matching ToolChain \"" + hit.name() + "\" for this request. Continue with ToolChain execution or use normal AI loop?";
-            String requestId = askToolChainQuestion(session, sender, turnId, question, List.of(
-                    new PendingInteractionService.QuestionOption("toolchain:" + hit.toolChainId(), "Use " + hit.name()),
-                    new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop")
-            ));
-            String choice = awaitSelection(requestId);
-            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
-            selectedToolChainId = hit.toolChainId();
-            selectedVersion = hit.version();
-        } else {
-            List<PendingInteractionService.QuestionOption> options = new ArrayList<>();
-            for (ToolChainService.IntentMatch hit : matches) {
-                String label = hit.name() + " (score " + String.format(Locale.ROOT, "%.2f", hit.score()) + ")";
-                options.add(new PendingInteractionService.QuestionOption("toolchain:" + hit.toolChainId(), label));
-            }
-            options.add(new PendingInteractionService.QuestionOption("normal_loop", "Use normal AI loop"));
-            String question = "Multiple ToolChains match your request. Which path should I run?";
-            String requestId = askToolChainQuestion(session, sender, turnId, question, options);
-            String choice = awaitSelection(requestId);
-            if (choice == null || "normal_loop".equalsIgnoreCase(choice)) return;
-            String tcId = choice.replace("toolchain:", "");
-            ToolChainService.IntentMatch chosen = matches.stream()
-                    .filter(m -> m.toolChainId().equals(tcId))
-                    .findFirst()
-                    .orElse(matches.get(0));
-            selectedToolChainId = chosen.toolChainId();
-            selectedVersion = chosen.version();
-        }
-        state.setToolChainId(selectedToolChainId);
-        state.setToolChainVersion(selectedVersion);
-        state.setToolChainSelectedByUser(true);
-    }
-
-    private String askToolChainQuestion(AgentSession session,
-                                        SseEventSender sender,
-                                        String turnId,
-                                        String question,
-                                        List<PendingInteractionService.QuestionOption> options) {
-        PendingInteractionService.QuestionMetadata metadata = new PendingInteractionService.QuestionMetadata(
-                "single_select",
-                options,
-                false,
-                1,
-                1
-        );
-        String requestId = pendingInteractionService.create(
-                session.getSessionId(),
-                turnId,
-                "question",
-                question,
-                metadata
-        );
-        sender.sendQuestion(session.getSessionId(), requestId, question, metadata);
-        saveSessionEvent(session.getSessionId(), turnId, "question",
-                "{\"requestId\":\"" + requestId + "\",\"question\":\"" + sanitize(question) + "\"}");
-        return requestId;
-    }
-
-    private String awaitSelection(String requestId) {
-        if (requestId == null || requestId.isBlank()) return null;
-        try {
-            PendingInteractionService.InteractionReply reply = pendingInteractionService.awaitReply(
-                    requestId,
-                    runtimeTuningProperties.getHitlReplyTimeoutMs()
-            );
-            if (reply == null || reply.message() == null) return null;
-            String message = reply.message();
-            if (message.startsWith("options=")) {
-                String optionsPart = message.substring("options=".length());
-                int delimiter = optionsPart.indexOf(';');
-                String selected = delimiter >= 0 ? optionsPart.substring(0, delimiter) : optionsPart;
-                if (selected.contains(",")) {
-                    return selected.split(",")[0].trim();
-                }
-                return selected.trim();
-            }
-            return message.trim();
-        } catch (Exception e) {
-            log.info("[AgentRuntime] ToolChain selection prompt timed out or failed: {}", e.getMessage());
-            return null;
-        }
-    }
-
     private record ScopeGateOutcome(boolean refused, String refusal, double topCosine) {}
 
     private ScopeGateOutcome applyPreFlightScopeGate(String userText, AgentSession session, ChatState state) {
@@ -392,6 +283,7 @@ public class AgentRuntimeService {
 
         String trimmed = userText.trim();
         int wordCount = trimmed.split("\\s+").length;
+        if (isConversationalGreetingOrIntro(trimmed) && !isTaskOrExecutionIntent(trimmed)) return null;
         if (wordCount <= Math.max(0, cfg.getAllowConversationalMaxWords())) return null;
 
         // Continuation: only short user text (≤ allowConversationalMaxWords + 2) bypasses the scope
@@ -421,6 +313,18 @@ public class AgentRuntimeService {
                 cfg.getMinTopToolCosine(),
                 truncate(userText, 120));
         return new ScopeGateOutcome(true, outOfScopeRefusalMessage(), topCosine);
+    }
+
+    private boolean isConversationalGreetingOrIntro(String userText) {
+        if (userText == null || userText.isBlank()) return false;
+        String low = userText.toLowerCase(Locale.ROOT).trim();
+        int words = low.split("\\s+").length;
+        if (words > 20) return false;
+        return low.matches("^(hi|hello|hey|yo|good\\s+morning|good\\s+afternoon|good\\s+evening)([\\s\\p{Punct}].*)?$")
+                || low.startsWith("i am ")
+                || low.startsWith("i'm ")
+                || low.startsWith("my name is ")
+                || low.startsWith("this is ");
     }
 
     private String runModelDrivenCoreLoop(AgentSession session,

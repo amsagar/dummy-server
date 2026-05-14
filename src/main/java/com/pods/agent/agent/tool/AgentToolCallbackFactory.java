@@ -10,7 +10,6 @@ import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.ToolExecutionService;
 import com.pods.agent.service.ToolRegistryService;
 import com.pods.agent.service.UserContextHolder;
-import com.pods.agent.service.workspace.ExecutionLogService;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
@@ -35,7 +34,6 @@ public class AgentToolCallbackFactory {
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
     private final SkillRegistryService skillRegistryService;
-    private final ExecutionLogService executionLogService;
 
     public AgentToolCallbackFactory(ToolRegistryService toolRegistryService,
                                     ToolExecutionService toolExecutionService,
@@ -44,8 +42,7 @@ public class AgentToolCallbackFactory {
                                     SkillRegistryService skillRegistryService,
                                     RuntimeTuningProperties runtimeTuningProperties,
                                     ObjectMapper objectMapper,
-                                    RuntimeEventRepository runtimeEventRepository,
-                                    ExecutionLogService executionLogService) {
+                                    RuntimeEventRepository runtimeEventRepository) {
         this.toolRegistryService = toolRegistryService;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -54,7 +51,6 @@ public class AgentToolCallbackFactory {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
-        this.executionLogService = executionLogService;
     }
 
     public List<ToolCallback> buildForTurn(String sessionId, String turnId, SseEventSender sender) {
@@ -111,6 +107,67 @@ public class AgentToolCallbackFactory {
                         runtimeTuningProperties.isProductionEnvironment()))
                 .collect(Collectors.toList());
 
+        java.util.Set<String> registeredNames = tools.stream()
+                .filter(Objects::nonNull)
+                .map(AgentTool::getName)
+                .filter(Objects::nonNull)
+                .map(n -> n.toLowerCase(java.util.Locale.ROOT))
+                .collect(Collectors.toCollection(java.util.HashSet::new));
+
+        if (userId != null && !userId.isBlank()) {
+            for (AgentTool memoryTool : MemoryToolDefinitions.all()) {
+                String key = memoryTool.getName().toLowerCase(java.util.Locale.ROOT);
+                if (registeredNames.contains(key)) {
+                    continue;
+                }
+                callbacks.add(new AgentToolCallback(
+                        memoryTool,
+                        toolExecutionService,
+                        policyEngine,
+                        pendingInteractionService,
+                        sender,
+                        sessionId,
+                        turnId,
+                        userId,
+                        timeoutMs,
+                        objectMapper,
+                        runtimeEventRepository,
+                        skillExecutionGate,
+                        workspace,
+                        bypassApprovalGate,
+                        runtimeTuningProperties.getToolOutputVfsSpillThresholdChars(),
+                        runtimeTuningProperties.getToolIoLogMode(),
+                        runtimeTuningProperties.isProductionEnvironment()));
+                registeredNames.add(key);
+            }
+        }
+
+        for (AgentTool retrievalTool : RetrievalToolDefinitions.all()) {
+            String key = retrievalTool.getName().toLowerCase(java.util.Locale.ROOT);
+            if (registeredNames.contains(key)) {
+                continue;
+            }
+            callbacks.add(new AgentToolCallback(
+                    retrievalTool,
+                    toolExecutionService,
+                    policyEngine,
+                    pendingInteractionService,
+                    sender,
+                    sessionId,
+                    turnId,
+                    userId,
+                    timeoutMs,
+                    objectMapper,
+                    runtimeEventRepository,
+                    skillExecutionGate,
+                    workspace,
+                    bypassApprovalGate,
+                    runtimeTuningProperties.getToolOutputVfsSpillThresholdChars(),
+                    runtimeTuningProperties.getToolIoLogMode(),
+                    runtimeTuningProperties.isProductionEnvironment()));
+            registeredNames.add(key);
+        }
+
         callbacks.add(new SkillToolCallback(
                 skillRegistryService,
                 runtimeTuningProperties,
@@ -122,13 +179,6 @@ public class AgentToolCallbackFactory {
                 skillExecutionGate,
                 runtimeTuningProperties.getToolIoLogMode(),
                 runtimeTuningProperties.isProductionEnvironment()
-        ));
-        callbacks.add(new ArchitectNoteCallback(
-                executionLogService,
-                sender,
-                sessionId,
-                turnId,
-                objectMapper
         ));
         return callbacks;
     }

@@ -136,16 +136,7 @@ CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
     UNIQUE (domain_id, name)
     );
 
-CREATE TABLE IF NOT EXISTS agent.tool_versions (
-                                                   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    tool_id       TEXT NOT NULL REFERENCES agent.agent_tools (id) ON DELETE CASCADE,
-    version       INTEGER NOT NULL,
-    description   TEXT,
-    request_schema  TEXT,
-    response_schema TEXT,
-    created_at    BIGINT NOT NULL,
-    UNIQUE (tool_id, version)
-    );
+
 
 CREATE TABLE IF NOT EXISTS agent.skills (
                                             id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -333,8 +324,8 @@ CREATE TABLE IF NOT EXISTS agent.session_context_state (
 
 CREATE TABLE IF NOT EXISTS agent.memories (
                                               id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    user_id          TEXT NOT NULL REFERENCES agent.users (id) ON DELETE CASCADE,
-    session_id       TEXT REFERENCES agent.chat_sessions (session_id) ON DELETE SET NULL,
+    user_id          TEXT NOT NULL,
+    session_id       TEXT,
     category         TEXT NOT NULL CHECK (category IN ('user','feedback','project','reference')),
     memory_file_path TEXT NOT NULL,
     content          TEXT NOT NULL,
@@ -343,6 +334,8 @@ CREATE TABLE IF NOT EXISTS agent.memories (
     updated_at       BIGINT NOT NULL
     );
 
+ALTER TABLE agent.memories DROP CONSTRAINT IF EXISTS memories_user_id_fkey;
+ALTER TABLE agent.memories DROP CONSTRAINT IF EXISTS memories_session_id_fkey;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_user_file ON agent.memories (user_id, memory_file_path);
 CREATE INDEX IF NOT EXISTS idx_memories_user_id ON agent.memories (user_id);
 
@@ -398,17 +391,3 @@ ALTER COLUMN embedding TYPE halfvec(3072);
 CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
     ON agent.agent_tool_embeddings
     USING hnsw (embedding halfvec_cosine_ops);
-
-CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
-    id              TEXT PRIMARY KEY,
-    chat_model_ref  TEXT,
-    response_mode   TEXT NOT NULL DEFAULT 'basic',
-    updated_at      BIGINT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agent.vendor_rationalization_config (
-    id              TEXT PRIMARY KEY,
-    payload_json    TEXT NOT NULL,
-    updated_at      BIGINT NOT NULL
-);
-
