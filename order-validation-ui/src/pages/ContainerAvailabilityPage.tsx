@@ -232,7 +232,7 @@ function OrderGroupRow({
         </div>
         <div className="ml-auto flex items-center gap-2">
           {available > 0 && <Badge variant="pass">{available} available</Badge>}
-          {unavailable > 0 && <Badge variant="fail">{unavailable} unavailable</Badge>}
+          {unavailable > 0 && <Badge variant="warn">{unavailable} need rescheduling</Badge>}
           {skipped > 0 && <Badge variant="muted">{skipped} skipped</Badge>}
           <button
             onClick={(e) => {
@@ -280,7 +280,7 @@ function OrderGroupRow({
                     ) : r.availableDates.length > 0 ? (
                       <Badge variant="pass">Dates available</Badge>
                     ) : (
-                      <Badge variant="fail">Unavailable</Badge>
+                      <Badge variant="warn">Need Rescheduling</Badge>
                     )}
                   </TableCell>
                 </TableRow>

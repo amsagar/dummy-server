@@ -141,6 +141,7 @@ export function DecisionTableEditorPage() {
             <RulesGrid value={definition} onChange={setDefinition} />
 
             <DecisionTableTestPanel
+              definition={definition}
               onEvaluate={(inputs) => decisionTablesApi.evaluate(name, { inputs })}
             />
           </div>

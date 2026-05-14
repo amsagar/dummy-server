@@ -279,7 +279,7 @@ function RunDetailBody({ detail, onOpen }: { detail: RunDetail; onOpen: (t: Pane
                       ) : c.availableDates.length > 0 ? (
                         <Badge variant="pass">Dates available</Badge>
                       ) : (
-                        <Badge variant="fail">Unavailable</Badge>
+                        <Badge variant="warn">Need Rescheduling</Badge>
                       )}
                     </TableCell>
                   </TableRow>
