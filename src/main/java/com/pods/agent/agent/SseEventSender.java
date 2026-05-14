@@ -27,8 +27,8 @@ public class SseEventSender {
 
     /**
      * Install a "should I stop emitting?" predicate. When the predicate returns true
-     * every send becomes a no-op. The toolchain config service uses this together with
-     * its activeStreams map so a POST .../stop endpoint can flip a flag and silence
+     * every send becomes a no-op. A streaming worker can use this together with an
+     * activeStreams map so a POST .../stop endpoint can flip a flag and silence
      * the running worker thread without restructuring the loop's reactive subscription.
      */
     public void setCancelledPredicate(java.util.function.BooleanSupplier predicate) {
@@ -65,7 +65,7 @@ public class SseEventSender {
 
     /**
      * Emit an arbitrary event type. Used for first-class events not yet covered by a
-     * typed helper (e.g. toolchain.run.bound which links a chat session to a run id).
+     * typed helper.
      */
     public void sendCustom(String type, Map<String, Object> payload) {
         var envelope = new LinkedHashMap<String, Object>();

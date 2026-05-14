@@ -41,8 +41,7 @@ public class ChatController {
             "tool.match", "tool.call", "tool.done", "tool.result",
             "question", "approval_required",
             "reasoning",
-            "task.started", "task.done",
-            "toolchain.run.bound"
+            "task.started", "task.done"
     );
 
     private final ChatService chatService;

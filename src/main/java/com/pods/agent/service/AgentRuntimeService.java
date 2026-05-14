@@ -12,8 +12,6 @@ import com.pods.agent.config.RuntimeTuningProperties;
 import com.pods.agent.domain.AgentTool;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
-import com.pods.agent.domain.ToolChainRun;
-import com.pods.agent.domain.ToolChainVersion;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.repository.RuntimeTraceRepository;
 import com.pods.agent.service.mcp.McpRuntimeAdapter;
@@ -71,9 +69,6 @@ public class AgentRuntimeService {
     private final AgentToolCallbackFactory agentToolCallbackFactory;
     private final ToolEmbeddingIndexService toolEmbeddingIndexService;
     private final EmbeddingAutoRouterService embeddingAutoRouterService;
-    private final ToolChainRuntimeService toolChainRuntimeService;
-    private final ToolChainService toolChainService;
-    private final ChainParameterExtractor chainParameterExtractor;
     private final Map<String, Map<String, Double>> toolMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> toolDomainMemorySignals = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Double>> skillMemorySignals = new ConcurrentHashMap<>();
@@ -97,10 +92,7 @@ public class AgentRuntimeService {
                                MemoryService memoryService,
                                AgentToolCallbackFactory agentToolCallbackFactory,
                                ToolEmbeddingIndexService toolEmbeddingIndexService,
-                               EmbeddingAutoRouterService embeddingAutoRouterService,
-                               ToolChainRuntimeService toolChainRuntimeService,
-                               ToolChainService toolChainService,
-                               ChainParameterExtractor chainParameterExtractor) {
+                               EmbeddingAutoRouterService embeddingAutoRouterService) {
         this.orchestrator = orchestrator;
         this.toolRegistryService = toolRegistryService;
         this.policyEngine = policyEngine;
@@ -121,9 +113,6 @@ public class AgentRuntimeService {
         this.agentToolCallbackFactory = agentToolCallbackFactory;
         this.toolEmbeddingIndexService = toolEmbeddingIndexService;
         this.embeddingAutoRouterService = embeddingAutoRouterService;
-        this.toolChainRuntimeService = toolChainRuntimeService;
-        this.toolChainService = toolChainService;
-        this.chainParameterExtractor = chainParameterExtractor;
     }
 
     public String runTurn(AgentSession session, String userText, ChatState state, SseEventSender sender) {
@@ -137,83 +126,6 @@ public class AgentRuntimeService {
         state.setRuntimeMode(runtimeMode);
         String normalizedUserText = userText == null ? "" : userText.trim();
         session.getMessages().add(new UserMessage(normalizedUserText));
-
-        if (shouldExecuteToolChain(state)) {
-            transitionState(session.getSessionId(), turnId, sender, PlannerState.EXECUTE_PARALLEL, "toolchain-execution");
-            try {
-                // Resolve chain version + perform the single message→typed-params LLM hop.
-                // The chain only sees the structured params it declared. Free-form prose stops here.
-                ToolChainVersion version = toolChainService.resolveVersion(state.getToolChainId(), state.getToolChainVersion())
-                        .orElseThrow(() -> new IllegalStateException("ToolChain version not found"));
-                Map<String, Object> tcInput;
-                try {
-                    tcInput = new LinkedHashMap<>(chainParameterExtractor.extract(
-                            normalizedUserText,
-                            version.getInputSchema(),
-                            extractionHintsForChain(state.getToolChainId()),
-                            state.getModel() != null ? state.getModel()
-                                    : resolveDefaultModelRefForChain(state.getToolChainId())));
-                } catch (ChainParameterExtractor.ExtractionFailed extractionFailure) {
-                    log.info("[AgentRuntime] Chain param extraction failed ({}); falling back to dynamic flow",
-                            extractionFailure.getMessage());
-                    if (state.isToolChainSelectedByUser() || "strict".equalsIgnoreCase(runtimeMode)) {
-                        throw extractionFailure;
-                    }
-                    state.setToolChainId(null);
-                    state.setToolChainVersion(null);
-                    transitionState(session.getSessionId(), turnId, sender, PlannerState.PLAN, "param-extraction-failed-falling-back");
-                    return runTurn(session, userText, state, sender, turnId);
-                }
-                var run = toolChainRuntimeService.execute(
-                        state.getToolChainId(),
-                        state.getToolChainVersion(),
-                        "chat",
-                        UserContextHolder.currentUserId(),
-                        tcInput,
-                        Map.of("async", false),
-                        sender,
-                        session.getSessionId()
-                );
-                // Anchor the run to the chat transcript so the UI can render a
-                // "View run" chip linking to the run detail page on refresh.
-                Map<String, Object> bound = new LinkedHashMap<>();
-                bound.put("sessionId", session.getSessionId());
-                bound.put("toolChainId", state.getToolChainId());
-                bound.put("runId", run.getId());
-                bound.put("version", run.getVersion());
-                bound.put("status", run.getStatus());
-                sender.sendCustom("toolchain.run.bound", bound);
-                runtimeEventRepository.save(RuntimeEvent.builder()
-                        .sessionId(session.getSessionId())
-                        .turnId(turnId)
-                        .eventType("toolchain.run.bound")
-                        .payload(toJsonSafe(bound))
-                        .build());
-                String result = renderToolChainAssistantMessage(run);
-                session.getMessages().add(new AssistantMessage(result));
-                transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "toolchain-execution-done");
-                return result;
-            } catch (Exception e) {
-                log.warn("[AgentRuntime] ToolChain execution failed, falling back to dynamic flow: {}", e.getMessage());
-                // Fail loud when the user explicitly chose this chain — they asked for
-                // a deterministic run, not a "best effort". Strict mode also fails loud
-                // even for inferred matches.
-                if (state.isToolChainSelectedByUser() || "strict".equalsIgnoreCase(runtimeMode)) {
-                    String error = "ToolChain execution failed: " + e.getMessage();
-                    sender.sendError(error);
-                    runtimeEventRepository.save(RuntimeEvent.builder()
-                            .sessionId(session.getSessionId())
-                            .turnId(turnId)
-                            .eventType("task.done")
-                            .payload("{\"task\":\"toolchain_failed\",\"status\":\"failed\",\"error\":" + jsonString(e.getMessage()) + "}")
-                            .build());
-                    session.getMessages().add(new AssistantMessage(error));
-                    transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE,
-                            state.isToolChainSelectedByUser() ? "toolchain-failed-user-selected" : "toolchain-failed-strict");
-                    return error;
-                }
-            }
-        }
 
         if ("auto".equalsIgnoreCase(state.getModelSelectionMode())) {
             ModelRef auto = modelAutoRouterService.pickModel(userText, session.getMessages().size(), true);
@@ -230,7 +142,7 @@ public class AgentRuntimeService {
                 .eventType("plan.created")
                 .payload("{\"mode\":\"" + runtimeMode + "\"}")
                 .build());
-        if (!isToolChainDesignerMode(runtimeMode) && isCapabilitiesQuery(userText)) {
+        if (isCapabilitiesQuery(userText)) {
             if (runtimeTuningProperties.isStrictScopeOnly() && !runtimeTuningProperties.isAllowCapabilitiesQueries()) {
                 transitionState(session.getSessionId(), turnId, sender, PlannerState.DONE, "strict-out-of-scope");
                 return outOfScopeRefusalMessage();
@@ -261,14 +173,6 @@ public class AgentRuntimeService {
 
         String mcpContext = buildMcpContext();
         return runModelDrivenCoreLoop(session, normalizedUserText, state, sender, turnId, runtimeMode, mcpContext);
-    }
-
-    private boolean shouldExecuteToolChain(ChatState state) {
-        if (state == null) return false;
-        if (isToolChainDesignerMode(state.getRuntimeMode()) || isToolChainArchitectRuntimeMode(state.getRuntimeMode())) return false;
-        if (state.getToolChainId() != null && !state.getToolChainId().isBlank()) return true;
-        String mode = state.getRuntimeMode();
-        return mode != null && mode.toLowerCase(Locale.ROOT).contains("toolchain");
     }
 
     private record ScopeGateOutcome(boolean refused, String refusal, double topCosine) {}
@@ -392,14 +296,7 @@ public class AgentRuntimeService {
                     .toList();
         }
 
-        // Skip the skill-first gate in toolchain_designer mode — the architect skill is already
-        // injected as the system prompt, and the gate would otherwise block read/edit/apply_patch
-        // calls that VFS-edit mode depends on, returning a "call skill first" string instead of
-        // the actual file contents.
-        boolean designerMode = isToolChainDesignerMode(state.getRuntimeMode())
-                || isToolChainArchitectRuntimeMode(state.getRuntimeMode());
-        boolean enforceSkillFirst = !designerMode
-                && !isOrderValidationProfile
+        boolean enforceSkillFirst = !isOrderValidationProfile
                 && shouldEnforceSkillFirst(userText, session.getSessionId());
         SkillExecutionGate skillExecutionGate = new SkillExecutionGate(enforceSkillFirst);
         if (enforceSkillFirst) {
@@ -413,9 +310,6 @@ public class AgentRuntimeService {
                             .toList());
         }
         String selectedSkillContext = buildSelectedSkillContext(session, userText, state);
-        if (isToolChainArchitectRuntimeMode(state.getRuntimeMode())) {
-            selectedSkillContext = "";
-        }
         if ((selectedSkillContext == null || selectedSkillContext.isBlank()) && enforceSkillFirst) {
             // For execution turns that require skill-first behavior, always inject at least
             // a compact skill catalog so the model has deterministic routing guidance.
@@ -429,13 +323,9 @@ public class AgentRuntimeService {
                 .toList()
                 : List.of();
 
-        // In designer mode, bind the per-session workspace and bypass the approval prompt
-        // for FS tools. The architect's read/edit/apply_patch are sandboxed to the workspace
-        // by safePath in ToolExecutionService, so no human approval is meaningful here.
-        java.nio.file.Path designerWorkspace = designerMode ? session.getWorkspacePath() : null;
         List<ToolCallback> toolCallbacks = agentToolCallbackFactory.buildForTurn(
                 session.getSessionId(), turnId, sender, tools, skillExecutionGate,
-                designerWorkspace, designerMode);
+                null, false);
         // Keep skill guidance in base system prompt and load full skill content only when
         // model explicitly calls the native `skill` tool.
         String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "",
@@ -653,29 +543,9 @@ public class AgentRuntimeService {
                 .append("- Before final synthesis, inspect that file using filesystem tools (`read` and `grep`) against the provided `path`.\n")
                 .append("- Do not assume the `preview` field contains complete output; treat it as a teaser only.\n")
                 .append("</tool_result_vfs_policy>\n\n");
-        if (isToolChainDesignerMode(runtimeMode)) {
-            context.append("""
-<toolchain_designer_mode>
-You are in ToolChain designer creation mode.
-- Do NOT route to or execute existing ToolChains.
-- Use available tools + skills to gather what you need for creating/editing a ToolChain draft.
-- Prefer the ToolChain architect skill (toolchain-architect) for graph/schema/synthesis design.
-- Ask only design/clarification questions required to build the ToolChain draft.
-</toolchain_designer_mode>
-
-""");
-        }
         context.append("Runtime mode: ").append(runtimeMode).append("\n\n");
         context.append(userText == null ? "" : userText);
         return context.toString();
-    }
-
-    private boolean isToolChainDesignerMode(String runtimeMode) {
-        return runtimeMode != null && "toolchain_designer".equalsIgnoreCase(runtimeMode.trim());
-    }
-
-    private boolean isToolChainArchitectRuntimeMode(String runtimeMode) {
-        return runtimeMode != null && "toolchain_architect_runtime".equalsIgnoreCase(runtimeMode.trim());
     }
 
     private String buildWorkspaceManifest(AgentSession session) {
@@ -1174,11 +1044,6 @@ You are in ToolChain designer creation mode.
 
     private SkillContextMode resolveSkillContextMode(String userText, String runtimeMode) {
         if (userText == null || userText.isBlank()) return SkillContextMode.NONE;
-        if (isToolChainDesignerMode(runtimeMode)) {
-            return runtimeTuningProperties.isIncludeFullSkillFiles()
-                    ? SkillContextMode.FULL_SKILL_FILES
-                    : SkillContextMode.CATALOG_ONLY;
-        }
         if (isCapabilitiesQuery(userText) || isCatalogOnlySkillQuery(userText)) {
             return SkillContextMode.CATALOG_ONLY;
         }
@@ -1339,104 +1204,6 @@ You are in ToolChain designer creation mode.
         return text;
     }
 
-    /**
-     * Reads the chain's metadata for `paramExtractionHints` (LLM-authored examples of how a
-     * user phrase maps to typed params). Returned to the extractor as the "hints" payload.
-     */
-    @SuppressWarnings("unchecked")
-    private String extractionHintsForChain(String toolChainId) {
-        if (toolChainId == null || toolChainId.isBlank()) return null;
-        try {
-            var chain = toolChainService.getRequired(toolChainId);
-            String raw = chain.getMetadataJson();
-            if (raw == null || raw.isBlank()) return null;
-            Map<String, Object> meta = objectMapper.readValue(raw, Map.class);
-            Object hints = meta.get("paramExtractionHints");
-            return hints == null ? null : String.valueOf(hints);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * Falls back to the chain's stored default model when the chat session doesn't have one
-     * (e.g., the chain was matched without an active state.model). Mirrors
-     * ToolChainRuntimeService.resolveModelRefForSynthesis.
-     */
-    @SuppressWarnings("unchecked")
-    private ModelRef resolveDefaultModelRefForChain(String toolChainId) {
-        if (toolChainId == null || toolChainId.isBlank()) return null;
-        try {
-            var chain = toolChainService.getRequired(toolChainId);
-            String raw = chain.getMetadataJson();
-            if (raw == null || raw.isBlank()) return null;
-            Map<String, Object> meta = objectMapper.readValue(raw, Map.class);
-            Object refObj = meta.get("runtimeModelRef");
-            if (!(refObj instanceof Map<?, ?>)) refObj = meta.get("defaultModelRef");
-            if (!(refObj instanceof Map<?, ?> refMap)) return null;
-            Object pid = refMap.get("providerID");
-            Object mid = refMap.get("modelID");
-            if (pid == null || mid == null) return null;
-            return new ModelRef(String.valueOf(pid), String.valueOf(mid));
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private String renderToolChainAssistantMessage(ToolChainRun run) {
-        if (run == null) return "";
-        String snapshot = run.getOutputSnapshot();
-        if (snapshot == null || snapshot.isBlank()) {
-            return "{\"runId\":\"" + (run.getId() == null ? "" : run.getId())
-                    + "\",\"status\":\"" + (run.getStatus() == null ? "" : run.getStatus()) + "\"}";
-        }
-        try {
-            Map<String, Object> outer = objectMapper.readValue(snapshot, Map.class);
-            Object resultField = outer.get("result");
-            String summary = findSummary(resultField);
-            if (summary != null && !summary.isBlank()) return summary;
-            if (resultField instanceof String s && !s.isBlank()) {
-                String trimmed = s.trim();
-                // synthesized_text mode returns the synthesis text directly (not JSON-shaped)
-                if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return s;
-            }
-            String topSummary = findSummary(outer);
-            if (topSummary != null && !topSummary.isBlank()) return topSummary;
-        } catch (Exception e) {
-            log.warn("[AgentRuntime] could not parse toolchain outputSnapshot for assistant render: {}", e.getMessage());
-        }
-        return snapshot;
-    }
-
-    @SuppressWarnings("unchecked")
-    private String findSummary(Object node) {
-        if (node == null) return null;
-        if (node instanceof String s) {
-            String trimmed = s.trim();
-            if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
-            try {
-                Object parsed = objectMapper.readValue(trimmed, Object.class);
-                return findSummary(parsed);
-            } catch (Exception ignored) {
-                return null;
-            }
-        }
-        if (node instanceof Map<?, ?> map) {
-            Object summary = map.get("summary");
-            if (summary instanceof String s && !s.isBlank()) return s;
-            for (Object value : map.values()) {
-                String nested = findSummary(value);
-                if (nested != null) return nested;
-            }
-        }
-        return null;
-    }
-
-    private PendingInteractionService.QuestionMetadata textQuestionMetadata() {
-        return new PendingInteractionService.QuestionMetadata("text", List.of(), true, null, null);
-    }
-
     private String outOfScopeRefusalMessage() {
         String configured = runtimeTuningProperties.getOutOfScopeRefusalMessage();
         if (configured == null || configured.isBlank()) {
@@ -1483,26 +1250,6 @@ You are in ToolChain designer creation mode.
                 .eventType(eventType)
                 .payload(payload)
                 .build());
-    }
-
-    @SuppressWarnings("unused")
-    private String jsonString(String value) {
-        if (value == null) return "null";
-        return "\"" + sanitize(value) + "\"";
-    }
-
-    private String toJsonSafe(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value);
-        } catch (Exception e) {
-            return "{}";
-        }
-    }
-
-    @SuppressWarnings("unused")
-    private String jsonArray(List<String> values) {
-        if (values == null || values.isEmpty()) return "[]";
-        return "[" + values.stream().map(this::jsonString).collect(Collectors.joining(",")) + "]";
     }
 
     private Set<String> simpleTokenize(String text) {

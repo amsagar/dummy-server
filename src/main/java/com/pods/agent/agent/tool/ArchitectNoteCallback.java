@@ -15,9 +15,8 @@ import tools.jackson.databind.ObjectMapper;
  * Native tool callback that lets the chat agent drop a short reasoning note
  * into the in-flight execution log. The note becomes an
  * {@code architect_note} step in the typed execution log produced at end of
- * turn, giving downstream toolchain drafting flows concrete intent annotations
- * to anchor on (loop boundaries, condition predicates, parallel fan-outs,
- * decision points).
+ * turn, anchoring the agent's intent (loop boundaries, condition predicates,
+ * parallel fan-outs, decision points) for downstream analysis.
  *
  * <p>Scope: write-only, restricted to the in-flight turn. The chat agent
  * cannot read existing notes back, list them, or write anywhere else on the
@@ -27,10 +26,7 @@ import tools.jackson.databind.ObjectMapper;
  *
  * <p>Recommended use: one short note before a logical block, e.g.
  * <em>"loop products: for each item in #products"</em> or
- * <em>"condition: only review when total > 500"</em>. The chat agent
- * uses this tool directly — there is no need to load the
- * {@code toolchain-architect} skill at runtime; that skill is for offline
- * drafting only.
+ * <em>"condition: only review when total > 500"</em>.
  */
 @Slf4j
 public class ArchitectNoteCallback implements ToolCallback {
@@ -38,8 +34,7 @@ public class ArchitectNoteCallback implements ToolCallback {
     private static final String TOOL_NAME = "architect_note";
     private static final String DESCRIPTION =
             "Append a short reasoning note to the current turn's execution log. Use this to mark "
-                    + "logical structure that drafting flows should pick up when converting "
-                    + "this run into a reusable toolchain \u2014 e.g. \"loop over products\", "
+                    + "logical structure \u2014 e.g. \"loop over products\", "
                     + "\"condition: total > 500\", \"parallel fan-out for inventory + pricing\", "
                     + "\"ai_reasoning here: classify fraud risk\". Notes are append-only, scoped to "
                     + "the current turn, and stored alongside tool calls in execution-log-<turnId>.json.";

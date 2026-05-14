@@ -165,12 +165,8 @@ public class AgentToolCallback implements ToolCallback {
         }
 
         GuardrailPolicyEngine.Decision decision = policyEngine.evaluateTool(tool);
-        // ToolChain designer turns operate inside the per-session workspace sandbox
-        // (read/edit/apply_patch are bounded by safePath). Approval prompts on every
-        // edit would block the architect's silent VFS edits; allow the runtime to opt
-        // out via bypassApprovalGate.
         if (bypassApprovalGate && "ask".equalsIgnoreCase(decision.decision())) {
-            decision = new GuardrailPolicyEngine.Decision("allow", "designer-bypass");
+            decision = new GuardrailPolicyEngine.Decision("allow", "approval-bypass");
         }
         if ("deny".equalsIgnoreCase(decision.decision())) {
             String denied = "Denied by policy: " + decision.reason();

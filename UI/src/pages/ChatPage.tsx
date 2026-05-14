@@ -433,8 +433,6 @@ export default function ChatPage() {
           content = payload.question || payload.prompt || questionFromNested || '';
         } else if (e.eventType === 'approval_required') {
           content = payload.reason || '';
-        } else if (e.eventType === 'toolchain.run.bound') {
-          content = `Run #${String(payload.runId || '').slice(0, 8)}`;
         } else {
           return null as any;
         }
@@ -833,17 +831,6 @@ export default function ChatPage() {
                 error: ev.error,
               });
             }
-            break;
-          case 'toolchain.run.bound':
-            appendSystemMessage(ev.type,
-              `Run #${String(ev.runId || '').slice(0, 8)}`,
-              undefined,
-              {
-                toolChainId: ev.toolChainId,
-                runId: ev.runId,
-                version: ev.version,
-                status: ev.status,
-              });
             break;
           case 'step.started':
           case 'step.finished':

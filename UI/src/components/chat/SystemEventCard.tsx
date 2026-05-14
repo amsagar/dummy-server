@@ -41,24 +41,6 @@ const SystemEventCard: FC<Props> = ({
     pending?.metadata || normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload);
   const mode = metadata?.responseMode || "text";
 
-  if (m.eventType === "toolchain.run.bound") {
-    const runId = String(m.eventPayload?.runId || "");
-    const version = m.eventPayload?.version;
-    const status = m.eventPayload?.status;
-    return (
-      <div className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] text-blue-700">▶ Run</span>
-          <span className="min-w-0 flex-1 truncate text-slate-700">
-            #{runId.slice(0, 8)}
-            {version ? ` (v${version})` : ""}
-            {status ? ` — ${status}` : ""}
-          </span>
-        </div>
-      </div>
-    );
-  }
-
   if (m.eventType === "task.started" || m.eventType === "task.done") {
     const taskName = m.eventPayload?.taskName || m.eventPayload?.taskId || "node";
     const status = m.eventPayload?.status || m.eventPayload?.result;

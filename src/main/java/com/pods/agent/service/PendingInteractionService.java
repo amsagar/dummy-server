@@ -89,8 +89,8 @@ public class PendingInteractionService {
 
     /**
      * Wake every pending awaitReply future for the given session by completing
-     * each with a null reply. Used by the toolchain config "stop stream" path so
-     * a worker thread blocked inside awaitReply unwinds and can finalise.
+     * each with a null reply. Used by "stop stream" paths so a worker thread
+     * blocked inside awaitReply unwinds and can finalise.
      * Returns the number of futures that were woken.
      */
     public int cancelBySession(String sessionId) {

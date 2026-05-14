@@ -23,11 +23,11 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Builds and maintains the per-turn <strong>execution log</strong> — the
- * "GOLD" structured trace that drafting flows consume to convert one
- * exploratory chat turn into a reusable toolchain definition.
+ * structured trace of a single chat turn (tool calls, planner state
+ * transitions, reasoning, architect notes).
  *
  * <p>Output shape (single JSON document at
- * {@code <sessionWorkspace>/.pods-agent/toolchains/execution-log-<turnId>.json}):
+ * {@code <sessionWorkspace>/.pods-agent/execution-logs/execution-log-<turnId>.json}):
  * <pre>
  * {
  *   "executionId": &lt;turnId&gt;,
@@ -81,7 +81,7 @@ import tools.jackson.databind.node.ObjectNode;
 public class ExecutionLogService {
 
     /** Root directory inside the session VFS for execution-log artifacts. */
-    public static final String EXECUTION_LOG_DIR = ".pods-agent/toolchains";
+    public static final String EXECUTION_LOG_DIR = ".pods-agent/execution-logs";
 
     public static final String STEP_TOOL = "tool";
     public static final String STEP_STATE_TRANSITION = "state_transition";
@@ -122,7 +122,7 @@ public class ExecutionLogService {
         Path workspace = workspaceService.get(sessionId);
         if (workspace == null) {
             // Should not happen — ChatService creates the workspace before
-            // running the turn. Belt-and-suspenders fallback so the architect
+            // running the turn. Belt-and-suspenders fallback so the log
             // pipeline still gets a file path.
             workspace = workspaceService.getOrCreate(sessionId);
         }

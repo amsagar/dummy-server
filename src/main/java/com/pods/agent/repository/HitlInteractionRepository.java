@@ -52,26 +52,6 @@ public class HitlInteractionRepository {
         return jdbc.query(sql.getQuery("HITL.FIND_BY_SESSION"), (rs, n) -> map(rs), sessionId);
     }
 
-    public List<HitlInteraction> findPendingSystemToolchainApprovalsByUser(String userId) {
-        String query = """
-                SELECT hi.*
-                FROM agent.hitl_interactions hi
-                JOIN agent.chat_sessions cs ON cs.session_id = hi.session_id
-                WHERE cs.user_id = :userId
-                  AND hi.status = 'pending'
-                  AND hi.type = 'approval_required'
-                  AND hi.prompt LIKE :promptPrefix
-                ORDER BY hi.created_at DESC
-                """;
-        return namedJdbc.query(
-                query,
-                new MapSqlParameterSource()
-                        .addValue("userId", userId)
-                        .addValue("promptPrefix", "Create a reusable toolchain from this turn?%"),
-                (rs, n) -> map(rs)
-        );
-    }
-
     public void resolve(String id, String status, String responseText) {
         namedJdbc.update(sql.getQuery("HITL.RESOLVE"), new MapSqlParameterSource()
                 .addValue("id", id)

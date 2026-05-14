@@ -17,8 +17,6 @@ public class ChatRequest {
     private String runtimeMode;
     private String modelSelectionMode;
     private String agentProfileId;
-    private String toolChainId;
-    private Integer toolChainVersion;
 
     /**
      * Model to use for this turn.

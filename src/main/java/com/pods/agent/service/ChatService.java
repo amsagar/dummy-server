@@ -78,7 +78,6 @@ public class ChatService {
     private final RuntimeTuningProperties runtimeTuningProperties;
     private final SessionWorkspaceService sessionWorkspaceService;
     private final WorkspaceSkillSyncService workspaceSkillSyncService;
-    private final SystemToolChainAsyncService systemToolChainAsyncService;
     private final ExecutionLogService executionLogService;
     private final ObjectMapper objectMapper;
 
@@ -97,7 +96,6 @@ public class ChatService {
                        RuntimeTuningProperties runtimeTuningProperties,
                        SessionWorkspaceService sessionWorkspaceService,
                        WorkspaceSkillSyncService workspaceSkillSyncService,
-                       SystemToolChainAsyncService systemToolChainAsyncService,
                        ExecutionLogService executionLogService,
                        ObjectMapper objectMapper) {
         this.sessionManager = sessionManager;
@@ -115,7 +113,6 @@ public class ChatService {
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.sessionWorkspaceService = sessionWorkspaceService;
         this.workspaceSkillSyncService = workspaceSkillSyncService;
-        this.systemToolChainAsyncService = systemToolChainAsyncService;
         this.executionLogService = executionLogService;
         this.objectMapper = objectMapper;
     }
@@ -231,7 +228,6 @@ public class ChatService {
                 CostUsage usage = estimateCost(sessionId, state, finalUserMessage, response, elapsed);
                 costUsageRepository.save(usage);
                 sender.sendCostUpdated(sessionId, costUsageRepository.summarizeBySession(sessionId));
-                // Legacy ToolChain async generation intentionally disabled after workflow-only cutover.
                 try {
                     executionLogService.finalizeTurnLog(
                             sessionId,
@@ -502,12 +498,6 @@ public class ChatService {
         }
         if (request.getAgentProfileId() != null && !request.getAgentProfileId().isBlank()) {
             state.setAgentProfileId(request.getAgentProfileId());
-        }
-        if (request.getToolChainId() != null && !request.getToolChainId().isBlank()) {
-            state.setToolChainId(request.getToolChainId());
-        }
-        if (request.getToolChainVersion() != null) {
-            state.setToolChainVersion(request.getToolChainVersion());
         }
         var resolved = request.resolvedModel();
         if (resolved != null) {
