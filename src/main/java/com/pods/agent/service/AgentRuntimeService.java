@@ -621,6 +621,23 @@ public class AgentRuntimeService {
             tools = tools.stream()
                     .filter(t -> t != null && t.getName() != null && allowed.contains(t.getName()))
                     .toList();
+        } else {
+            // Symmetric guard: the ov* tools are domain-specific analytics for
+            // the Order Validation UI. Outside an ov-* profile they would
+            // appear in the general chat tool catalog and any model would
+            // happily pick ovListRunsForOrder on the word "validate" — that's
+            // exactly the leak this branch prevents. Strip the whole family
+            // so general chat sessions never see them. Keeping the names in
+            // a Set (rather than a prefix check) avoids accidentally
+            // shadowing any future tool that legitimately starts with "ov".
+            Set<String> orderValidationOnly = Set.of(
+                    "ovListRunsForOrder",
+                    "ovGetRunDetail",
+                    "ovStartValidation",
+                    "ovDashboardStats");
+            tools = tools.stream()
+                    .filter(t -> t == null || t.getName() == null || !orderValidationOnly.contains(t.getName()))
+                    .toList();
         }
 
         // Skip the skill-first gate in toolchain_designer mode — the architect skill is already
