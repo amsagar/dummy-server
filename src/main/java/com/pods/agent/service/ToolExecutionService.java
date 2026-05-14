@@ -207,7 +207,13 @@ public class ToolExecutionService {
     private ExecutionResult executeFilesystem(AgentTool tool, String userText) {
         try {
             Map<String, Object> args = parseArgs(userText);
-            return switch (tool.getName().toLowerCase()) {
+            String op = tool.getName() == null ? "unknown" : tool.getName().toLowerCase();
+            Object rawPath = args.get("path");
+            log.info("[ToolExecutionService] fs op={} path={} inputKeys={}",
+                    op,
+                    rawPath == null ? "(none)" : rawPath,
+                    args.keySet());
+            ExecutionResult result = switch (op) {
                 case "read" -> fsRead(args);
                 case "glob" -> fsGlob(args);
                 case "grep" -> fsGrep(args);
@@ -216,6 +222,12 @@ public class ToolExecutionService {
                 case "apply_patch" -> fsApplyPatch(args);
                 default -> new ExecutionResult(false, null, "Unsupported filesystem tool: " + tool.getName());
             };
+            log.info("[ToolExecutionService] fs op={} success={} bodyChars={} error={}",
+                    op,
+                    result.success(),
+                    result.body() == null ? 0 : result.body().length(),
+                    result.error());
+            return result;
         } catch (Exception e) {
             return new ExecutionResult(false, null, "Filesystem tool failed: " + e.getMessage());
         }

@@ -178,15 +178,11 @@ public class WorkflowBuilderService {
         // pre-populated (see runAgent), so the only path is edit/apply_patch
         // on the existing skeleton.
         //
-        // We also remember the SHA-256 of the seeded bytes so that — when an
-        // attempt produces a draft byte-identical to the skeleton — we can
-        // short-circuit the alignment judge entirely. The judge has been
-        // observed hallucinating "diverges from skeleton" critiques against
-        // a draft that IS the skeleton verbatim (e.g. mis-reading the SpEL
-        // empty-list literal `{}` as a JSON empty-object), starting an
-        // unwinnable retry spiral. When the disk content equals the
-        // skeleton there is, by construction, nothing to align — the
-        // skeleton is the canonical answer.
+        // We also remember the SHA-256 of the seeded bytes so we can emit a
+        // high-signal log when the draft remains byte-identical to the
+        // skeleton on an attempt. We still run strict alignment checks in
+        // that case (no fast-path finalize) so malformed/unavailable judge
+        // responses cannot bypass semantic verification.
         boolean draftPrePopulated = false;
         String seededSkeletonHash = null;
         if (!skeletonTemplates.isEmpty()) {
@@ -424,32 +420,17 @@ public class WorkflowBuilderService {
             lastGoodDraft = draftJson;
             lastGoodFeedback = null;
 
-            // VERBATIM-SKELETON SHORT-CIRCUIT: when the post-attempt draft is
-            // byte-identical to the seeded skeleton, the draft IS the
-            // canonical answer the skill-supplied template prescribes; there
-            // is nothing for the alignment judge to legitimately complain
-            // about. Skip the judge call to avoid a documented false-positive
-            // failure mode where the judge model misreads SpEL fragments
-            // (e.g. `?: {}`, the SpEL empty-list literal) as JSON and emits
-            // unwinnable "diverges from skeleton" critiques. Finalize
-            // successfully on the spot.
-            if (skeletonHash != null && skeletonHash.equals(hashAfter)) {
-                log.info("[WorkflowBuilder] proposal {} attempt {} draft is byte-identical to seeded skeleton; skipping alignment judge (verbatim-skeleton short-circuit)",
-                        proposal.getId(), displayAttempt);
-                WorkflowProposal finalized = finalizeSuccess(proposal, report.dto(), draftJson, workspace);
-                log.info("[WorkflowBuilder] build SUCCESS (verbatim skeleton) for proposal {} -> process_def {} after {} productive + {} noop attempt(s) in {}ms",
-                        finalized.getId(), finalized.getMaterializedDefId(),
-                        productiveAttempts, noopAttempts, System.currentTimeMillis() - startedAt);
-                return finalized;
-            }
-
             String executionLogContent = readExecutionLogQuiet(executionLogFile);
+            if (skeletonHash != null && skeletonHash.equals(hashAfter)) {
+                log.info("[WorkflowBuilder] proposal {} attempt {} draft is byte-identical to seeded skeleton; running strict alignment check before finalize",
+                        proposal.getId(), displayAttempt);
+            }
             Verdict verdict = alignmentJudge.judge(
                     draftJson,
                     skillNames,
                     executionLogContent,
                     proposal.getReason(),
-                    modelRef);
+                    currentModel);
             if (!verdict.aligned()) {
                 lastFailureSummary = renderAlignmentFeedback(verdict);
                 log.info("[WorkflowBuilder] proposal {} attempt {} alignment FAILED (severity={}): {}",
@@ -1141,8 +1122,15 @@ public class WorkflowBuilderService {
     }
 
     private String renderAlignmentFeedback(Verdict verdict) {
-        return "Alignment judge rejected the draft (severity=" + verdict.severity() + "):\n  - "
-                + (verdict.critique() == null ? "(no critique provided)" : verdict.critique());
+        String critique = verdict.critique() == null || verdict.critique().isBlank()
+                ? "(no critique provided)"
+                : verdict.critique();
+        return "Alignment judge rejected the draft (severity=" + verdict.severity() + "):\n"
+                + "  - " + critique + "\n"
+                + "Strict fix procedure for the next attempt:\n"
+                + "  1. Read the draft file and keep existing structure unless critique says restart from skeleton.\n"
+                + "  2. Apply only edits that satisfy the exact activity/path mismatch above.\n"
+                + "  3. Ensure every new #variable reference is either declared in variables[] or produced via outputVariables[].";
     }
 
     /**

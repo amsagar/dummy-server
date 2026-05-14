@@ -1685,7 +1685,9 @@ public class ToolChainRuntimeService {
                 runId,
                 objectMapper,
                 runtimeEventRepository,
-                gate
+                gate,
+                runtimeTuningProperties.getToolIoLogMode(),
+                runtimeTuningProperties.isProductionEnvironment()
         );
 
         StringBuilder skillsCatalog = new StringBuilder();

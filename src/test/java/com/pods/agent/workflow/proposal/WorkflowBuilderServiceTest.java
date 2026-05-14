@@ -435,18 +435,13 @@ class WorkflowBuilderServiceTest {
     }
 
     /**
-     * Regression for the alignment death-spiral: when the seeded skeleton is
-     * already the canonical answer and the model leaves it untouched, the
-     * builder must finalize on the first attempt WITHOUT consulting the
-     * alignment judge. The judge has been observed hallucinating
-     * "diverges from skeleton" critiques against a draft that IS the
-     * skeleton verbatim (typically by misreading the SpEL empty-list
-     * literal `{}` as a JSON empty-object), which starts an unwinnable
-     * retry loop. The verbatim-skeleton short-circuit is the structural
-     * escape hatch.
+     * Strict-alignment regression: even when the seeded skeleton remains
+     * byte-identical, the builder must still run alignment before finalize.
+     * This prevents a permissive fast-path from materializing workflows when
+     * semantic judge checks were unavailable or malformed.
      */
     @Test
-    void buildShortCircuitsAlignmentWhenDraftIsVerbatimSkeleton(@TempDir Path workspace) throws IOException {
+    void buildRunsAlignmentWhenDraftIsVerbatimSkeleton(@TempDir Path workspace) throws IOException {
         Fixture fx = new Fixture(workspace);
         // Stub the skill registry to return a snapshot whose files map
         // contains a workflow-template entry. This triggers the pre-
@@ -464,11 +459,7 @@ class WorkflowBuilderServiceTest {
 
         WorkflowProposal proposal = fx.persistedPending();
 
-        // Fake agent: do NOT modify the draft. The seeded skeleton IS
-        // already the canonical answer; per the builder system prompt
-        // "often zero edits are required and the pre-populated draft is
-        // the answer". The short-circuit must finalize successfully
-        // without invoking the alignment judge.
+        // Fake agent: do NOT modify the draft.
         AtomicInteger invocations = new AtomicInteger();
         fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters, prePop) -> {
             invocations.incrementAndGet();
@@ -483,7 +474,7 @@ class WorkflowBuilderServiceTest {
                 "verbatim-skeleton path must finalize successfully");
         assertEquals(1, invocations.get(),
                 "build must complete in a single attempt — no retry needed when the seed is correct");
-        verify(fx.alignmentJudge, never()).judge(anyString(), any(), any(), any(), any());
+        verify(fx.alignmentJudge, times(1)).judge(anyString(), any(), any(), any(), any());
         verify(fx.processDefService, times(1)).save(any());
     }
 

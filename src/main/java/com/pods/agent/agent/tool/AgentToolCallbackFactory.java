@@ -106,7 +106,9 @@ public class AgentToolCallbackFactory {
                         skillExecutionGate,
                         workspace,
                         bypassApprovalGate,
-                        runtimeTuningProperties.getToolOutputVfsSpillThresholdChars()))
+                        runtimeTuningProperties.getToolOutputVfsSpillThresholdChars(),
+                        runtimeTuningProperties.getToolIoLogMode(),
+                        runtimeTuningProperties.isProductionEnvironment()))
                 .collect(Collectors.toList());
 
         callbacks.add(new SkillToolCallback(
@@ -117,7 +119,9 @@ public class AgentToolCallbackFactory {
                 turnId,
                 objectMapper,
                 runtimeEventRepository,
-                skillExecutionGate
+                skillExecutionGate,
+                runtimeTuningProperties.getToolIoLogMode(),
+                runtimeTuningProperties.isProductionEnvironment()
         ));
         callbacks.add(new ArchitectNoteCallback(
                 executionLogService,

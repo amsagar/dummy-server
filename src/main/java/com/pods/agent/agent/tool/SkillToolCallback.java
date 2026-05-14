@@ -40,6 +40,8 @@ public class SkillToolCallback implements ToolCallback {
     private final ObjectMapper objectMapper;
     private final RuntimeEventRepository runtimeEventRepository;
     private final SkillExecutionGate skillExecutionGate;
+    private final String toolIoLogMode;
+    private final boolean productionEnvironment;
 
     public SkillToolCallback(SkillRegistryService skillRegistryService,
                              RuntimeTuningProperties runtimeTuningProperties,
@@ -48,7 +50,9 @@ public class SkillToolCallback implements ToolCallback {
                              String turnId,
                              ObjectMapper objectMapper,
                              RuntimeEventRepository runtimeEventRepository,
-                             SkillExecutionGate skillExecutionGate) {
+                             SkillExecutionGate skillExecutionGate,
+                             String toolIoLogMode,
+                             boolean productionEnvironment) {
         this.skillRegistryService = skillRegistryService;
         this.runtimeTuningProperties = runtimeTuningProperties;
         this.sender = sender;
@@ -57,6 +61,8 @@ public class SkillToolCallback implements ToolCallback {
         this.objectMapper = objectMapper;
         this.runtimeEventRepository = runtimeEventRepository;
         this.skillExecutionGate = skillExecutionGate;
+        this.toolIoLogMode = toolIoLogMode == null ? "metadata" : toolIoLogMode.trim().toLowerCase(Locale.ROOT);
+        this.productionEnvironment = productionEnvironment;
     }
 
     @Override
@@ -77,6 +83,7 @@ public class SkillToolCallback implements ToolCallback {
     public String call(String jsonInput, ToolContext toolContext) {
         String payload = jsonInput == null ? "{}" : jsonInput;
         String callId = UUID.randomUUID().toString();
+        logSkillMeta(callId, "call", payload, null, null);
         sender.sendToolCall(sessionId, callId, TOOL_NAME, payload);
         saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":\"" + TOOL_NAME + "\",\"input\":" + json(payload) + "}");
 
@@ -86,6 +93,7 @@ public class SkillToolCallback implements ToolCallback {
                 String msg = "Missing required input: name";
                 sender.sendToolResult(sessionId, callId, TOOL_NAME, msg, "error");
                 saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":\"" + TOOL_NAME + "\",\"status\":\"error\",\"output\":" + json(msg) + "}");
+                logSkillMeta(callId, "done", payload, "error", msg);
                 return msg;
             }
             SkillRegistryService.SkillSnapshot snapshot = skillRegistryService.getEnabledSkillByName(skillName);
@@ -93,6 +101,7 @@ public class SkillToolCallback implements ToolCallback {
                 String msg = "Skill \"" + skillName + "\" not found. Available skills: " + availableSkillNames();
                 sender.sendToolResult(sessionId, callId, TOOL_NAME, msg, "error");
                 saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":\"" + TOOL_NAME + "\",\"status\":\"error\",\"output\":" + json(msg) + "}");
+                logSkillMeta(callId, "done", payload, "error", msg);
                 return msg;
             }
 
@@ -102,12 +111,54 @@ public class SkillToolCallback implements ToolCallback {
             }
             sender.sendToolResult(sessionId, callId, TOOL_NAME, output, "success");
             saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":\"" + TOOL_NAME + "\",\"status\":\"success\",\"output\":" + json(truncate(output, 5000)) + "}");
+            logSkillMeta(callId, "done", payload, "success", output);
             return output;
         } catch (Exception e) {
             String msg = "Skill load failed: " + e.getMessage();
             sender.sendToolResult(sessionId, callId, TOOL_NAME, msg, "error");
             saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":\"" + TOOL_NAME + "\",\"status\":\"error\",\"output\":" + json(msg) + "}");
+            logSkillMeta(callId, "done", payload, "error", msg);
             return msg;
+        }
+    }
+
+    private void logSkillMeta(String callId, String stage, String payload, String status, String output) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("callId", callId);
+        meta.put("tool", TOOL_NAME);
+        meta.put("stage", stage);
+        meta.put("skillName", safeExtractName(payload));
+        if (status != null) meta.put("status", status);
+        if (output != null) meta.put("outputChars", output.length());
+        log.info("[SkillToolCallback] tool_meta={}", toJsonQuiet(meta));
+        if (shouldLogFullPayloads()) {
+            log.debug("[SkillToolCallback] tool_payload callId={} stage={} input={} output={}",
+                    callId, stage, payload, output);
+        }
+    }
+
+    private String safeExtractName(String payload) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> input = objectMapper.readValue(payload == null ? "{}" : payload, Map.class);
+            Object name = input.get("name");
+            return name == null ? null : String.valueOf(name);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private boolean shouldLogFullPayloads() {
+        if ("full".equals(toolIoLogMode)) return true;
+        if (!"full_nonprod_debug".equals(toolIoLogMode)) return false;
+        return log.isDebugEnabled() && !productionEnvironment;
+    }
+
+    private String toJsonQuiet(Map<String, Object> meta) {
+        try {
+            return objectMapper.writeValueAsString(meta);
+        } catch (Exception e) {
+            return String.valueOf(meta);
         }
     }
 

@@ -48,7 +48,9 @@ class SkillToolCallbackTest {
                 "t1",
                 new tools.jackson.databind.ObjectMapper(),
                 null,
-                null
+                null,
+                "metadata",
+                false
         );
 
         String output = callback.call("{\"name\":\"Validation Report Format\"}");
@@ -81,7 +83,9 @@ class SkillToolCallbackTest {
                 "t1",
                 new tools.jackson.databind.ObjectMapper(),
                 null,
-                null
+                null,
+                "metadata",
+                false
         );
 
         String description = callback.getToolDefinition().description();
@@ -116,7 +120,9 @@ class SkillToolCallbackTest {
                 "t1",
                 new tools.jackson.databind.ObjectMapper(),
                 null,
-                null
+                null,
+                "metadata",
+                false
         );
 
         String first = callback.call("{\"name\":\"Billing Rules\"}");

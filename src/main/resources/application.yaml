@@ -50,6 +50,12 @@ pods:
     quality-expansion-max-retries: 1
     max-tool-callbacks-per-turn: 120
     tool-output-vfs-spill-threshold-chars: 16384
+    # Tool diagnostics logging mode:
+    # - metadata: structured summaries only
+    # - full_nonprod_debug: full payloads only when DEBUG and non-prod
+    # - full: full payloads everywhere
+    tool-io-log-mode: full_nonprod_debug
+    runtime-environment: dev
     max-output-tokens: 8192
     code-execution-default-timeout-ms: 3000
     code-execution-max-timeout-ms: 15000

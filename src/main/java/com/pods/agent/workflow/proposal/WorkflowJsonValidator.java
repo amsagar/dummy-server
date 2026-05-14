@@ -3,6 +3,7 @@ package com.pods.agent.workflow.proposal;
 import com.pods.agent.workflow.api.ProcessDefinitionMapper;
 import com.pods.agent.workflow.api.dto.ProcessDefDto;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -548,9 +549,14 @@ public class WorkflowJsonValidator {
     private void validateUndeclaredVariableReferences(ProcessDefDto dto, List<ValidationError> errors) {
         if (dto == null) return;
         Set<String> declared = new LinkedHashSet<>();
+        Set<String> topLevelVariables = new LinkedHashSet<>();
+        Map<String, String> producerActivityByVar = new LinkedHashMap<>();
         if (dto.variables() != null) {
             for (ProcessDefDto.VariableSpecDto v : dto.variables()) {
-                if (v != null && v.name() != null) declared.add(v.name());
+                if (v != null && v.name() != null) {
+                    declared.add(v.name());
+                    topLevelVariables.add(v.name());
+                }
             }
         }
         if (dto.activities() != null) {
@@ -558,7 +564,12 @@ public class WorkflowJsonValidator {
                 if (a == null) continue;
                 if (a.outputVariables() != null) {
                     for (ProcessDefDto.VariableSpecDto v : a.outputVariables()) {
-                        if (v != null && v.name() != null) declared.add(v.name());
+                        if (v != null && v.name() != null) {
+                            declared.add(v.name());
+                            if (a.id() != null && !a.id().isBlank()) {
+                                producerActivityByVar.put(v.name(), a.id());
+                            }
+                        }
                     }
                 }
                 // Loop activities seed itemVar/indexVar/batchVar/batchIndexVar
@@ -587,14 +598,90 @@ public class WorkflowJsonValidator {
                 if (declared.contains(name)) continue;
                 if (name.startsWith("__loop_")) continue; // synthetic loop guards
                 if (!reported.add(name)) continue;
+                String hint = buildUndeclaredVariableHint(name, loc.where, declared, topLevelVariables, producerActivityByVar);
                 errors.add(new ValidationError(
                         "undeclared_variable_reference",
                         "expression at " + loc.where + " references #" + name
                                 + " but no top-level variable and no activity outputVariables entry has that name."
-                                + " Either declare it in variables[] (for workflow inputs) or add it to the producing activity's outputVariables.",
+                                + " Either declare it in variables[] (for workflow inputs) or add it to the producing activity's outputVariables."
+                                + hint,
                         loc.where));
             }
         }
+    }
+
+    private static String buildUndeclaredVariableHint(String variableName,
+                                                      String location,
+                                                      Set<String> declared,
+                                                      Set<String> topLevelVariables,
+                                                      Map<String, String> producerActivityByVar) {
+        List<String> suggestions = closestVariableNames(variableName, declared, 3);
+        StringBuilder hint = new StringBuilder();
+        if (!suggestions.isEmpty()) {
+            hint.append(" Did you mean ")
+                    .append(suggestions.stream().map(s -> "#" + s).toList())
+                    .append("?");
+        }
+        if (topLevelVariables.isEmpty()) {
+            hint.append(" No top-level workflow variables are declared yet.");
+        } else if (suggestions.isEmpty()) {
+            hint.append(" Declared top-level variables include: ")
+                    .append(topLevelVariables.stream().limit(5).toList())
+                    .append(".");
+        }
+        if (location != null && location.startsWith("activities[")) {
+            int endBracket = location.indexOf(']');
+            String activityId = endBracket > "activities[".length()
+                    ? location.substring("activities[".length(), endBracket)
+                    : "";
+            hint.append(" If #").append(variableName)
+                    .append(" should come from a prior step, add outputVariables entry for it on that producing activity");
+            if (!producerActivityByVar.isEmpty()) {
+                hint.append(" (existing producers: ")
+                        .append(producerActivityByVar.entrySet().stream()
+                                .limit(5)
+                                .map(e -> e.getKey() + " <- " + e.getValue())
+                                .toList())
+                        .append(")");
+            }
+            hint.append(".");
+            if (activityId != null && !activityId.isBlank()) {
+                hint.append(" Current usage is inside activity '").append(activityId).append("'.");
+            }
+        }
+        return hint.toString();
+    }
+
+    private static List<String> closestVariableNames(String target, Set<String> declared, int limit) {
+        if (target == null || target.isBlank() || declared == null || declared.isEmpty() || limit <= 0) {
+            return List.of();
+        }
+        String normalizedTarget = target.toLowerCase(Locale.ROOT);
+        return declared.stream()
+                .filter(name -> name != null && !name.isBlank())
+                .sorted(Comparator
+                        .comparingInt((String name) -> variableDistance(normalizedTarget, name.toLowerCase(Locale.ROOT)))
+                        .thenComparing(String::compareToIgnoreCase))
+                .filter(name -> variableDistance(normalizedTarget, name.toLowerCase(Locale.ROOT)) <= 4
+                        || name.toLowerCase(Locale.ROOT).contains(normalizedTarget)
+                        || normalizedTarget.contains(name.toLowerCase(Locale.ROOT)))
+                .limit(limit)
+                .toList();
+    }
+
+    private static int variableDistance(String left, String right) {
+        int[][] dp = new int[left.length() + 1][right.length() + 1];
+        for (int i = 0; i <= left.length(); i++) dp[i][0] = i;
+        for (int j = 0; j <= right.length(); j++) dp[0][j] = j;
+        for (int i = 1; i <= left.length(); i++) {
+            for (int j = 1; j <= right.length(); j++) {
+                int cost = left.charAt(i - 1) == right.charAt(j - 1) ? 0 : 1;
+                dp[i][j] = Math.min(
+                        Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
+                        dp[i - 1][j - 1] + cost);
+            }
+        }
+        return dp[left.length()][right.length()];
     }
 
     /**

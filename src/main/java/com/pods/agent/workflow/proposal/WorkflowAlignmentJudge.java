@@ -73,9 +73,9 @@ public class WorkflowAlignmentJudge {
     }
 
     /**
-     * Judge alignment. Returns {@link Verdict#aligned} = true on any failure
-     * to invoke the LLM (model unresolvable, network error, parse failure)
-     * so a misbehaving judge cannot indefinitely block a valid workflow.
+     * Judge alignment. This path is intentionally fail-closed: any failure
+     * to invoke/parse the judge response is treated as misaligned so we do
+     * not finalize a workflow that skipped semantic checks.
      * Structural validation runs separately and is always enforced.
      *
      * @param classifierReason Phase-1 classifier reasoning text (intent +
@@ -89,12 +89,15 @@ public class WorkflowAlignmentJudge {
                          String classifierReason,
                          ModelRef fallbackModel) {
         if (workflowJson == null || workflowJson.isBlank()) {
-            return new Verdict(false, "workflow_json_empty", "high");
+            return failClosed("alignment_input_empty", "workflow_json_empty", "high");
         }
         ModelRef modelRef = resolveModel(fallbackModel);
         if (modelRef == null) {
-            log.warn("[WorkflowAlignmentJudge] no model available; treating as aligned");
-            return new Verdict(true, "alignment_skipped_no_model", "low");
+            log.warn("[WorkflowAlignmentJudge] no model available; treating as misaligned");
+            return failClosed(
+                    "alignment_no_model",
+                    "No alignment model available. Configure pods.workflow.proposal.alignment-model or provide a valid fallback model.",
+                    "high");
         }
         try {
             String skillsBlob = renderSkillContent(skillNames);
@@ -282,8 +285,9 @@ public class WorkflowAlignmentJudge {
                     .content();
             return parseVerdict(raw);
         } catch (Exception e) {
-            log.warn("[WorkflowAlignmentJudge] judge failed: {} (treating as aligned)", e.getMessage());
-            return new Verdict(true, "alignment_skipped_error:" + e.getMessage(), "low");
+            log.warn("[WorkflowAlignmentJudge] judge failed: {} (treating as misaligned)", e.getMessage());
+            return failClosed("alignment_transport_error",
+                    "Alignment judge invocation failed: " + e.getMessage(), "high");
         }
     }
 
@@ -327,24 +331,43 @@ public class WorkflowAlignmentJudge {
 
     private Verdict parseVerdict(String raw) {
         if (raw == null || raw.isBlank()) {
-            return new Verdict(true, "alignment_skipped_empty_response", "low");
+            return failClosed("alignment_empty_response",
+                    "Alignment judge returned an empty response.", "high");
         }
         try {
             String text = raw.trim();
             int first = text.indexOf('{');
             int last = text.lastIndexOf('}');
             if (first < 0 || last <= first) {
-                return new Verdict(true, "alignment_skipped_no_json", "low");
+                return failClosed("alignment_unparseable",
+                        "Alignment judge response did not contain a JSON object.", "high");
             }
             String json = text.substring(first, last + 1);
             JsonNode node = objectMapper.readTree(json);
-            boolean aligned = node.path("aligned").asBoolean(true);
+            JsonNode alignedNode = node.get("aligned");
+            if (alignedNode == null || !alignedNode.isBoolean()) {
+                return failClosed("alignment_unparseable",
+                        "Alignment judge response must include boolean field `aligned`.", "high");
+            }
+            boolean aligned = alignedNode.asBoolean();
             String critique = node.path("critique").asText("");
             String severity = node.path("severity").asText("medium").toLowerCase(Locale.ROOT);
+            if (!List.of("low", "medium", "high").contains(severity)) {
+                severity = "high";
+            }
             return new Verdict(aligned, critique == null ? "" : critique.trim(), severity);
         } catch (Exception e) {
-            return new Verdict(true, "alignment_skipped_parse_error:" + e.getMessage(), "low");
+            return failClosed("alignment_parse_error",
+                    "Alignment judge JSON parse failed: " + e.getMessage(), "high");
         }
+    }
+
+    private Verdict failClosed(String code, String message, String severity) {
+        String normalizedSeverity = severity == null ? "high" : severity.toLowerCase(Locale.ROOT);
+        if (!List.of("low", "medium", "high").contains(normalizedSeverity)) {
+            normalizedSeverity = "high";
+        }
+        return new Verdict(false, "[" + code + "] " + (message == null ? "" : message), normalizedSeverity);
     }
 
     /**

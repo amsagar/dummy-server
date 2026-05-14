@@ -25,6 +25,8 @@ import java.util.concurrent.TimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -51,6 +53,8 @@ public class AgentToolCallback implements ToolCallback {
     private final java.nio.file.Path workspace;
     private final boolean bypassApprovalGate;
     private final int toolOutputVfsSpillThresholdChars;
+    private final String toolIoLogMode;
+    private final boolean productionEnvironment;
 
     public AgentToolCallback(AgentTool tool,
                              ToolExecutionService toolExecutionService,
@@ -66,7 +70,8 @@ public class AgentToolCallback implements ToolCallback {
                              SkillExecutionGate skillExecutionGate) {
         this(tool, toolExecutionService, policyEngine, pendingInteractionService, sender,
                 sessionId, turnId, userId, approvalTimeoutMs, objectMapper,
-                runtimeEventRepository, skillExecutionGate, null, false, 16_384);
+                runtimeEventRepository, skillExecutionGate, null, false, 16_384,
+                "metadata", false);
     }
 
     public AgentToolCallback(AgentTool tool,
@@ -83,7 +88,9 @@ public class AgentToolCallback implements ToolCallback {
                              SkillExecutionGate skillExecutionGate,
                              java.nio.file.Path workspace,
                              boolean bypassApprovalGate,
-                             int toolOutputVfsSpillThresholdChars) {
+                             int toolOutputVfsSpillThresholdChars,
+                             String toolIoLogMode,
+                             boolean productionEnvironment) {
         this.tool = tool;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -99,6 +106,8 @@ public class AgentToolCallback implements ToolCallback {
         this.workspace = workspace;
         this.bypassApprovalGate = bypassApprovalGate;
         this.toolOutputVfsSpillThresholdChars = Math.max(0, toolOutputVfsSpillThresholdChars);
+        this.toolIoLogMode = toolIoLogMode == null ? "metadata" : toolIoLogMode.trim().toLowerCase();
+        this.productionEnvironment = productionEnvironment;
     }
 
     @Override
@@ -198,7 +207,7 @@ public class AgentToolCallback implements ToolCallback {
 
         sender.sendToolCall(sessionId, callId, tool.getName(), payload);
         saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
-        log.debug("[AgentToolCallback] tool={} input={}", tool.getName(), payload);
+        logToolCallDiagnostics(callId, payload);
 
         if (skillExecutionGate != null && toolCallSignature != null) {
             String cached = skillExecutionGate.getCachedToolResult(toolCallSignature);
@@ -250,10 +259,117 @@ public class AgentToolCallback implements ToolCallback {
         sender.sendToolResult(sessionId, callId, tool.getName(), emittedOutput,
                 execution.success() ? "success" : "error");
         saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(emittedOutput) + "}");
+        logToolResultDiagnostics(callId, payload, emittedOutput, execution.success() ? "success" : "error");
         if (skillExecutionGate != null && toolCallSignature != null) {
             skillExecutionGate.cacheToolResult(toolCallSignature, emittedOutput);
         }
         return emittedOutput;
+    }
+
+    private void logToolCallDiagnostics(String callId, String payload) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("callId", callId);
+        meta.put("tool", tool == null ? null : tool.getName());
+        meta.put("stage", "call");
+        meta.put("inputSummary", summarizeToolInput(payload));
+        log.info("[AgentToolCallback] tool_meta={}", toJsonQuiet(meta));
+        if (shouldLogFullPayloads()) {
+            log.debug("[AgentToolCallback] tool_call_payload callId={} tool={} payload={}",
+                    callId, tool == null ? null : tool.getName(), payload);
+        }
+    }
+
+    private void logToolResultDiagnostics(String callId, String payload, String output, String status) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("callId", callId);
+        meta.put("tool", tool == null ? null : tool.getName());
+        meta.put("stage", "done");
+        meta.put("status", status);
+        meta.put("inputSummary", summarizeToolInput(payload));
+        meta.put("outputChars", output == null ? 0 : output.length());
+        meta.put("outputHash", sha256Hex(output));
+        log.info("[AgentToolCallback] tool_meta={}", toJsonQuiet(meta));
+        if (shouldLogFullPayloads()) {
+            log.debug("[AgentToolCallback] tool_done_payload callId={} tool={} status={} output={}",
+                    callId, tool == null ? null : tool.getName(), status, output);
+        }
+    }
+
+    private Map<String, Object> summarizeToolInput(String payload) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        if (payload == null || payload.isBlank()) {
+            return summary;
+        }
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parsed = objectMapper.readValue(payload, Map.class);
+            if (parsed.containsKey("path")) {
+                summary.put("path", String.valueOf(parsed.get("path")));
+            }
+            if (parsed.containsKey("name")) {
+                summary.put("name", String.valueOf(parsed.get("name")));
+            }
+            if (parsed.containsKey("glob")) {
+                summary.put("glob", String.valueOf(parsed.get("glob")));
+            }
+            if (parsed.containsKey("pattern")) {
+                summary.put("pattern", truncate(String.valueOf(parsed.get("pattern")), 160));
+            }
+            if (parsed.containsKey("content")) {
+                String content = String.valueOf(parsed.get("content"));
+                summary.put("contentChars", content.length());
+                summary.put("contentHash", sha256Hex(content));
+                if ("apply_patch".equalsIgnoreCase(tool.getName())) {
+                    summary.put("patchHunks", countPatchHunks(content));
+                }
+            }
+            if (parsed.containsKey("old_text")) {
+                summary.put("oldTextChars", String.valueOf(parsed.get("old_text")).length());
+            }
+            if (parsed.containsKey("new_text")) {
+                summary.put("newTextChars", String.valueOf(parsed.get("new_text")).length());
+            }
+            if (summary.isEmpty()) {
+                summary.put("keys", parsed.keySet());
+            }
+        } catch (Exception e) {
+            summary.put("rawChars", payload.length());
+            summary.put("rawHash", sha256Hex(payload));
+        }
+        return summary;
+    }
+
+    private boolean shouldLogFullPayloads() {
+        if ("full".equals(toolIoLogMode)) return true;
+        if (!"full_nonprod_debug".equals(toolIoLogMode)) return false;
+        return log.isDebugEnabled() && !productionEnvironment;
+    }
+
+    private String toJsonQuiet(Map<String, Object> value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return String.valueOf(value);
+        }
+    }
+
+    private String sha256Hex(String value) {
+        if (value == null) return null;
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private int countPatchHunks(String content) {
+        if (content == null || content.isBlank()) return 0;
+        Pattern hunkPattern = Pattern.compile("(?m)^<{3,}\\s*ORIGINAL\\s*$");
+        Matcher matcher = hunkPattern.matcher(content);
+        int count = 0;
+        while (matcher.find()) count++;
+        return count;
     }
 
     private boolean isQuestionWorkflowPrompt(String output) {

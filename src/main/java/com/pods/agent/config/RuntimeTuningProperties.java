@@ -56,6 +56,18 @@ public class RuntimeTuningProperties {
     private int qualityExpansionMaxRetries = 2;
     private int maxToolCallbacksPerTurn = 120;
     private int toolOutputVfsSpillThresholdChars = 16_384;
+    /**
+     * Tool I/O log mode:
+     * - metadata: always log structured metadata only
+     * - full_nonprod_debug: log full payloads only when DEBUG is enabled and runtimeEnvironment != prod
+     * - full: log full payloads in all environments
+     */
+    private String toolIoLogMode = "metadata";
+    /**
+     * Runtime environment hint used by tool logging gates.
+     * Use "prod" to suppress full payload logs in full_nonprod_debug mode.
+     */
+    private String runtimeEnvironment = "dev";
     private int maxOutputTokens = 8192;
     private boolean enableAnthropicThinking = false;
     private long codeExecutionDefaultTimeoutMs = 3_000;
@@ -509,6 +521,27 @@ public class RuntimeTuningProperties {
 
     public void setMaxOutputTokens(int maxOutputTokens) {
         this.maxOutputTokens = maxOutputTokens;
+    }
+
+    public String getToolIoLogMode() {
+        return toolIoLogMode;
+    }
+
+    public void setToolIoLogMode(String toolIoLogMode) {
+        this.toolIoLogMode = toolIoLogMode == null ? "metadata" : toolIoLogMode.trim();
+    }
+
+    public String getRuntimeEnvironment() {
+        return runtimeEnvironment;
+    }
+
+    public void setRuntimeEnvironment(String runtimeEnvironment) {
+        this.runtimeEnvironment = runtimeEnvironment == null ? "dev" : runtimeEnvironment.trim();
+    }
+
+    public boolean isProductionEnvironment() {
+        return "prod".equalsIgnoreCase(runtimeEnvironment)
+                || "production".equalsIgnoreCase(runtimeEnvironment);
     }
 
     public boolean isEnableAnthropicThinking() {
