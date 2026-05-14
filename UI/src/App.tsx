@@ -22,6 +22,7 @@ import {
   Wrench,
   FolderTree,
   Server,
+  Table2,
   LogOut,
   UserCircle2,
 } from "lucide-react";
@@ -37,6 +38,8 @@ import ToolDomainPage from "./pages/ToolDomainPage";
 import SkillsPage from "./pages/SkillsPage";
 import McpRegistryPage from "./pages/McpRegistryPage";
 import McpServerToolsPage from "./pages/McpServerToolsPage";
+import DecisionTablesPage from "./pages/DecisionTablesPage";
+import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import { clearAuthToken, getAuthUser, isAuthenticated } from "./services/api";
@@ -57,6 +60,7 @@ function Sidebar() {
     { icon: Layers, name: "Embedding Models", path: "/embedding-models" },
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
+    { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
   ];
 
@@ -188,12 +192,14 @@ function Header() {
     "/tools": "Tools",
     "/tools/": "Tools",
     "/skills": "Skills",
+    "/decision-tables": "Decision Tables",
     "/mcp-registry": "MCP Registry",
     "/mcp-registry/": "MCP Registry",
   };
 
   const title =
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
+    (location.pathname.startsWith("/decision-tables/") ? "Decision Tables" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
     "PODS AI Agent";
@@ -250,6 +256,8 @@ export default function App() {
                 <Route path="/tools" element={<ToolsPage />} />
                 <Route path="/tools/:domainId" element={<ToolDomainPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
+                <Route path="/decision-tables" element={<DecisionTablesPage />} />
+                <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
                 <Route path="/mcp-registry" element={<McpRegistryPage />} />
                 <Route path="/mcp-registry/:serverId/tools" element={<McpServerToolsPage />} />
               </Route>

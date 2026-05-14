@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +65,82 @@ public class DecisionTableService {
         DecisionTable table = getByName(name);
         DmnDecisionTable parsed = cache.computeIfAbsent(name, key -> DmnDecisionTable.fromJsonString(table.getName(), table.getDmnJson()));
         return parsed.evaluate(inputs == null ? Map.of() : inputs);
+    }
+
+    public List<Map<String, Object>> search(String query, int topK) {
+        if (query == null || query.isBlank()) return List.of();
+        String[] tokens = query.toLowerCase().trim().split("\\s+");
+        int limit = Math.min(Math.max(1, topK), 25);
+        List<DecisionTable> all = repository.findAll();
+        List<Map<String, Object>> scored = new ArrayList<>();
+        for (DecisionTable t : all) {
+            String name = t.getName() == null ? "" : t.getName().toLowerCase();
+            String desc = t.getDescription() == null ? "" : t.getDescription().toLowerCase();
+            int score = 0;
+            for (String tok : tokens) {
+                if (tok.isBlank()) continue;
+                if (name.equals(tok)) score += 10;
+                else if (name.contains(tok)) score += 4;
+                if (desc.contains(tok)) score += 1;
+            }
+            if (score <= 0) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", t.getName());
+            row.put("description", t.getDescription() == null ? "" : t.getDescription());
+            row.put("hitPolicy", t.getHitPolicy());
+            row.put("updatedAt", t.getUpdatedAt());
+            row.put("score", score);
+            scored.add(row);
+        }
+        scored.sort((a, b) -> Integer.compare((int) b.get("score"), (int) a.get("score")));
+        return scored.size() <= limit ? scored : new ArrayList<>(scored.subList(0, limit));
+    }
+
+    public Map<String, Object> describe(String name, boolean includeRules) {
+        DecisionTable table = getByName(name);
+        DmnDecisionTable parsed = cache.computeIfAbsent(table.getName(),
+                k -> DmnDecisionTable.fromJsonString(table.getName(), table.getDmnJson()));
+
+        List<Map<String, Object>> inputCols = new ArrayList<>();
+        for (DmnDecisionTable.InputColumn c : parsed.getInputs()) {
+            if (c == null || c.name() == null || c.name().isBlank()) continue;
+            Map<String, Object> col = new LinkedHashMap<>();
+            col.put("name", c.name());
+            if (c.type() != null && !c.type().isBlank()) col.put("type", c.type());
+            if (c.label() != null && !c.label().isBlank()) col.put("label", c.label());
+            inputCols.add(col);
+        }
+        List<Map<String, Object>> outputCols = new ArrayList<>();
+        for (DmnDecisionTable.OutputColumn c : parsed.getOutputs()) {
+            if (c == null || c.name() == null || c.name().isBlank()) continue;
+            Map<String, Object> col = new LinkedHashMap<>();
+            col.put("name", c.name());
+            if (c.type() != null && !c.type().isBlank()) col.put("type", c.type());
+            if (c.label() != null && !c.label().isBlank()) col.put("label", c.label());
+            outputCols.add(col);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("name", table.getName());
+        out.put("description", table.getDescription() == null ? "" : table.getDescription());
+        out.put("hitPolicy", table.getHitPolicy());
+        out.put("updatedAt", table.getUpdatedAt());
+        out.put("requiredInputs", requiredInputNames(table.getName()));
+        out.put("inputColumns", inputCols);
+        out.put("outputColumns", outputCols);
+        out.put("ruleCount", parsed.getRules().size());
+        if (includeRules) {
+            List<Map<String, Object>> rules = new ArrayList<>();
+            for (DmnDecisionTable.Rule r : parsed.getRules()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", r.id());
+                row.put("inputs", r.inputs());
+                row.put("outputs", r.outputs());
+                rules.add(row);
+            }
+            out.put("rules", rules);
+        }
+        return out;
     }
 
     public List<String> requiredInputNames(String name) {

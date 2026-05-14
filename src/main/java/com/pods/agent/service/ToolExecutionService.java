@@ -1,6 +1,7 @@
 package com.pods.agent.service;
 
 import com.pods.agent.domain.AgentTool;
+import com.pods.agent.domain.DecisionTable;
 import com.pods.agent.agent.MemoryTools;
 import com.pods.agent.service.mcp.McpRuntimeAdapter;
 import com.pods.agent.service.workspace.WorkspaceContextHolder;
@@ -25,6 +26,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.HashMap;
@@ -43,6 +45,9 @@ public class ToolExecutionService {
     private static final int MAX_RETRIES = 2;
     private static final int FAILURE_THRESHOLD = 3;
     private static final long CIRCUIT_OPEN_MS = 30_000L;
+    private static final int READ_DEFAULT_LINES = 2000;
+    private static final int READ_MAX_LINES = 5000;
+    private static final int READ_LEGACY_BYTE_CAP = 65_536;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
@@ -424,7 +429,7 @@ public class ToolExecutionService {
 
     private ExecutionResult executeIntegration(AgentTool tool, String userText) {
         String name = tool.getName().toLowerCase();
-        if ("decisiontableevaluate".equals(name)) {
+        if ("dtevaluate".equals(name) || "decisiontableevaluate".equals(name)) {
             if (decisionTableService == null) {
                 return new ExecutionResult(false, null, "Decision table service is unavailable");
             }
@@ -446,12 +451,79 @@ public class ToolExecutionService {
                 List<String> missing = missingRequiredDecisionInputs(tableName, inputs);
                 if (!missing.isEmpty()) {
                     return new ExecutionResult(false, null,
-                            "decisionTableEvaluate is missing required inputs: " + String.join(", ", missing));
+                            "dtEvaluate is missing required inputs: " + String.join(", ", missing));
                 }
                 var result = decisionTableService.evaluate(tableName, inputs);
                 return new ExecutionResult(true, objectMapper.writeValueAsString(result.asMap()), null);
             } catch (Exception e) {
                 return new ExecutionResult(false, null, "Decision table evaluation failed: " + e.getMessage());
+            }
+        }
+        if ("dtlist".equals(name)) {
+            if (decisionTableService == null) {
+                return new ExecutionResult(false, null, "Decision table service is unavailable");
+            }
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                int limit = Math.min(Math.max(1, intArg(args, "limit", 50)), 200);
+                List<DecisionTable> all = decisionTableService.list();
+                List<Map<String, Object>> tables = new ArrayList<>();
+                for (int i = 0; i < Math.min(all.size(), limit); i++) {
+                    DecisionTable t = all.get(i);
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("name", t.getName());
+                    row.put("description", t.getDescription() == null ? "" : t.getDescription());
+                    row.put("hitPolicy", t.getHitPolicy());
+                    row.put("updatedAt", t.getUpdatedAt());
+                    tables.add(row);
+                }
+                return new ExecutionResult(true, objectMapper.writeValueAsString(Map.of(
+                        "count", tables.size(),
+                        "total", all.size(),
+                        "tables", tables
+                )), null);
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "dtList failed: " + e.getMessage());
+            }
+        }
+        if ("dtsearch".equals(name)) {
+            if (decisionTableService == null) {
+                return new ExecutionResult(false, null, "Decision table service is unavailable");
+            }
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                String query = stringArg(args, "query", null);
+                if (query == null || query.isBlank()) {
+                    return new ExecutionResult(false, null, "query is required");
+                }
+                int topK = intArg(args, "topK", 8);
+                List<Map<String, Object>> results = decisionTableService.search(query, topK);
+                return new ExecutionResult(true, objectMapper.writeValueAsString(Map.of(
+                        "query", query,
+                        "count", results.size(),
+                        "results", results
+                )), null);
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "dtSearch failed: " + e.getMessage());
+            }
+        }
+        if ("dtmetadata".equals(name)) {
+            if (decisionTableService == null) {
+                return new ExecutionResult(false, null, "Decision table service is unavailable");
+            }
+            Map<String, Object> args = parseArgs(userText);
+            String tableName = stringArg(args, "name", null);
+            if (tableName == null || tableName.isBlank()) {
+                return new ExecutionResult(false, null, "name is required");
+            }
+            try {
+                boolean includeRules = boolArg(args, "includeRules", false);
+                Map<String, Object> meta = decisionTableService.describe(tableName, includeRules);
+                return new ExecutionResult(true, objectMapper.writeValueAsString(meta), null);
+            } catch (IllegalArgumentException e) {
+                return new ExecutionResult(false, null, e.getMessage());
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "dtMetadata failed: " + e.getMessage());
             }
         }
         if ("integration".equalsIgnoreCase(resolveExecutionKind(tool))
@@ -538,11 +610,65 @@ public class ToolExecutionService {
     private ExecutionResult fsRead(Map<String, Object> args) throws IOException {
         Path path = safePath(stringArg(args, "path", null));
         if (!Files.exists(path)) return new ExecutionResult(false, null, "File not found");
-        String content = Files.readString(path);
-        // 64KB budget — apply_patch needs the full file so the model can produce
-        // exact-match ORIGINAL blocks. Truncating at 4KB silently breaks edit cycles
-        // for any non-trivial JSON document.
-        return new ExecutionResult(true, truncate(content, 65536), null);
+
+        Integer offsetArg = intArg(args, "offset", null);
+        Integer limitArg = intArg(args, "limit", null);
+
+        // Backwards-compat: no pagination args → whole-file read with an explicit
+        // truncation footer when the legacy byte cap kicks in. apply_patch flows
+        // depend on full-file content for exact-match ORIGINAL blocks.
+        if (offsetArg == null && limitArg == null) {
+            String content = Files.readString(path);
+            if (content.length() <= READ_LEGACY_BYTE_CAP) {
+                return new ExecutionResult(true, content, null);
+            }
+            long totalLines = countLines(path);
+            String head = content.substring(0, READ_LEGACY_BYTE_CAP);
+            String footer = String.format(
+                    "%n%n[truncated at %d chars of %d (%d lines total) — call read again with {\"offset\":<line>,\"limit\":<n>} to page]",
+                    READ_LEGACY_BYTE_CAP, content.length(), totalLines);
+            return new ExecutionResult(true, head + footer, null);
+        }
+
+        int startLine = Math.max(1, offsetArg != null ? offsetArg : 1);
+        int maxLines = Math.min(READ_MAX_LINES,
+                Math.max(1, limitArg != null ? limitArg : READ_DEFAULT_LINES));
+
+        List<String> selected = new ArrayList<>(Math.min(maxLines, 1024));
+        long totalLines = 0;
+        try (Stream<String> stream = Files.lines(path)) {
+            Iterator<String> it = stream.iterator();
+            while (it.hasNext() && totalLines < startLine - 1L) {
+                it.next();
+                totalLines++;
+            }
+            while (it.hasNext() && selected.size() < maxLines) {
+                selected.add(it.next());
+                totalLines++;
+            }
+            while (it.hasNext()) {
+                it.next();
+                totalLines++;
+            }
+        }
+
+        StringBuilder body = new StringBuilder(selected.size() * 80);
+        for (int i = 0; i < selected.size(); i++) {
+            body.append(startLine + i).append('\t').append(selected.get(i)).append('\n');
+        }
+        long endLine = startLine + selected.size() - 1L;
+        boolean hasMore = endLine < totalLines;
+        body.append(String.format("%n[lines %d-%d of %d%s]",
+                startLine, endLine, totalLines,
+                hasMore ? "; call again with {\"offset\":" + (endLine + 1) + "}" : ""));
+
+        return new ExecutionResult(true, body.toString(), null);
+    }
+
+    private static long countLines(Path path) throws IOException {
+        try (Stream<String> s = Files.lines(path)) {
+            return s.count();
+        }
     }
 
     private ExecutionResult fsGlob(Map<String, Object> args) throws IOException {

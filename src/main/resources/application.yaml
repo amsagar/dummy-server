@@ -103,7 +103,7 @@ pods:
     persist-internal-events: false
     enable-experimental-tools: true
     enabled-experimental-tool-names: [ ]
-    allowed-permission-scopes: [ filesystem, shell, web, memory, integration, http_proxy ]
+    allowed-permission-scopes: [ filesystem, shell, web, memory, integration, http_proxy, workflow ]
     # Observe during staged rollout:
     # - tool-match precision
     # - low-signal tool result rate

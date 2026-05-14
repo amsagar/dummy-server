@@ -121,7 +121,9 @@ public class FrameworkToolPackService {
                 seed("memoryinsert", "Insert text into memory file at line", "memory", "memory", false, false, Map.of("path", "string", "after_line", "number", "text", "string"), true),
                 seed("memorydelete", "Delete memory file", "memory", "memory", false, false, Map.of("path", "string"), true),
                 seed("memoryrename", "Rename memory file", "memory", "memory", false, false, Map.of("old_path", "string", "new_path", "string"), true),
-                seed("decisionTableEvaluate", "Evaluate a stored decision table by name with structured inputs.", "integration", "workflow", false, false,
+                seed("dtEvaluate",
+                        "Evaluate a stored decision table by name with structured inputs. If you don't know the exact table name or its required inputs, call `dtSearch` (find by name/description) or `dtMetadata` (inspect a table's input/output shape) first. The `inputs` object must use the keys reported by `dtMetadata.requiredInputs`.",
+                        "integration", "workflow", false, false,
                         Map.of(
                                 "type", "object",
                                 "properties", Map.of(
@@ -129,6 +131,36 @@ public class FrameworkToolPackService {
                                         "inputs", Map.of("type", "object")
                                 ),
                                 "required", List.of("tableName")
+                        ), true),
+                seed("dtList",
+                        "List stored decision tables (name, description, hitPolicy, updatedAt). Use this when the user asks what tables exist or wants a catalog overview. For name lookup by partial match, prefer `dtSearch`.",
+                        "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of("limit", Map.of("type", "number")),
+                                "required", List.of()
+                        ), true),
+                seed("dtSearch",
+                        "Find decision tables by free-text query against name and description (lexical scoring, no embeddings). Use this to resolve a user-phrased table name to a real stored one before calling `dtEvaluate`.",
+                        "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "query", Map.of("type", "string"),
+                                        "topK", Map.of("type", "number")
+                                ),
+                                "required", List.of("query")
+                        ), true),
+                seed("dtMetadata",
+                        "Describe a stored decision table: input columns, output columns, required inputs, hit policy, rule count. Call this before `dtEvaluate` to know exactly which keys the `inputs` map must contain. Pass `includeRules: true` to also receive the full rule rows.",
+                        "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "name", Map.of("type", "string"),
+                                        "includeRules", Map.of("type", "boolean")
+                                ),
+                                "required", List.of("name")
                         ), true),
                 seed("toolsearch", "Search registered tools (framework, imported, and MCP) using semantic + lexical ranking.", "integration", "workflow", false, false,
                         Map.of(
@@ -152,7 +184,18 @@ public class FrameworkToolPackService {
                         ), true),
 
                 // Retrieval-eligible (semantic match required). baseInjected=false. Descriptions clarify scope so the model doesn't grab them for remote-hosted entities.
-                seed("read", "Read content of a file in the local workspace. Local files only — does not access GitHub, remote repos, web URLs, or external systems; use the appropriate MCP/integration tool for those.", "filesystem", "filesystem", false, false, Map.of("path", "string"), false),
+                seed("read",
+                        "Read content of a file in the local workspace. Supports line-based pagination via `offset` (1-based starting line) and `limit` (max lines to return); when the file extends past the returned range, the response footer reports the next offset. Local files only — does not access GitHub, remote repos, web URLs, or external systems; use the appropriate MCP/integration tool for those.",
+                        "filesystem", "filesystem", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "path", Map.of("type", "string", "description", "Workspace-relative file path."),
+                                        "offset", Map.of("type", "number", "description", "1-based line number to start reading from. Default 1."),
+                                        "limit", Map.of("type", "number", "description", "Maximum number of lines to return. Default 2000, capped at 5000.")
+                                ),
+                                "required", List.of("path")
+                        ), false),
                 seed("glob", "Glob files in the local workspace by path pattern. Local workspace only — does not list remote repos, GitHub contents, or external storage.", "filesystem", "filesystem", false, false, Map.of("path", "string", "glob", "string"), false),
                 seed("grep", "Search text patterns in local workspace files. Local workspace only — does not search remote repos, GitHub, web, or external systems.", "filesystem", "filesystem", false, false, Map.of("path", "string", "pattern", "string"), false),
                 seed("edit", "Surgically edit a local workspace file by replacing one occurrence of `old_text` with `new_text`. The match must be UNIQUE in the file — include enough surrounding context to disambiguate. Use this for one-shot string replacements. For multi-hunk edits, use apply_patch instead. Local files only.", "filesystem", "filesystem", false, true, Map.of("path", "string", "old_text", "string", "new_text", "string"), false),
