@@ -231,6 +231,25 @@ public class WorkflowBuilderService {
         // bounding the loop so a totally broken model terminates.
         int productiveAttempts = 0;
         int noopAttempts = 0;
+        // Last draft body that parsed cleanly (validation may still have rejected
+        // it on structural grounds, but the JSON itself was syntactically valid).
+        // Used to revert the file on parse_failed cascades — the model often
+        // breaks JSON while trying to insert a structural fix, then can't
+        // recover. Reverting cuts that loop short: the file is reset to the
+        // last parseable copy and the model is re-pointed at the ORIGINAL
+        // structural failure rather than chasing its own syntax errors.
+        String lastGoodDraft = null;
+        String lastGoodFeedback = null;
+        int parseFailedReverts = 0;
+        // Hard cap on how many reverts we'll silently absorb. After this we
+        // let parse_failed count normally so a broken model still terminates.
+        final int maxParseFailedReverts = 2;
+        // Track the most recent structural failure code so we can detect a
+        // "stuck on the same error" pattern and (optionally) escalate the
+        // builder model.
+        String lastErrorCode = null;
+        int consecutiveSameError = 0;
+        ModelRef currentModel = modelRef;
         while (productiveAttempts < maxAttempts && noopAttempts <= maxNoopRetries) {
             boolean initialAttempt = productiveAttempts == 0;
             int displayAttempt = productiveAttempts + noopAttempts + 1;
@@ -254,7 +273,7 @@ public class WorkflowBuilderService {
                         workspace,
                         draftFile,
                         executionLogFile,
-                        modelRef,
+                        currentModel,
                         skillAllowlist,
                         initialAttempt,
                         resumeFeedback,
@@ -334,10 +353,76 @@ public class WorkflowBuilderService {
                             ve.path() == null ? "" : " at " + ve.path(),
                             ve.message());
                 }
+                // Snapshot/revert on parse_failed cascades — see field
+                // declaration above for rationale. A revert costs zero
+                // productiveAttempts so the model gets a clean retry against
+                // the original (still-relevant) structural feedback, not
+                // its own syntax-mangled file.
+                boolean isParseFailed = report.errors().stream()
+                        .anyMatch(e -> "parse_failed".equals(e.code()));
+                if (isParseFailed && lastGoodDraft != null && parseFailedReverts < maxParseFailedReverts) {
+                    try {
+                        Files.writeString(draftFile, lastGoodDraft, StandardCharsets.UTF_8);
+                        chatMemory.clear(proposal.getId());
+                        parseFailedReverts++;
+                        productiveAttempts--; // un-burn the budget for this attempt
+                        lastFailureSummary = "draft_reverted_after_parse_failed: your prior edit introduced a JSON"
+                                + " syntax error so the draft file has been restored to its last parseable state."
+                                + " The structural issue you must now fix (re-issued from before the syntax break):\n\n"
+                                + (lastGoodFeedback == null ? lastFailureSummary : lastGoodFeedback);
+                        log.warn("[WorkflowBuilder] proposal {} attempt {} parse_failed -> reverted to last-good draft"
+                                        + " (revert {}/{}); productiveAttempts un-burned",
+                                proposal.getId(), displayAttempt, parseFailedReverts, maxParseFailedReverts);
+                        continue;
+                    } catch (Exception revertEx) {
+                        log.warn("[WorkflowBuilder] proposal {} attempt {} parse_failed revert FAILED: {}",
+                                proposal.getId(), displayAttempt, revertEx.getMessage());
+                        // fall through; let parse_failed count normally
+                    }
+                }
+                // Track consecutive same-code failures for model escalation.
+                String primaryCode = report.errors().get(0).code();
+                if (primaryCode != null && primaryCode.equals(lastErrorCode)) {
+                    consecutiveSameError++;
+                } else {
+                    consecutiveSameError = 1;
+                    lastErrorCode = primaryCode;
+                }
+                // Escalate the builder model when we've seen the same error
+                // 2+ attempts in a row AND an escalation model is configured.
+                // The escalation model is invoked starting on the NEXT loop
+                // iteration; ChatMemory is cleared so the stronger model
+                // doesn't inherit the weaker one's circular reasoning.
+                WorkflowProposalProperties.ModelOverride esc = properties.getBuilderEscalationModel();
+                if (consecutiveSameError >= 2 && esc != null && esc.isPresent()) {
+                    ModelRef escalated = new ModelRef(esc.getProviderId(), esc.getModelId());
+                    if (!escalated.equals(currentModel)) {
+                        log.info("[WorkflowBuilder] proposal {} attempt {} escalating model after {} consecutive [{}]:"
+                                        + " {} -> {} (clearing ChatMemory)",
+                                proposal.getId(), displayAttempt, consecutiveSameError,
+                                primaryCode, currentModel, escalated);
+                        currentModel = escalated;
+                        chatMemory.clear(proposal.getId());
+                    }
+                }
+                // Draft parsed (otherwise we'd have hit the revert path above).
+                // Snapshot the parseable body + the matching feedback so a
+                // FUTURE parse_failed can restore here. We snapshot the
+                // pre-feedback body, not the post-fix body, because the model
+                // is about to mutate this file again on the next attempt.
+                lastGoodDraft = draftJson;
+                lastGoodFeedback = lastFailureSummary;
                 continue;
             }
             log.debug("[WorkflowBuilder] proposal {} attempt {} structural validation passed",
                     proposal.getId(), displayAttempt);
+            // Reset escalation tracking on success — if the alignment judge
+            // later rejects we want a fresh streak count, not stale state.
+            lastErrorCode = null;
+            consecutiveSameError = 0;
+            // Snapshot the latest parseable draft for any future revert.
+            lastGoodDraft = draftJson;
+            lastGoodFeedback = null;
 
             // VERBATIM-SKELETON SHORT-CIRCUIT: when the post-attempt draft is
             // byte-identical to the seeded skeleton, the draft IS the

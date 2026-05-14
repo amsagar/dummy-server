@@ -368,14 +368,173 @@ public class WorkflowJsonValidator {
             if (Boolean.FALSE.equals(hasBodyBack.get(id))) missing.add("body-back (ON_SUCCESS from last body activity back to " + id + ")");
             if (Boolean.FALSE.equals(hasLoopExit.get(id))) missing.add("loop-exit (ON_NO_MATCH default priority>=100 from " + id + " to the next activity)");
             if (!missing.isEmpty()) {
+                String patchHint = buildForeachPatchHint(dto, id,
+                        Boolean.FALSE.equals(hasBodyForward.get(id)),
+                        Boolean.FALSE.equals(hasBodyBack.get(id)),
+                        Boolean.FALSE.equals(hasLoopExit.get(id)));
                 errors.add(new ValidationError(
                         "foreach_wiring_incomplete",
                         "loop activity '" + id + "' is missing required transition(s): "
-                                + String.join("; ", missing)
-                                + ". See workflow-architect/references/foreach-wiring.md.",
+                                + String.join("; ", missing) + ". " + patchHint
+                                + " See workflow-architect/references/foreach-wiring.md.",
                         "activities[" + id + "]"));
             }
         }
+    }
+
+    /**
+     * Builds a concrete patch hint the resume prompt can surface to the
+     * builder LLM. Without this hint, models like GPT-4o thrash on this
+     * error for multiple attempts — they understand "missing body-forward"
+     * abstractly but can't decide which activity is "the body" without
+     * being told. The hint emits:
+     *
+     * <ol>
+     *   <li>The id of the most likely body activity (the activity that
+     *       transitions back to the loop, or — failing that — the activity
+     *       immediately following the loop in {@code activities[]} order).</li>
+     *   <li>The activity id following the loop in declared order, as a
+     *       candidate for the loop-exit transition's target.</li>
+     *   <li>Three copy-pasteable transition snippets, one per missing edge,
+     *       wired with the suggested ids.</li>
+     * </ol>
+     *
+     * Designed to be safe when inference fails — falls back to placeholders
+     * the model can fill in by name. Better a slightly-generic hint than no
+     * hint at all.
+     */
+    private static String buildForeachPatchHint(ProcessDefDto dto, String loopId,
+                                                boolean missingForward,
+                                                boolean missingBack,
+                                                boolean missingExit) {
+        String bodyId = suggestBodyActivityId(dto, loopId);
+        String afterLoopId = suggestActivityAfterLoop(dto, loopId);
+        StringBuilder sb = new StringBuilder("Suggested fix — add these transition(s) to your transitions[] array:");
+        if (missingForward) {
+            String bodyPh = bodyId == null ? "<first-body-activity-id>" : bodyId;
+            sb.append(" {\"id\":\"t-").append(loopId).append("-body\",")
+                    .append("\"fromActivityId\":\"").append(loopId).append("\",")
+                    .append("\"toActivityId\":\"").append(bodyPh).append("\",")
+                    .append("\"trigger\":\"ON_SUCCESS\"}");
+        }
+        if (missingBack) {
+            String backFromPh = bodyId == null ? "<last-body-activity-id>" : bodyId;
+            sb.append(" {\"id\":\"t-").append(loopId).append("-back\",")
+                    .append("\"fromActivityId\":\"").append(backFromPh).append("\",")
+                    .append("\"toActivityId\":\"").append(loopId).append("\",")
+                    .append("\"trigger\":\"ON_SUCCESS\"}");
+        }
+        if (missingExit) {
+            String exitPh = afterLoopId == null ? "<activity-after-loop-id>" : afterLoopId;
+            sb.append(" {\"id\":\"t-").append(loopId).append("-exit\",")
+                    .append("\"fromActivityId\":\"").append(loopId).append("\",")
+                    .append("\"toActivityId\":\"").append(exitPh).append("\",")
+                    .append("\"trigger\":\"ON_NO_MATCH\",\"priority\":100,\"isDefault\":true}");
+        }
+        if (bodyId != null) sb.append(" Likely body activity id: '").append(bodyId).append("'.");
+        if (afterLoopId != null) sb.append(" Likely loop-exit target: '").append(afterLoopId).append("'.");
+        return sb.toString();
+    }
+
+    /**
+     * Walks the workflow graph to guess which activity the foreach should
+     * forward to. Strategy: find any non-loop activity that has a transition
+     * pointing BACK to the loop (the body-back edge). Then walk predecessor
+     * chain backward until we hit an activity with no incoming non-loop
+     * forward edges — that's the body chain entry. Falls back to "next
+     * activity in declared order" if no back-edge exists yet.
+     */
+    private static String suggestBodyActivityId(ProcessDefDto dto, String loopId) {
+        if (dto == null || dto.activities() == null) return null;
+        List<ProcessDefDto.ActivityDto> activities = dto.activities();
+        List<ProcessDefDto.TransitionDto> transitions = dto.transitions() == null
+                ? List.of() : dto.transitions();
+
+        String backFrom = null;
+        for (ProcessDefDto.TransitionDto t : transitions) {
+            if (t == null) continue;
+            String trig = t.trigger() == null ? "" : t.trigger().trim().toUpperCase(Locale.ROOT);
+            if (loopId.equals(t.toActivityId())
+                    && "ON_SUCCESS".equals(trig)
+                    && !loopId.equals(t.fromActivityId())) {
+                backFrom = t.fromActivityId();
+                break;
+            }
+        }
+        if (backFrom != null) {
+            String cursor = backFrom;
+            Set<String> visited = new LinkedHashSet<>();
+            while (cursor != null && visited.add(cursor)) {
+                String predecessor = null;
+                for (ProcessDefDto.TransitionDto t : transitions) {
+                    if (t == null) continue;
+                    if (cursor.equals(t.toActivityId()) && !loopId.equals(t.fromActivityId())) {
+                        predecessor = t.fromActivityId();
+                        break;
+                    }
+                }
+                if (predecessor == null) return cursor;
+                cursor = predecessor;
+            }
+        }
+        int loopIdx = -1;
+        for (int i = 0; i < activities.size(); i++) {
+            if (activities.get(i) != null && loopId.equals(activities.get(i).id())) {
+                loopIdx = i;
+                break;
+            }
+        }
+        if (loopIdx >= 0 && loopIdx + 1 < activities.size()) {
+            ProcessDefDto.ActivityDto next = activities.get(loopIdx + 1);
+            return next == null ? null : next.id();
+        }
+        return null;
+    }
+
+    /**
+     * Best-effort guess for the loop-exit target. Picks the first activity
+     * declared AFTER the loop in {@code activities[]} that isn't itself a
+     * loop body and isn't the body-back source. Returns null if we can't
+     * decide.
+     */
+    private static String suggestActivityAfterLoop(ProcessDefDto dto, String loopId) {
+        if (dto == null || dto.activities() == null) return null;
+        List<ProcessDefDto.ActivityDto> activities = dto.activities();
+        int loopIdx = -1;
+        for (int i = 0; i < activities.size(); i++) {
+            if (activities.get(i) != null && loopId.equals(activities.get(i).id())) {
+                loopIdx = i;
+                break;
+            }
+        }
+        if (loopIdx < 0) return null;
+        Set<String> bodyChain = new LinkedHashSet<>();
+        String bodyId = suggestBodyActivityId(dto, loopId);
+        if (bodyId != null) bodyChain.add(bodyId);
+        List<ProcessDefDto.TransitionDto> transitions = dto.transitions() == null
+                ? List.of() : dto.transitions();
+        // Add every activity reachable forward from the body candidate up to
+        // (but not including) the back-edge — those are body activities, not
+        // loop-exit candidates.
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (ProcessDefDto.TransitionDto t : transitions) {
+                if (t == null) continue;
+                if (bodyChain.contains(t.fromActivityId()) && !loopId.equals(t.toActivityId())
+                        && t.toActivityId() != null && bodyChain.add(t.toActivityId())) {
+                    changed = true;
+                }
+            }
+        }
+        for (int i = loopIdx + 1; i < activities.size(); i++) {
+            ProcessDefDto.ActivityDto a = activities.get(i);
+            if (a == null || a.id() == null) continue;
+            if (bodyChain.contains(a.id())) continue;
+            if (loopId.equals(a.id())) continue;
+            return a.id();
+        }
+        return null;
     }
 
     /**

@@ -31,6 +31,14 @@ public class WorkflowProposalProperties {
     private ModelOverride classifierModel = new ModelOverride();
     private ModelOverride builderModel = new ModelOverride();
     private ModelOverride alignmentModel = new ModelOverride();
+    /**
+     * Optional stronger model the builder switches to when it sees the same
+     * structural error code 2+ attempts in a row. Designed for the
+     * GPT-4o-thrashes-on-JSON-edits failure mode: weaker model takes the
+     * first crack (cheap), stronger model takes over only when the weaker
+     * one demonstrably can't make progress. Leave blank to disable.
+     */
+    private ModelOverride builderEscalationModel = new ModelOverride();
 
     public int getMaxBuildAttempts() {
         return maxBuildAttempts;
@@ -70,6 +78,14 @@ public class WorkflowProposalProperties {
 
     public void setAlignmentModel(ModelOverride alignmentModel) {
         this.alignmentModel = alignmentModel;
+    }
+
+    public ModelOverride getBuilderEscalationModel() {
+        return builderEscalationModel;
+    }
+
+    public void setBuilderEscalationModel(ModelOverride builderEscalationModel) {
+        this.builderEscalationModel = builderEscalationModel;
     }
 
     public static class ModelOverride {
