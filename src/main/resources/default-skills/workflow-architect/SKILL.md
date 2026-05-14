@@ -1,6 +1,6 @@
 ---
 name: workflow-architect
-description: "Use this skill when generating or refining a reusable ProcessDefDto workflow JSON for the pods-ov-agent engine, OR when you (the chat agent) need to drop reasoning notes that will help the architect convert this turn into a workflow later. Defines the typed execution-log input contract, the architect_note write tool, the wire schema, canonical activity types (normal/tool/route/subflow/foreach/while/batch), available plugins, expression syntax, and quality rules the engine validates."
+description: "FOR THE WORKFLOW BUILDER AGENT ONLY — load this when synthesizing or refining a reusable ProcessDefDto workflow JSON. Defines the wire schema, canonical activity types (normal/tool/route/subflow/foreach/while/batch), available plugins, expression syntax, and engine-enforced quality rules. Chat agents handling interactive turns (validations, lookups, runtime tasks) MUST NOT load this skill — there is nothing here for runtime tool calls. Drop reasoning notes via the standalone `architect_note` tool, which works without loading any skill."
 ---
 
 # Workflow Architect Skill

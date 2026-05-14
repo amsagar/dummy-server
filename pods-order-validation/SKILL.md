@@ -100,21 +100,19 @@ const sorted = [...legLines].sort((a, b) => a.Sequence - b.Sequence);
 const actualSequence = sorted.map(l =>
   (l.ServiceCode && l.ServiceCode.trim()) || ITEM_TO_SERVICE[l.ItemCode]
 );
-const journeyType = order.OrderType;  // e.g. "Long Distance"
 ```
 
 ### Invoke
 
-Call `decisionTableEvaluate` with:
+Call `decisionTableEvaluate` with EXACTLY these inputs and NO others
+
 - `tableName: "Leg Sequences"`
-- `journeyType: <string>`
-- `actualSequence: <array of service-code strings>`
+- `inputs: { actualSequence: <array of service-code strings> }`
 
 If the response is `{matched: false}`, the sequence is invalid — capture that
 verbatim. Do not retry with a different sequence shape unless you have
 genuinely identified a mapping bug. Report `valid: false`,
-`message: "No matching row in Leg Sequences decision table for this journey
-and sequence"`.
+`message: "No matching row in Leg Sequences decision table for this sequence"`.
 
 ## Step 4 — Serviceability — **loop, do not stop early**
 
@@ -149,10 +147,16 @@ For each entry:
 | `custTrackingId` | `String(order.OrderIdentity)` |
 
 You may issue these calls in parallel. After all responses arrive, interpret
-each:
-- `PostalCodeException.ExceptionType` is null/empty → `isServiceable: true`
-- `PostalCodeException.ExceptionType` is non-empty → `isServiceable: false`,
-  `exceptionType: <that value>`
+each using **`CallInfo.StatusCode` only** (do NOT use `PostalCodeException`):
+
+- `CallInfo.StatusCode` contains the substring `"OutOfMarket"` (e.g.
+  `OutOfMarket-Origination`, `OutOfMarket-Destination`, `OutOfMarket-Both`)
+  → `isServiceable: false`, `exceptionType: <the StatusCode value>`.
+- Anything else (including `Exception`, `PastDate`, blank, any non-OutOfMarket
+  warning, or a `PostalCodeException` like `DualCityService`) →
+  `isServiceable: true`, `exceptionType: null`. The business rule is that
+  only an out-of-market response fails the line — other status codes are
+  informational and the line still passes.
 
 **Do not write the final answer until every entry in `toService` has either
 a Serviceability tool result or a "skipped: missing addresses" record.**

@@ -26,10 +26,12 @@ import tools.jackson.databind.ObjectMapper;
  * {@link ExecutionLogService#appendArchitectNote} — the same audit pipeline
  * that handles every other runtime event.
  *
- * <p>Recommended use (described in the workflow-architect skill the chat
- * agent loads on demand): one short note before a logical block, e.g.
+ * <p>Recommended use: one short note before a logical block, e.g.
  * <em>"loop products: for each item in #products"</em> or
- * <em>"condition: only review when total > 500"</em>.
+ * <em>"condition: only review when total > 500"</em>. The chat agent
+ * uses this tool directly — there is no need to load the
+ * {@code workflow-architect} skill at runtime; that skill is for the
+ * workflow builder agent only.
  */
 @Slf4j
 public class ArchitectNoteCallback implements ToolCallback {
