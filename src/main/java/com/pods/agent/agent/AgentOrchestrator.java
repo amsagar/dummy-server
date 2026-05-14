@@ -8,10 +8,14 @@ import com.pods.agent.domain.ModelRef;
 import com.pods.agent.domain.RuntimeEvent;
 import com.pods.agent.repository.AgentProfileRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
+import com.pods.agent.ruledomain.ResponseSummarizer;
+import com.pods.agent.ruledomain.RuleDomainOrchestrator;
+import com.pods.agent.ruledomain.model.ExecutionOutcome;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.instruction.InstructionLoaderService;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.UserContextHolder;
+import org.springframework.beans.factory.ObjectProvider;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -51,6 +55,9 @@ public class AgentOrchestrator {
     private final RuntimeEventRepository runtimeEventRepository;
     private final ObjectMapper objectMapper;
     private final AgentProfileRepository agentProfileRepository;
+    /** Optional — only present when the compiled-rule-domain feature is wired in. */
+    private final ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator;
+    private final ObjectProvider<ResponseSummarizer> responseSummarizer;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
 
@@ -61,7 +68,9 @@ public class AgentOrchestrator {
                              RuntimeTuningProperties runtimeTuningProperties,
                              RuntimeEventRepository runtimeEventRepository,
                              ObjectMapper objectMapper,
-                             AgentProfileRepository agentProfileRepository) {
+                             AgentProfileRepository agentProfileRepository,
+                             ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator,
+                             ObjectProvider<ResponseSummarizer> responseSummarizer) {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.instructionLoaderService = instructionLoaderService;
@@ -70,6 +79,8 @@ public class AgentOrchestrator {
         this.runtimeEventRepository = runtimeEventRepository;
         this.objectMapper = objectMapper;
         this.agentProfileRepository = agentProfileRepository;
+        this.ruleDomainOrchestrator = ruleDomainOrchestrator;
+        this.responseSummarizer = responseSummarizer;
         this.baseSystemPrompt = loadBaseSystemPrompt();
         this.memoryToolsPrompt = loadPromptResource("prompts/AUTO_MEMORY_TOOLS_SYSTEM_PROMPT.md");
     }
@@ -102,6 +113,36 @@ public class AgentOrchestrator {
                 session.getSessionId(),
                 modelRef != null ? modelRef : "default",
                 tools == null ? 0 : tools.size());
+
+        // ── Compiled rule-domain path (additive, opt-in per skill) ──
+        // If a compiled domain handles this intent, stream the summarized
+        // result and short-circuit before the LLM loop. Any failure here
+        // falls through to the existing LLM loop below.
+        RuleDomainOrchestrator rdo = ruleDomainOrchestrator == null ? null : ruleDomainOrchestrator.getIfAvailable();
+        ResponseSummarizer summarizer = responseSummarizer == null ? null : responseSummarizer.getIfAvailable();
+        if (rdo != null && summarizer != null) {
+            try {
+                ExecutionOutcome outcome = rdo.handleIfApplicable(userText, null, session.getSessionId(), turnId);
+                if (outcome.handled()) {
+                    String summary = summarizer.summarize(outcome, userText);
+                    if (summary != null && !summary.isBlank()) {
+                        sender.sendTextDelta(summary);
+                        session.getMessages().add(new AssistantMessage(summary));
+                    }
+                    sender.sendCustom("rule_domain.executed", Map.of(
+                            "domainId", outcome.domainId() == null ? "" : outcome.domainId(),
+                            "procId", outcome.flowableProcId() == null ? "" : outcome.flowableProcId(),
+                            "fromCacheHit", outcome.fromCacheHit(),
+                            "latencyMs", outcome.latencyMs(),
+                            "error", outcome.error() == null ? "" : outcome.error()
+                    ));
+                    return summary == null ? "" : summary;
+                }
+            } catch (Exception ex) {
+                log.warn("[AgentOrchestrator] Rule-domain path threw; falling back to LLM loop: {}",
+                        ex.getMessage());
+            }
+        }
 
         StringBuilder fullResponse = new StringBuilder();
         try {

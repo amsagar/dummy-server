@@ -391,3 +391,78 @@ ALTER COLUMN embedding TYPE halfvec(3072);
 CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
     ON agent.agent_tool_embeddings
     USING hnsw (embedding halfvec_cosine_ops);
+
+-- ── Compiled Rule Domains (Flowable BPMN) ──────────────────────────────
+
+-- Singleton config row (id='default'); editable via /api/v1/rule-domain-config
+CREATE TABLE IF NOT EXISTS agent.rule_domain_config (
+    id                              TEXT PRIMARY KEY DEFAULT 'default',
+    enabled                         BOOLEAN NOT NULL DEFAULT FALSE,
+    enabled_skills                  TEXT NOT NULL DEFAULT '',
+    match_threshold                 NUMERIC NOT NULL DEFAULT 0.92,
+    max_compile_attempts            INTEGER NOT NULL DEFAULT 2,
+    promote_after_successful_runs   INTEGER NOT NULL DEFAULT 1,
+    shadow_mode                     BOOLEAN NOT NULL DEFAULT FALSE,
+    auto_deprecate_error_rate       NUMERIC NOT NULL DEFAULT 0.30,
+    compiler_provider_id            TEXT NOT NULL DEFAULT 'anthropic',
+    compiler_model_id               TEXT NOT NULL DEFAULT 'claude-opus-4-5',
+    summarizer_provider_id          TEXT NOT NULL DEFAULT 'anthropic',
+    summarizer_model_id             TEXT NOT NULL DEFAULT 'claude-haiku-4-5',
+    embedding_provider_id           TEXT NOT NULL DEFAULT '',
+    embedding_model_id              TEXT NOT NULL DEFAULT '',
+    updated_at                      BIGINT NOT NULL DEFAULT 0
+);
+
+INSERT INTO agent.rule_domain_config (id, updated_at)
+VALUES ('default', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS agent.rule_domains (
+    id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    skill_id            TEXT NOT NULL,
+    skill_name          TEXT NOT NULL,
+    intent_label        TEXT NOT NULL,
+    source_hash         TEXT NOT NULL,
+    tool_signature      TEXT NOT NULL,
+    bpmn_xml            TEXT NOT NULL,
+    flowable_proc_key   TEXT NOT NULL,
+    intent_embedding    vector(3072),
+    status              TEXT NOT NULL,
+    version             INTEGER NOT NULL DEFAULT 1,
+    compile_attempts    INTEGER NOT NULL DEFAULT 1,
+    last_error          TEXT,
+    created_at          BIGINT NOT NULL,
+    updated_at          BIGINT NOT NULL,
+    UNIQUE (skill_id, intent_label, version)
+);
+
+ALTER TABLE agent.rule_domains
+    ALTER COLUMN intent_embedding TYPE halfvec(3072);
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_skill
+    ON agent.rule_domains (skill_id);
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_status
+    ON agent.rule_domains (skill_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_embedding_hnsw
+    ON agent.rule_domains
+    USING hnsw (intent_embedding halfvec_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS agent.rule_executions (
+    id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    domain_id            TEXT NOT NULL REFERENCES agent.rule_domains (id) ON DELETE CASCADE,
+    session_id           TEXT,
+    turn_id              TEXT,
+    flowable_proc_id     TEXT NOT NULL,
+    inputs_json          TEXT,
+    outputs_json         TEXT,
+    success              BOOLEAN NOT NULL,
+    fallback_triggered   BOOLEAN NOT NULL DEFAULT FALSE,
+    error_message        TEXT,
+    latency_ms           INTEGER,
+    created_at           BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_executions_domain
+    ON agent.rule_executions (domain_id, created_at DESC);

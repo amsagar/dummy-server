@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example 3: Conditional branch — Get account, then either issue a refund OR
+  send a denial email depending on a computed boolean.
+  Inputs: ticketId
+  Tools used: GetTicket, IssueRefund, SendDenialEmail
+  Demonstrates: ExclusiveGateway driven by a precomputed boolean, two
+                outgoing flows with FEEL-derived conditions.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             targetNamespace="http://pods.com/rule-domains"
+             typeLanguage="http://www.w3.org/2001/XMLSchema">
+  <process id="rd_refund_decision_v1" name="Refund decision" isExecutable="true">
+    <startEvent id="start"/>
+
+    <serviceTask id="t_getTicket" name="GetTicket"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>GetTicket</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"id":"ticketId"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>ticket</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_decide" name="Compute refundable?"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>ticket.AmountUsd &lt;= 100 and ticket.AgeDays &lt;= 30</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>_refundable</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <exclusiveGateway id="gw_refund" name="Refundable?"/>
+
+    <serviceTask id="t_refund" name="IssueRefund"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>IssueRefund</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"ticketId":"ticket.Id","amountUsd":"ticket.AmountUsd"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>refundResp</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_deny" name="SendDenialEmail"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>SendDenialEmail</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"to":"ticket.CustomerEmail","reason":"\"exceeds refund policy\""}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>denyResp</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_assemble" name="Assemble result"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>{ticketId: ticket.Id, refunded: _refundable, outcome: if _refundable then "refund issued" else "denial sent"}</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>result</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <endEvent id="end"/>
+
+    <sequenceFlow sourceRef="start"       targetRef="t_getTicket"/>
+    <sequenceFlow sourceRef="t_getTicket" targetRef="t_decide"/>
+    <sequenceFlow sourceRef="t_decide"    targetRef="gw_refund"/>
+
+    <sequenceFlow sourceRef="gw_refund" targetRef="t_refund">
+      <conditionExpression xsi:type="tFormalExpression">${_refundable}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow sourceRef="gw_refund" targetRef="t_deny">
+      <conditionExpression xsi:type="tFormalExpression">${!_refundable}</conditionExpression>
+    </sequenceFlow>
+
+    <sequenceFlow sourceRef="t_refund"  targetRef="t_assemble"/>
+    <sequenceFlow sourceRef="t_deny"    targetRef="t_assemble"/>
+    <sequenceFlow sourceRef="t_assemble" targetRef="end"/>
+  </process>
+</definitions>

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example 2: Parallel for-each — Validate every item in an order in parallel.
+  Inputs: orderId
+  Tools used: GetOrder, ValidateItem
+  Demonstrates: multi-instance subprocess (parallel), elementVariable,
+                variableAggregation, FEEL filter, final assembly.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             targetNamespace="http://pods.com/rule-domains"
+             typeLanguage="http://www.w3.org/2001/XMLSchema">
+  <process id="rd_order_items_validate_v1" name="Validate every order item" isExecutable="true">
+    <startEvent id="start"/>
+
+    <serviceTask id="t_getOrder" name="GetOrder"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>GetOrder</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"id":"orderId"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>order</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_extractItems" name="Extract items"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr"><flowable:string>order.Items</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>items</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <subProcess id="sp_validate" name="Validate per item">
+      <multiInstanceLoopCharacteristics isSequential="false"
+                                        flowable:collection="${items}"
+                                        flowable:elementVariable="item">
+        <extensionElements>
+          <flowable:variableAggregation target="itemResults">
+            <flowable:variable source="_itemResult"/>
+          </flowable:variableAggregation>
+        </extensionElements>
+      </multiInstanceLoopCharacteristics>
+
+      <startEvent id="i_start"/>
+
+      <serviceTask id="t_validate" name="ValidateItem"
+                   flowable:delegateExpression="${toolCallDelegate}">
+        <extensionElements>
+          <flowable:field name="toolName"><flowable:string>ValidateItem</flowable:string></flowable:field>
+          <flowable:field name="argTemplate"><flowable:string>{"sku":"item.Sku","qty":"item.Quantity"}</flowable:string></flowable:field>
+          <flowable:field name="outputBinding"><flowable:string>_itemResult</flowable:string></flowable:field>
+          <flowable:field name="postTransform"><flowable:string>{"sku":"item.Sku","valid":"_resp.Valid","reason":"_resp.Reason"}</flowable:string></flowable:field>
+        </extensionElements>
+      </serviceTask>
+
+      <endEvent id="i_end"/>
+
+      <sequenceFlow sourceRef="i_start"    targetRef="t_validate"/>
+      <sequenceFlow sourceRef="t_validate" targetRef="i_end"/>
+    </subProcess>
+
+    <serviceTask id="t_assemble" name="Assemble result"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>{orderId: order.Id, items: if itemResults = null then [] else itemResults, allValid: count(itemResults[valid = false]) = 0}</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>result</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <endEvent id="end"/>
+
+    <sequenceFlow sourceRef="start"          targetRef="t_getOrder"/>
+    <sequenceFlow sourceRef="t_getOrder"     targetRef="t_extractItems"/>
+    <sequenceFlow sourceRef="t_extractItems" targetRef="sp_validate"/>
+    <sequenceFlow sourceRef="sp_validate"    targetRef="t_assemble"/>
+    <sequenceFlow sourceRef="t_assemble"     targetRef="end"/>
+  </process>
+</definitions>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example 1: Sequential — Look up a customer, then look up their open orders.
+  Inputs: customerId
+  Tools used: GetCustomer, ListOpenOrders
+  Demonstrates: sequence flow, two tool calls, final result assembly.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             targetNamespace="http://pods.com/rule-domains"
+             typeLanguage="http://www.w3.org/2001/XMLSchema">
+  <process id="rd_customer_open_orders_v1" name="Customer open orders" isExecutable="true">
+    <startEvent id="start"/>
+
+    <serviceTask id="t_getCustomer" name="GetCustomer"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>GetCustomer</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"id":"customerId"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>customer</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_listOrders" name="ListOpenOrders"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName"><flowable:string>ListOpenOrders</flowable:string></flowable:field>
+        <flowable:field name="argTemplate"><flowable:string>{"customerId":"customer.Id","status":"\"OPEN\""}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>orders</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <serviceTask id="t_assemble" name="Assemble result"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>{customer: {id: customer.Id, name: customer.Name}, openOrders: orders, openCount: count(orders)}</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>result</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <endEvent id="end"/>
+
+    <sequenceFlow sourceRef="start"         targetRef="t_getCustomer"/>
+    <sequenceFlow sourceRef="t_getCustomer" targetRef="t_listOrders"/>
+    <sequenceFlow sourceRef="t_listOrders"  targetRef="t_assemble"/>
+    <sequenceFlow sourceRef="t_assemble"    targetRef="end"/>
+  </process>
+</definitions>

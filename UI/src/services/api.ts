@@ -160,6 +160,34 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }).then(handleResponse),
   },
+  ruleDomainConfig: {
+    get: () => fetch(`${BASE_URL}/rule-domain-config`, { headers: getHeaders() }).then(handleResponse),
+    update: (payload: any) => fetch(`${BASE_URL}/rule-domain-config`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    }).then(handleResponse),
+  },
+  skills: {
+    registry: () => fetch(`${BASE_URL}/skills/registry`, { headers: getHeaders() }).then(handleResponse),
+  },
+  ruleDomains: {
+    list: (skillId?: string) => fetch(
+      `${BASE_URL}/rule-domains${skillId ? `?skillId=${encodeURIComponent(skillId)}` : ''}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    get: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}`, { headers: getHeaders() }).then(handleResponse),
+    executions: (id: string, limit: number = 50) => fetch(
+      `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions?limit=${limit}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    deprecate: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/deprecate`, {
+      method: 'POST', headers: getHeaders(),
+    }).then(handleResponse),
+    activate: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/activate`, {
+      method: 'POST', headers: getHeaders(),
+    }).then(handleResponse),
+  },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),
     get: (name: string) => fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}`, { headers: getHeaders() }).then(handleResponse),

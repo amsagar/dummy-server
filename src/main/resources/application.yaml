@@ -9,6 +9,12 @@ spring:
     exclude:
       - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
       - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
+      # Flowable 7.1.0 ships an @AutoConfigureBefore(KafkaAutoConfiguration.class)
+      # on its EventRegistry auto-config; Spring Boot 4.0 moved the Kafka
+      # auto-configuration class, so this reference fails to resolve. We don't
+      # use the Flowable event-registry feature anyway — exclude it.
+      - org.flowable.spring.boot.eventregistry.EventRegistryAutoConfiguration
+      - org.flowable.spring.boot.eventregistry.EventRegistryServicesAutoConfiguration
   datasource:
     url: jdbc:postgresql://ep-little-bird-apd16p3k-pooler.c-7.us-east-1.aws.neon.tech:5432/ai_agent
     username: neondb_owner
@@ -141,6 +147,8 @@ pods:
       default-scopes: ""
       default-authorization-url: ""
       default-token-url: ""
+# Rule-domain runtime config lives in agent.rule_domain_config (single row).
+# Edit through the admin UI (/rule-domains) or via PUT /api/v1/rule-domain-config.
 logging:
   level:
     root: INFO

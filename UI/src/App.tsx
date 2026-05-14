@@ -23,6 +23,8 @@ import {
   FolderTree,
   Server,
   Table2,
+  Workflow,
+  Settings as SettingsIcon,
   LogOut,
   UserCircle2,
 } from "lucide-react";
@@ -40,6 +42,9 @@ import McpRegistryPage from "./pages/McpRegistryPage";
 import McpServerToolsPage from "./pages/McpServerToolsPage";
 import DecisionTablesPage from "./pages/DecisionTablesPage";
 import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
+import RuleDomainsPage from "./pages/RuleDomainsPage";
+import RuleDomainEditorPage from "./pages/RuleDomainEditorPage";
+import SettingsPage from "./pages/SettingsPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import { clearAuthToken, getAuthUser, isAuthenticated } from "./services/api";
@@ -61,7 +66,9 @@ function Sidebar() {
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
+    { icon: Workflow, name: "Rule Domains", path: "/rule-domains" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
+    { icon: SettingsIcon, name: "Settings", path: "/settings/rule-domain" },
   ];
 
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -193,6 +200,8 @@ function Header() {
     "/tools/": "Tools",
     "/skills": "Skills",
     "/decision-tables": "Decision Tables",
+    "/rule-domains": "Rule Domains",
+    "/settings/rule-domain": "Settings",
     "/mcp-registry": "MCP Registry",
     "/mcp-registry/": "MCP Registry",
   };
@@ -200,6 +209,8 @@ function Header() {
   const title =
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
     (location.pathname.startsWith("/decision-tables/") ? "Decision Tables" : undefined) ||
+    (location.pathname.startsWith("/rule-domains/") ? "Rule Domains" : undefined) ||
+    (location.pathname.startsWith("/settings/") ? "Settings" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
     "PODS AI Agent";
@@ -258,6 +269,10 @@ export default function App() {
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/decision-tables" element={<DecisionTablesPage />} />
                 <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
+                <Route path="/rule-domains" element={<RuleDomainsPage />} />
+                <Route path="/rule-domains/:id" element={<RuleDomainEditorPage />} />
+                <Route path="/settings" element={<Navigate to="/settings/rule-domain" replace />} />
+                <Route path="/settings/rule-domain" element={<SettingsPage />} />
                 <Route path="/mcp-registry" element={<McpRegistryPage />} />
                 <Route path="/mcp-registry/:serverId/tools" element={<McpServerToolsPage />} />
               </Route>
