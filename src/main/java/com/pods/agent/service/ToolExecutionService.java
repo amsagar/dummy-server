@@ -55,28 +55,6 @@ public class ToolExecutionService {
     private final DecisionTableService decisionTableService;
     private final Map<String, CircuitState> circuits = new ConcurrentHashMap<>();
 
-    // Optional — only present when the order-validation tool pack is on the
-    // classpath. Setter injection so the existing constructors don't have
-    // to grow a new parameter and existing tests keep building.
-    private com.pods.agent.orderValidation.OrderValidationAgentTools orderValidationAgentTools;
-
-    @Autowired(required = false)
-    public void setOrderValidationAgentTools(
-            @org.springframework.context.annotation.Lazy
-            com.pods.agent.orderValidation.OrderValidationAgentTools tools) {
-        this.orderValidationAgentTools = tools;
-    }
-
-    // Optional — vendor rationalization tool pack
-    private com.pods.agent.vendorRationalization.VendorRationalizationAgentTools vendorRationalizationAgentTools;
-
-    @Autowired(required = false)
-    public void setVendorRationalizationAgentTools(
-            @org.springframework.context.annotation.Lazy
-            com.pods.agent.vendorRationalization.VendorRationalizationAgentTools tools) {
-        this.vendorRationalizationAgentTools = tools;
-    }
-
     public ToolExecutionService(ObjectMapper objectMapper) {
         this(objectMapper, null, null, null, null, null);
     }
@@ -434,76 +412,6 @@ public class ToolExecutionService {
 
     private ExecutionResult executeIntegration(AgentTool tool, String userText) {
         String name = tool.getName().toLowerCase();
-        if (orderValidationAgentTools != null) {
-            try {
-                Map<String, Object> args = parseArgs(userText);
-                switch (name) {
-                    case "ovlistrunsfororder" -> {
-                        String orderId = stringArg(args, "orderId", null);
-                        return new ExecutionResult(true,
-                                orderValidationAgentTools.listRunsForOrder(orderId), null);
-                    }
-                    case "ovgetrundetail" -> {
-                        String instId = stringArg(args, "instId", null);
-                        return new ExecutionResult(true,
-                                orderValidationAgentTools.getRunDetail(instId), null);
-                    }
-                    case "ovstartvalidation" -> {
-                        String orderId = stringArg(args, "orderId", null);
-                        return new ExecutionResult(true,
-                                orderValidationAgentTools.startValidation(orderId), null);
-                    }
-                    case "ovdashboardstats" -> {
-                        Long fromTs = args.get("fromTs") instanceof Number n ? n.longValue() : null;
-                        Long toTs = args.get("toTs") instanceof Number n ? n.longValue() : null;
-                        return new ExecutionResult(true,
-                                orderValidationAgentTools.dashboardStats(fromTs, toTs), null);
-                    }
-                    default -> {
-                        // fall through to vendor rationalization
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Order-validation tool {} failed: {}", name, e.getMessage());
-                return new ExecutionResult(false, null,
-                        "Order-validation tool failed: " + e.getMessage());
-            }
-        }
-        // Vendor rationalization tools
-        if (vendorRationalizationAgentTools != null) {
-            try {
-                Map<String, Object> args = parseArgs(userText);
-                switch (name) {
-                    case "vrsearchvendors" -> {
-                        String query = stringArg(args, "query", "");
-                        Integer limit = args.get("limit") instanceof Number n ? n.intValue() : 20;
-                        return new ExecutionResult(true,
-                                vendorRationalizationAgentTools.vrSearchVendors(query, limit), null);
-                    }
-                    case "vrgetcategoryinsight" -> {
-                        String categoryName = stringArg(args, "categoryName", null);
-                        return new ExecutionResult(true,
-                                vendorRationalizationAgentTools.vrGetCategoryInsight(categoryName), null);
-                    }
-                    case "vrgetdashboardstats" -> {
-                        return new ExecutionResult(true,
-                                vendorRationalizationAgentTools.vrGetDashboardStats(), null);
-                    }
-                    case "vrgetsavingsopportunities" -> {
-                        Integer topN = args.get("topN") instanceof Number n ? n.intValue() : 10;
-                        return new ExecutionResult(true,
-                                vendorRationalizationAgentTools.vrGetSavingsOpportunities(topN), null);
-                    }
-                    default -> {
-                        // fall through
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Vendor-rationalization tool {} failed: {}", name, e.getMessage());
-                return new ExecutionResult(false, null,
-                        "Vendor-rationalization tool failed: " + e.getMessage());
-            }
-        }
         if ("decisiontableevaluate".equals(name)) {
             if (decisionTableService == null) {
                 return new ExecutionResult(false, null, "Decision table service is unavailable");

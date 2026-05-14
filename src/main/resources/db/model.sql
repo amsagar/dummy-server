@@ -97,7 +97,6 @@ ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS model_gate TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS provider_gate TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS experimental BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS input_schema_version INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE agent.agent_tools DROP COLUMN IF EXISTS risk_level;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS host TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_profile_id TEXT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS auth_override_enabled BOOLEAN NOT NULL DEFAULT FALSE;
@@ -299,17 +298,6 @@ CREATE TABLE IF NOT EXISTS agent.hitl_interactions (
     resolved_at   BIGINT
     );
 
--- Workflow support removed: drop legacy workflow proposal and engine tables.
-DROP TABLE IF EXISTS agent.workflow_proposals;
-DROP TABLE IF EXISTS agent.pending_approval;
-DROP TABLE IF EXISTS agent.activity_pin;
-DROP TABLE IF EXISTS agent.process_link;
-DROP TABLE IF EXISTS agent.audit_trail;
-DROP TABLE IF EXISTS agent.workflow_variable;
-DROP TABLE IF EXISTS agent.activity_inst;
-DROP TABLE IF EXISTS agent.process_def_runs_recent;
-DROP TABLE IF EXISTS agent.process_inst;
-DROP TABLE IF EXISTS agent.process_def;
 
 CREATE TABLE IF NOT EXISTS agent.hook_mappings (
                                                    id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -370,7 +358,6 @@ CREATE INDEX IF NOT EXISTS idx_hitl_interactions_session_id ON agent.hitl_intera
 CREATE INDEX IF NOT EXISTS idx_hook_mappings_hook_point ON agent.hook_mappings (hook_point);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_id ON agent.runtime_traces (session_id);
 
--- ── Embedding model registrations + tool vector index ─────────────────────────
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS model_kind TEXT NOT NULL DEFAULT 'chat';
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE agent.supported_models ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER;
@@ -412,32 +399,13 @@ CREATE INDEX IF NOT EXISTS idx_tool_embeddings_hnsw
     ON agent.agent_tool_embeddings
     USING hnsw (embedding halfvec_cosine_ops);
 
--- ── Removed: workflow API keys (feature cleanup) ──────────────────────────────
--- Keep this drop idempotent so old environments can be cleaned in-place.
-DROP TABLE IF EXISTS agent.workflow_api_key;
-
--- ── Order-validation UI settings ──────────────────────────────────────────
--- Singleton (id='singleton') row that the order-validation-ui reads/writes
--- as a global, cross-browser config. Holds the active chat model ref
--- (providerId/modelId) and the AI assistant response mode (basic|detailed).
--- Created lazily on first read.
 CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
     id              TEXT PRIMARY KEY,
     chat_model_ref  TEXT,
     response_mode   TEXT NOT NULL DEFAULT 'basic',
     updated_at      BIGINT NOT NULL
 );
-ALTER TABLE agent.order_validation_settings DROP COLUMN IF EXISTS workflow_id;
 
--- ── Vendor-rationalization tunable config ───────────────────────────────
--- Singleton (id='singleton') row that holds the business-tunable knobs
--- used by the VR analytics service and the executive dashboard: the
--- category→lever map, savings buckets, KPI targets, insight thresholds
--- + templates, and the Pareto threshold. Everything lives inside one
--- JSON blob so the Settings admin page can edit the whole config as a
--- unit. Seeded with `VendorRationalizationConfigDefaults` on first boot;
--- subsequent restarts never overwrite an existing row (business edits
--- must survive).
 CREATE TABLE IF NOT EXISTS agent.vendor_rationalization_config (
     id              TEXT PRIMARY KEY,
     payload_json    TEXT NOT NULL,
