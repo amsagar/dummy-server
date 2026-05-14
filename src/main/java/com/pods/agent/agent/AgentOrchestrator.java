@@ -221,18 +221,10 @@ public class AgentOrchestrator {
 
         boolean architectRuntimeMode = state != null && isToolchainArchitectRuntimeMode(state.getRuntimeMode());
         if (!architectRuntimeMode) {
-            // Skill catalog — lightweight listing so LLM always knows what skills exist
-            List<SkillRegistryService.SkillSnapshot> skills = skillRegistryService.getEnabledSkills();
-            if (!skills.isEmpty()) {
-                prompt.append("\n## Available Skills\n");
-                for (SkillRegistryService.SkillSnapshot s : skills) {
-                    prompt.append("- **").append(s.skill().getName()).append("**");
-                    if (s.skill().getDescription() != null && !s.skill().getDescription().isBlank()) {
-                        prompt.append(": ").append(s.skill().getDescription());
-                    }
-                    prompt.append("\n");
-                }
-            }
+            prompt.append("\n## Retrieval Catalog Contract\n")
+                    .append("- Use `skillsearch` to find relevant skills by embedding + lexical ranking over skill metadata.\n")
+                    .append("- Use `toolsearch` to find relevant tools (framework + imported + MCP) by embedding + lexical ranking.\n")
+                    .append("- After selecting a skill from `skillsearch`, call `skill` with exact name before domain tool execution.\n");
         }
         if (state != null && isToolchainDesignerMode(state.getRuntimeMode()) && !architectRuntimeMode) {
             appendToolchainDesignerSystemPrompt(prompt);

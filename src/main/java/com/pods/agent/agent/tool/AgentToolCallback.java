@@ -131,7 +131,8 @@ public class AgentToolCallback implements ToolCallback {
         boolean isSkillTool = tool.getName() != null && "skill".equalsIgnoreCase(tool.getName().trim());
         String toolCallSignature = buildToolCallSignature(tool.getName(), payload);
 
-        if (!isSkillTool && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
+        if (!isSkillTool && !isSkillDiscoveryTool(tool.getName())
+                && skillExecutionGate != null && skillExecutionGate.isRequired() && !skillExecutionGate.isSkillLoaded()) {
             // Hard gate: the planner picked at least one skill that lexically matches the
             // user request, so the SKILL.md content carries business rules / tool-call
             // sequencing the catalog description alone cannot convey (e.g. ItemCode->
@@ -800,6 +801,12 @@ public class AgentToolCallback implements ToolCallback {
         String normalizedToolName = toolName.trim().toLowerCase();
         String canonicalPayload = canonicalizeJsonPayload(payload);
         return normalizedToolName + "|" + canonicalPayload;
+    }
+
+    private boolean isSkillDiscoveryTool(String toolName) {
+        if (toolName == null) return false;
+        String low = toolName.trim().toLowerCase();
+        return "skillsearch".equals(low) || "toolsearch".equals(low);
     }
 
     private String canonicalizeJsonPayload(String payload) {

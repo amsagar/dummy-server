@@ -53,10 +53,11 @@ public class ToolExecutionService {
     private final MemoryTools memoryTools;
     private final HttpToolAuthService httpToolAuthService;
     private final DecisionTableService decisionTableService;
+    private final CatalogSearchService catalogSearchService;
     private final Map<String, CircuitState> circuits = new ConcurrentHashMap<>();
 
     public ToolExecutionService(ObjectMapper objectMapper) {
-        this(objectMapper, null, null, null, null, null);
+        this(objectMapper, null, null, null, null, null, null);
     }
 
     @Autowired
@@ -65,13 +66,24 @@ public class ToolExecutionService {
                                 McpRuntimeAdapter mcpRuntimeAdapter,
                                 MemoryTools memoryTools,
                                 HttpToolAuthService httpToolAuthService,
-                                DecisionTableService decisionTableService) {
+                                DecisionTableService decisionTableService,
+                                CatalogSearchService catalogSearchService) {
         this.objectMapper = objectMapper;
         this.mcpClientService = mcpClientService;
         this.mcpRuntimeAdapter = mcpRuntimeAdapter;
         this.memoryTools = memoryTools;
         this.httpToolAuthService = httpToolAuthService;
         this.decisionTableService = decisionTableService;
+        this.catalogSearchService = catalogSearchService;
+    }
+
+    public ToolExecutionService(ObjectMapper objectMapper,
+                                McpClientService mcpClientService,
+                                McpRuntimeAdapter mcpRuntimeAdapter,
+                                MemoryTools memoryTools,
+                                HttpToolAuthService httpToolAuthService,
+                                DecisionTableService decisionTableService) {
+        this(objectMapper, mcpClientService, mcpRuntimeAdapter, memoryTools, httpToolAuthService, decisionTableService, null);
     }
 
     public ExecutionResult execute(AgentTool tool, String userText) {
@@ -470,6 +482,50 @@ public class ToolExecutionService {
             String prompt = stringArg(args, "question", stringArg(args, "query", "Approval required"));
             return new ExecutionResult(true, "approval_required:" + prompt, null);
         }
+        if ("toolsearch".equals(name)) {
+            if (catalogSearchService == null) {
+                return new ExecutionResult(false, null, "Catalog search service is unavailable");
+            }
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                String query = stringArg(args, "query", null);
+                if (query == null || query.isBlank()) {
+                    return new ExecutionResult(false, null, "query is required");
+                }
+                int topK = intArg(args, "topK", 8);
+                boolean includeMcp = boolArg(args, "includeMcp", true);
+                boolean includeFramework = boolArg(args, "includeFramework", true);
+                List<Map<String, Object>> results = catalogSearchService.searchTools(query, topK, includeMcp, includeFramework);
+                return new ExecutionResult(true, objectMapper.writeValueAsString(Map.of(
+                        "query", query,
+                        "count", results.size(),
+                        "results", results
+                )), null);
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "toolsearch failed: " + e.getMessage());
+            }
+        }
+        if ("skillsearch".equals(name)) {
+            if (catalogSearchService == null) {
+                return new ExecutionResult(false, null, "Catalog search service is unavailable");
+            }
+            try {
+                Map<String, Object> args = parseArgs(userText);
+                String query = stringArg(args, "query", null);
+                if (query == null || query.isBlank()) {
+                    return new ExecutionResult(false, null, "query is required");
+                }
+                int topK = intArg(args, "topK", 8);
+                List<Map<String, Object>> results = catalogSearchService.searchSkills(query, topK);
+                return new ExecutionResult(true, objectMapper.writeValueAsString(Map.of(
+                        "query", query,
+                        "count", results.size(),
+                        "results", results
+                )), null);
+            } catch (Exception e) {
+                return new ExecutionResult(false, null, "skillsearch failed: " + e.getMessage());
+            }
+        }
         if (Set.of("plan_exit", "task", "parallel_task", "batch", "pipeline", "todowrite").contains(name)) {
             return new ExecutionResult(true, "{\"status\":\"ok\",\"tool\":\"" + name + "\"}", null);
         }
@@ -734,6 +790,16 @@ public class ToolExecutionService {
         } catch (Exception e) {
             return fallback;
         }
+    }
+
+    private boolean boolArg(Map<String, Object> args, String key, boolean fallback) {
+        Object value = args.get(key);
+        if (value == null) return fallback;
+        if (value instanceof Boolean b) return b;
+        String text = String.valueOf(value).trim().toLowerCase();
+        if ("true".equals(text) || "1".equals(text) || "yes".equals(text)) return true;
+        if ("false".equals(text) || "0".equals(text) || "no".equals(text)) return false;
+        return fallback;
     }
 
     private List<String> listArg(Map<String, Object> args, String key) {

@@ -4,6 +4,8 @@ import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuntimeTuningProperties;
 import com.pods.agent.domain.Skill;
 import com.pods.agent.api.dto.ChatState;
+import com.pods.agent.repository.AgentProfileRepository;
+import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.service.SkillRegistryService.SkillSnapshot;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.SkillRegistryService;
@@ -20,31 +22,32 @@ import static org.mockito.Mockito.when;
 
 class AgentOrchestratorPromptTest {
 
-    @Test
-    void loadsBaseSystemPromptFromResource() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
+    private AgentOrchestrator newOrchestrator(SkillRegistryService skillRegistryService, RuntimeTuningProperties props) {
+        return new AgentOrchestrator(
                 mock(ModelProviderRouter.class),
-                mock(SkillRegistryService.class),
+                skillRegistryService,
                 mock(InstructionLoaderService.class),
                 mock(MemoryService.class),
-                new RuntimeTuningProperties()
+                props,
+                mock(RuntimeEventRepository.class),
+                new tools.jackson.databind.ObjectMapper(),
+                mock(AgentProfileRepository.class)
         );
+    }
+
+    @Test
+    void loadsBaseSystemPromptFromResource() {
+        AgentOrchestrator orchestrator = newOrchestrator(mock(SkillRegistryService.class), new RuntimeTuningProperties());
 
         String prompt = orchestrator.baseSystemPromptForTest();
-        assertTrue(prompt.contains("You are PODS AI Agent."));
+        assertTrue(prompt.contains("You are AI Agent."));
         assertTrue(prompt.contains("outside allowed scope"));
     }
 
     @Test
     void normalizesAugmentedRuntimeContextForHistory() {
         SkillRegistryService skillRegistryService = mock(SkillRegistryService.class);
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                mock(ModelProviderRouter.class),
-                skillRegistryService,
-                mock(InstructionLoaderService.class),
-                mock(MemoryService.class),
-                new RuntimeTuningProperties()
-        );
+        AgentOrchestrator orchestrator = newOrchestrator(skillRegistryService, new RuntimeTuningProperties());
 
         String normalized = orchestrator.normalizeUserMessageForHistory(
                 "i need python snake game code\n\nTool execution result:\nTool 'x' returned: y\n\nRuntime mode: planner_worker"
@@ -54,7 +57,7 @@ class AgentOrchestratorPromptTest {
     }
 
     @Test
-    void listsSkillsAndInstructsModelToUseSkillTool() {
+    void usesRetrievalContractAndInstructsModelToUseSkillTool() {
         SkillRegistryService skillRegistryService = mock(SkillRegistryService.class);
         when(skillRegistryService.getEnabledSkills()).thenReturn(List.of(
                 new SkillSnapshot(
@@ -64,18 +67,13 @@ class AgentOrchestratorPromptTest {
         ));
         RuntimeTuningProperties props = new RuntimeTuningProperties();
         props.setIncludeSkillContentInSystemPrompt(true);
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                mock(ModelProviderRouter.class),
-                skillRegistryService,
-                mock(InstructionLoaderService.class),
-                mock(MemoryService.class),
-                props
-        );
+        AgentOrchestrator orchestrator = newOrchestrator(skillRegistryService, props);
 
         String prompt = orchestrator.buildSystemPromptForTest(ChatState.builder().build(), new AgentSession("s4"));
 
-        assertTrue(prompt.contains("## Available Skills"));
+        assertTrue(prompt.contains("## Retrieval Catalog Contract"));
+        assertTrue(prompt.contains("skillsearch"));
+        assertTrue(prompt.contains("toolsearch"));
         assertTrue(prompt.contains("call the `skill` tool"));
-        assertTrue(prompt.contains("pdf operations"));
     }
 }

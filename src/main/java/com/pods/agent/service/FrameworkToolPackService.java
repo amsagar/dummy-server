@@ -9,6 +9,8 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class FrameworkToolPackService {
@@ -29,6 +31,9 @@ public class FrameworkToolPackService {
         int updated = 0;
         List<ToolSeed> seeds = new ArrayList<>(coreSeeds());
         seeds.addAll(experimentalSeeds());
+        Set<String> activeSeedNames = seeds.stream()
+                .map(seed -> seed.name.toLowerCase())
+                .collect(Collectors.toSet());
 
         for (ToolSeed seed : seeds) {
             AgentDomain targetDomain = seed.experimental ? expDomain : coreDomain;
@@ -48,7 +53,24 @@ public class FrameworkToolPackService {
                 updated++;
             }
         }
+
+        // Disable framework-default tools that are no longer present in the seed list.
+        // This prevents removed defaults from lingering in existing environments.
+        disableStaleFrameworkDefaults(coreDomain.getId(), activeSeedNames);
+        disableStaleFrameworkDefaults(expDomain.getId(), activeSeedNames);
+
         return new InstallResult(created, updated, seeds.size());
+    }
+
+    private void disableStaleFrameworkDefaults(String domainId, Set<String> activeSeedNames) {
+        for (AgentTool tool : toolRepository.findByDomainId(domainId)) {
+            if (!"framework_default".equalsIgnoreCase(tool.getSourceType())) continue;
+            String name = tool.getName() == null ? "" : tool.getName().toLowerCase();
+            if (activeSeedNames.contains(name)) continue;
+            if (!tool.isEnabled()) continue;
+            tool.setEnabled(false);
+            toolRepository.update(tool);
+        }
     }
 
     private AgentDomain ensureDomain(String name, String description) {
@@ -108,6 +130,26 @@ public class FrameworkToolPackService {
                                 ),
                                 "required", List.of("tableName")
                         ), true),
+                seed("toolsearch", "Search registered tools (framework, imported, and MCP) using semantic + lexical ranking.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "query", Map.of("type", "string"),
+                                        "topK", Map.of("type", "number"),
+                                        "includeMcp", Map.of("type", "boolean"),
+                                        "includeFramework", Map.of("type", "boolean")
+                                ),
+                                "required", List.of("query")
+                        ), true),
+                seed("skillsearch", "Search available skills using semantic + lexical ranking over skill name/description and SKILL.md content.", "integration", "workflow", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "query", Map.of("type", "string"),
+                                        "topK", Map.of("type", "number")
+                                ),
+                                "required", List.of("query")
+                        ), true),
 
                 // Retrieval-eligible (semantic match required). baseInjected=false. Descriptions clarify scope so the model doesn't grab them for remote-hosted entities.
                 seed("read", "Read content of a file in the local workspace. Local files only — does not access GitHub, remote repos, web URLs, or external systems; use the appropriate MCP/integration tool for those.", "filesystem", "filesystem", false, false, Map.of("path", "string"), false),
@@ -121,36 +163,7 @@ public class FrameworkToolPackService {
                 seed("websearch", "General web search. Prefer a domain-specific MCP/integration tool when the user's question is about a registered service (GitHub, Stripe, Linear, etc.).", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("codesearch", "Search code on the public web. Prefer a domain-specific MCP/integration tool when the user's question is about a known repo or service.", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("task", "Dispatch a background worker task within the agent runtime.", "workflow", "workflow", false, false, Map.of("task", "string"), false),
-                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false),
-
-                // Order-validation agent tools — base-injected so the
-                // ov-basic / ov-detailed agent profiles always see them.
-                seed("ovListRunsForOrder", "Find existing PODS order-validation runs by order id. Returns the list with overall + per-check status.", "integration", "workflow", false, false,
-                        Map.of(
-                                "type", "object",
-                                "properties", Map.of("orderId", Map.of("type", "string")),
-                                "required", List.of("orderId")
-                        ), true),
-                seed("ovGetRunDetail", "Fetch the full per-check breakdown of a single validation run by its instance id.", "integration", "workflow", false, false,
-                        Map.of(
-                                "type", "object",
-                                "properties", Map.of("instId", Map.of("type", "string")),
-                                "required", List.of("instId")
-                        ), true),
-                seed("ovStartValidation", "Start a NEW order-validation workflow run for the given order id. Returns the new instance id; the run executes asynchronously.", "integration", "workflow", false, false,
-                        Map.of(
-                                "type", "object",
-                                "properties", Map.of("orderId", Map.of("type", "string")),
-                                "required", List.of("orderId")
-                        ), true),
-                seed("ovDashboardStats", "Aggregate order-validation stats (pass rate, failed count, avg duration) over a time range.", "integration", "workflow", false, false,
-                        Map.of(
-                                "type", "object",
-                                "properties", Map.of(
-                                        "fromTs", Map.of("type", "number"),
-                                        "toTs", Map.of("type", "number")
-                                )
-                        ), true)
+                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false)
         );
     }
 

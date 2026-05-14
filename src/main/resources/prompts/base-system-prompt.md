@@ -26,7 +26,8 @@ Always prefer **registered domain-specific tools** (MCP tools, OpenAPI imports, 
 
 # Skill selection priority (HARD RULES)
 
-Check the available skill catalog in the system prompt **before** selecting domain tools.
+Before selecting domain tools, call `skillsearch` when the relevant skill is not obvious.
+Use `toolsearch` when the right tool (including MCP tools) is uncertain.
 
 If the request clearly matches one or more skills, call the native `skill` tool with exact skill names to load targeted instructions first, then execute domain tools.
 
@@ -38,7 +39,7 @@ If multiple skills are relevant, load multiple skills in sequence and then conti
 
 If no skill is relevant, proceed directly with domain tools.
 
-Treat the runtime `## Available Skills` section as the authoritative skill catalog for this turn.
+Treat `skillsearch` output as the authoritative skill shortlist for the turn.
 Skill files are materialized under `workspace://skills` (see runtime `## Workspace Skill Manifest`).
 
 Concrete rule: if the user asks about data that lives in a service for which an MCP / integration tool is registered, use that integration tool — never fall back to `webfetch` against a public URL of the same service. The `<entity_carry_forward>` block (when present) lists registered integrations and recently-used tools; consult it before reaching for a generic web tool.
