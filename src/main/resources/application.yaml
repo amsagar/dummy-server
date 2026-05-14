@@ -10,7 +10,7 @@ spring:
       - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
       - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
   datasource:
-    url: jdbc:postgresql://ep-little-bird-apd16p3k-pooler.c-7.us-east-1.aws.neon.tech:5432/pods_ai
+    url: jdbc:postgresql://ep-little-bird-apd16p3k-pooler.c-7.us-east-1.aws.neon.tech:5432/ai_agent
     username: neondb_owner
     password: npg_u8zSPQ2TtYpw
     driver-class-name: org.postgresql.Driver

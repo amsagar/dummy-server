@@ -119,6 +119,29 @@ export const api = {
       { method: 'DELETE', headers: getHeaders() }
     ).then(handleResponse),
   },
+  models: {
+    list: () => fetch(`${BASE_URL}/models`, { headers: getHeaders() }).then(handleResponse),
+    upsert: (payload: {
+      providerID: string;
+      modelID: string;
+      displayName?: string;
+      apiKey?: string;
+      baseUrl?: string;
+      enabled: boolean;
+    }) => fetch(`${BASE_URL}/models`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    }).then(handleResponse),
+    setEnabled: (providerID: string, modelID: string, enabled: boolean) => fetch(
+      `${BASE_URL}/models/${encodeURIComponent(providerID)}/${encodeURIComponent(modelID)}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST', headers: getHeaders() }
+    ).then(handleResponse),
+    delete: (providerID: string, modelID: string) => fetch(
+      `${BASE_URL}/models/${encodeURIComponent(providerID)}/${encodeURIComponent(modelID)}`,
+      { method: 'DELETE', headers: getHeaders() }
+    ).then(handleResponse),
+  },
   tools: {
     reindex: () => fetch(`${BASE_URL}/admin/tools/reindex`, {
       method: 'POST',
