@@ -60,4 +60,15 @@ public class PluginRegistry {
     public Optional<DecisionPlugin> decisionPlugin(String name) {
         return Optional.ofNullable(decisionPluginsByName.get(name));
     }
+
+    /**
+     * Names of every registered {@link ApplicationPlugin}. Exposed for the
+     * workflow-architect contract reconciler so it can verify the
+     * machine-readable contract under
+     * {@code default-skills/workflow-architect/doc/plugins.json} matches the
+     * actually-registered plugin set at boot.
+     */
+    public java.util.Set<String> applicationPluginNames() {
+        return java.util.Set.copyOf(appPluginsByName.keySet());
+    }
 }

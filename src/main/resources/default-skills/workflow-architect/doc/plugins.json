@@ -1,46 +1,83 @@
 {
+  "$comment": "Machine-readable engine contract. Read by both the LLM (during workflow generation) and WorkflowJsonValidator (after generation). Drift between docs and validator is impossible by construction. envelopePath tells the LLM how to access this plugin's output via SpEL: 'output' means access via #var.output.<field>; 'raw' means access directly as #var.<field>.",
   "plugins": [
     {
       "name": "AgentToolPlugin",
       "required": ["toolName"],
       "optional": ["input"],
-      "returns": "any (JSON object/array bodies are parsed; non-JSON bodies returned as string)",
-      "summary": "Invoke a registered agent tool by name."
+      "envelopePath": "raw",
+      "rawReturn": true,
+      "returnShape": "Depends on the tool; see workflow-architect/doc/tools.json for per-tool output schemas. Common cases: JSON object/array (parsed), or raw string for non-JSON bodies.",
+      "spelExample": "#myToolResult.someField  (raw — do NOT prefix with .output)",
+      "summary": "Invoke a registered agent tool by name. Returns the parsed tool body directly with no envelope.",
+      "commonMistakes": [
+        "Treating the return as a CodeExec-style envelope: #myToolResult.output.someField. There is NO output wrapper.",
+        "Confusing 'output' (singular) with the decisionTableEvaluate 'outputs' (plural) map. See doc/tools.json."
+      ]
     },
     {
       "name": "SkillToolPlugin",
       "required": ["name"],
       "optional": [],
-      "returns": { "name": "string", "description": "string", "skillContent": "string", "files": "object" },
-      "summary": "Load a skill bundle by name."
+      "envelopePath": "raw",
+      "rawReturn": true,
+      "returnShape": { "name": "string", "description": "string", "skillContent": "string", "files": "object" },
+      "spelExample": "#skill.skillContent",
+      "summary": "Load a skill bundle by name. Returned as a raw map.",
+      "commonMistakes": []
     },
     {
       "name": "HttpRequestPlugin",
       "required": ["url"],
       "optional": ["method", "headers", "body", "timeoutMs"],
-      "returns": { "status": "int", "headers": "map", "body": "string" },
-      "summary": "Perform an HTTP request. Non-2xx responses are returned, not thrown."
+      "envelopePath": "raw",
+      "rawReturn": true,
+      "returnShape": { "status": "int", "headers": "map", "body": "string" },
+      "spelExample": "#httpResult.status  /  #httpResult.body",
+      "summary": "Perform an HTTP request. Non-2xx responses are returned (not thrown).",
+      "commonMistakes": [
+        "Assuming non-2xx routes via ON_ERROR. It does NOT — the activity succeeds; check #result.status in the next step or in a route transition condition."
+      ]
     },
     {
       "name": "McpToolPlugin",
       "required": ["serverId", "toolName"],
       "optional": ["payload"],
-      "returns": "string",
-      "summary": "Call a tool exposed by a registered MCP server."
+      "envelopePath": "raw",
+      "rawReturn": true,
+      "returnShape": "string (caller must parse if JSON is expected)",
+      "spelExample": "#mcpResult  (a String)",
+      "summary": "Call a tool exposed by a registered MCP server. Returns a bare string.",
+      "commonMistakes": [
+        "Treating the return as an object: #mcpResult.someField will fail because the return is a String."
+      ]
     },
     {
       "name": "CodeExecPlugin",
       "required": ["language", "code"],
       "optional": ["input", "timeoutMs", "memoryLimitMb"],
-      "returns": { "success": "boolean", "output": "any", "stdout": "string", "stderr": "string" },
-      "summary": "Run sandboxed code. Always set language=\"java\" — other languages are temporarily disabled."
+      "envelopePath": "output",
+      "rawReturn": false,
+      "returnShape": { "success": "boolean", "output": "any (the value returned by your code)", "stdout": "string", "stderr": "string" },
+      "spelExample": "#myCodeResult.output.someField  (must go through .output)",
+      "summary": "Run sandboxed code. Always set language=\"java\" — other languages are temporarily disabled. The plugin WRAPS the code's return value in an envelope.",
+      "commonMistakes": [
+        "Accessing the result without going through .output: #myCodeResult.someField is null. The value your code returned lives at #myCodeResult.output.",
+        "Forgetting that success/stdout/stderr are siblings of output, not nested inside it."
+      ]
     },
     {
       "name": "AiChatPlugin",
       "required": ["provider", "model", "prompt"],
       "optional": ["system"],
-      "returns": "string",
-      "summary": "Call an LLM via ModelProviderRouter and return the assistant text."
+      "envelopePath": "raw",
+      "rawReturn": true,
+      "returnShape": "string (the assistant's reply text)",
+      "spelExample": "#aiReply  (a String)",
+      "summary": "Call an LLM via ModelProviderRouter and return the assistant text directly.",
+      "commonMistakes": [
+        "Expecting a structured object: the return is a bare String. Use AiChatPlugin + a follow-up CodeExec step to parse JSON if needed."
+      ]
     }
   ]
 }

@@ -1,0 +1,59 @@
+{
+  "$comment": "Canonical transition trigger enum + per-activity-type required wiring. Read by the LLM (during workflow generation) and by WorkflowJsonValidator.foreach_wiring_incomplete. The validator does not yet enforce per-activity-type combinations for non-loop nodes — keep that data here so it is ready to enforce in future.",
+  "triggers": [
+    { "name": "ON_SUCCESS", "emittedWhen": "Activity completed without an errorClass. Default forward edge." },
+    { "name": "ON_NO_MATCH", "emittedWhen": "All conditional ON_SUCCESS edges evaluated to false. The default-priority-100 ON_NO_MATCH edge is the fall-through. Used as the loop-exit edge for foreach/while/batch." },
+    { "name": "ON_ERROR", "emittedWhen": "Activity returned a non-VALIDATION / non-TIMEOUT errorClass (TOOL, EXPRESSION, UNCAUGHT, SUBFLOW)." },
+    { "name": "ON_TIMEOUT", "emittedWhen": "Activity's deadlineExpression elapsed before completion (ErrorClass.TIMEOUT)." },
+    { "name": "ON_VALIDATION_ERROR", "emittedWhen": "Activity failed input/output schema validation, or a SpEL expression failed to evaluate (ErrorClass.VALIDATION)." }
+  ],
+  "activityWiring": {
+    "foreach": {
+      "required": [
+        { "edge": "body-forward",  "trigger": "ON_SUCCESS",  "description": "From the foreach activity to the first body activity (the iteration step)." },
+        { "edge": "body-back",     "trigger": "ON_SUCCESS",  "description": "From the LAST body activity back to the foreach activity. Without this back-edge the loop runs exactly one iteration." },
+        { "edge": "loop-exit",     "trigger": "ON_NO_MATCH", "description": "From the foreach activity to the activity that follows the loop. MUST be isDefault=true and priority>=100 so it fires only after the last iteration sets __loop_continue_<id>=false.", "isDefault": true, "minPriority": 100 }
+      ],
+      "syntheticVariables": [
+        "__loop_continue_<activityId> (boolean, written by dispatcher, read by RouteResolver to suppress the body-forward edge after exhaustion)",
+        "__loop_index_<activityId> (current iteration, 0-indexed)",
+        "__loop_guard_<activityId> (iteration counter cross-checked against maxIterations)"
+      ]
+    },
+    "while": {
+      "required": [
+        { "edge": "body-forward",  "trigger": "ON_SUCCESS",  "description": "From while to the first body activity." },
+        { "edge": "body-back",     "trigger": "ON_SUCCESS",  "description": "From the last body activity back to the while activity." },
+        { "edge": "loop-exit",     "trigger": "ON_NO_MATCH", "description": "From while to the activity after the loop. Fires when the condition evaluates false.", "isDefault": true, "minPriority": 100 }
+      ],
+      "syntheticVariables": [
+        "__loop_continue_<activityId>",
+        "__loop_guard_<activityId>"
+      ]
+    },
+    "batch": {
+      "required": [
+        { "edge": "body-forward",  "trigger": "ON_SUCCESS",  "description": "From batch to the first body activity." },
+        { "edge": "body-back",     "trigger": "ON_SUCCESS",  "description": "From the last body activity back to the batch activity." },
+        { "edge": "loop-exit",     "trigger": "ON_NO_MATCH", "description": "From batch to the activity after the loop.", "isDefault": true, "minPriority": 100 }
+      ],
+      "syntheticVariables": [
+        "__loop_continue_<activityId>",
+        "__loop_guard_<activityId>"
+      ]
+    },
+    "ai_reasoning": {
+      "constraints": [
+        "pluginName MUST be null (the activity is not a plugin; the engine routes to its own LLM call).",
+        "properties.prompt is required (non-blank string).",
+        "outputVariables[] must declare at least one variable."
+      ]
+    },
+    "route": {
+      "constraints": [
+        "pluginName MUST be null.",
+        "Outgoing transitions either use ON_SUCCESS with a SpEL condition (XOR/exclusive gateway) or fan out to multiple ON_SUCCESS edges (AND-split). Receivers of an AND-split must set andJoin=true on the join node."
+      ]
+    }
+  }
+}

@@ -33,6 +33,7 @@ public class WorkflowAlignmentJudge {
     private final SkillRegistryService skillRegistryService;
     private final WorkflowProposalProperties properties;
     private final ObjectMapper objectMapper;
+    private final String engineContractBlock;
 
     public WorkflowAlignmentJudge(ModelProviderRouter modelProviderRouter,
                                   SkillRegistryService skillRegistryService,
@@ -42,6 +43,33 @@ public class WorkflowAlignmentJudge {
         this.skillRegistryService = skillRegistryService;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.engineContractBlock = loadEngineContractBlock();
+    }
+
+    /**
+     * Loads the workflow-architect machine-readable contracts
+     * ({@code doc/plugins.json}, {@code doc/tools.json},
+     * {@code doc/spel-rules.json}) once at construction so they can be
+     * injected verbatim into the judge prompt. Keeping the LLM judge and
+     * the validator on the same source-of-truth eliminates a class of
+     * subtle divergences (judge says "looks fine" on a draft the validator
+     * rejects, or vice versa).
+     */
+    private static String loadEngineContractBlock() {
+        StringBuilder sb = new StringBuilder();
+        for (String path : List.of(
+                "default-skills/workflow-architect/doc/plugins.json",
+                "default-skills/workflow-architect/doc/tools.json",
+                "default-skills/workflow-architect/doc/spel-rules.json")) {
+            try (java.io.InputStream in =
+                         new org.springframework.core.io.ClassPathResource(path).getInputStream()) {
+                String body = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                sb.append("```json ").append(path).append("\n").append(body).append("\n```\n\n");
+            } catch (Exception ex) {
+                log.warn("[WorkflowAlignmentJudge] could not embed contract file {}: {}", path, ex.getMessage());
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -190,6 +218,24 @@ public class WorkflowAlignmentJudge {
                     regardless of whether the rest of the activity looks
                     correct. Never suggest a `T(...)` expression as a fix.
 
+                    Engine contracts (authoritative, machine-readable — the
+                    structural validator enforces these and so must you):
+
+                    %s
+
+                    Specific envelope critique rule (override anything else
+                    on this topic): If you see a `#<var>.<field>` reference
+                    and `<var>` is produced by a `CodeExecPlugin` activity,
+                    the path MUST go through `.output` (the plugin wraps in
+                    {success, output, stdout, stderr}). If `<var>` is
+                    produced by any other plugin (AgentToolPlugin,
+                    HttpRequestPlugin, McpToolPlugin, AiChatPlugin,
+                    SkillToolPlugin), the path MUST NOT start with
+                    `.output` — those return raw. Mixing these up is high
+                    severity. For `decisionTableEvaluate` specifically,
+                    output column values live under `.outputs.<column>`
+                    (plural), not `.output`.
+
                     Output contract — return ONLY this JSON, no prose, no fences:
 
                     {
@@ -217,6 +263,9 @@ public class WorkflowAlignmentJudge {
                     --- Execution log (PRIORITY 3) ---
                     %s
                     """.formatted(
+                            engineContractBlock == null || engineContractBlock.isBlank()
+                                    ? "(engine contracts unavailable)"
+                                    : engineContractBlock,
                             skillsBlob,
                             classifierReason == null || classifierReason.isBlank()
                                     ? "(no classifier reasoning available)"

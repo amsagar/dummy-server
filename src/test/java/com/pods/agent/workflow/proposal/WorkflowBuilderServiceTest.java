@@ -526,7 +526,7 @@ class WorkflowBuilderServiceTest {
         Fixture(Path workspace) {
             this.workspace = workspace;
             ObjectMapper mapper = new ObjectMapper();
-            WorkflowJsonValidator validator = new WorkflowJsonValidator(mapper);
+            WorkflowJsonValidator validator = new WorkflowJsonValidator(mapper, new WorkflowContractCatalog(mapper));
             // The builder asks the workspaceService for the workspace and the
             // ensureFile call for the draft path. Everything else (LLM,
             // alignment) is mocked.
@@ -576,7 +576,8 @@ class WorkflowBuilderServiceTest {
                     validator,
                     alignmentJudge,
                     properties,
-                    mapper);
+                    mapper,
+                    new WorkflowContractCatalog(mapper));
         }
 
         WorkflowProposal persistedPending() {

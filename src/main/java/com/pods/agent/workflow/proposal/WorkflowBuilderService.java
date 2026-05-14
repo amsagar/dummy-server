@@ -83,6 +83,7 @@ public class WorkflowBuilderService {
     private final WorkflowAlignmentJudge alignmentJudge;
     private final WorkflowProposalProperties properties;
     private final ObjectMapper objectMapper;
+    private final WorkflowContractCatalog contractCatalog;
 
     /**
      * Package-private hook that lets tests substitute the LLM agent
@@ -102,7 +103,8 @@ public class WorkflowBuilderService {
                                   WorkflowJsonValidator validator,
                                   WorkflowAlignmentJudge alignmentJudge,
                                   WorkflowProposalProperties properties,
-                                  ObjectMapper objectMapper) {
+                                  ObjectMapper objectMapper,
+                                  WorkflowContractCatalog contractCatalog) {
         this.repo = repo;
         this.processDefService = processDefService;
         this.modelProviderRouter = modelProviderRouter;
@@ -114,6 +116,7 @@ public class WorkflowBuilderService {
         this.alignmentJudge = alignmentJudge;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.contractCatalog = contractCatalog;
     }
 
     /**
@@ -779,11 +782,13 @@ public class WorkflowBuilderService {
 
                 Mandatory step order on the FIRST attempt:
                   1. skill_load(name="workflow-architect"). Read the
-                     "Reading patterns" + "AgentToolPlugin call-sites" rules
-                     and any template files it surfaces (especially
-                     `templates/foreach-accumulate.json` and
-                     `references/workflow-patterns.md`) BEFORE you write any
-                     JSON. If the Phase-1 classifier reasoning passed in the
+                     "Reading patterns" + "AgentToolPlugin call-sites" rules.
+                     Then consult `doc/template-index.json` — it lists every
+                     pattern template with a one-line description and the
+                     features it demonstrates. Pick the ONE template whose
+                     intent matches the user request; read THAT template
+                     and (when applicable) the reference doc it points to.
+                     If the Phase-1 classifier reasoning passed in the
                      user message mentions loop / for each / batch /
                      parallel, the foreach-accumulate template is your
                      starting skeleton — adapt it; do NOT enumerate calls.
@@ -801,6 +806,59 @@ public class WorkflowBuilderService {
                      ONLY adapt field values. Do not invent a different
                      activity layout — the alignment judge and the
                      structural validator both check against that skeleton.
+                  3a. ENVELOPE PRE-CHECK (mandatory before writing any
+                     SpEL that reads an upstream activity's output). For
+                     every `#variable` you plan to dereference, look up
+                     its producing activity's `pluginName` in
+                     `default-skills/workflow-architect/doc/plugins.json`:
+                       - pluginName=CodeExecPlugin  -> envelopePath="output";
+                         access via `#var.output.<field>`.
+                       - pluginName=AgentToolPlugin / HttpRequestPlugin /
+                         McpToolPlugin / AiChatPlugin / SkillToolPlugin
+                         -> envelopePath="raw"; access via `#var.<field>`
+                         with NO `.output` prefix.
+                     Reference doc: `references/output-envelopes.md`.
+                     The validator's `result_expression_envelope_mismatch`
+                     rule will reject the draft if you mix these up.
+                  3b. TOOL-OUTPUT SHAPE PRE-CHECK (mandatory before writing
+                     any SpEL that reads an AgentToolPlugin tool's output).
+                     For each `tool` activity using `AgentToolPlugin`, look
+                     up its `toolName` in
+                     `default-skills/workflow-architect/doc/tools.json`. If
+                     the tool is listed, use ONLY the documented top-level
+                     fields. The single most important case:
+                     `decisionTableEvaluate` returns
+                     `{matched, matchedRows, outputs}`. Column values are
+                     under `.outputs.<columnName>` (plural) — NOT
+                     `.output.<column>`, NOT directly on the result.
+                     Reference doc: `references/decision-tables.md`.
+                  3c. FORBIDDEN SPEL TOKEN SCAN (mandatory). Read
+                     `default-skills/workflow-architect/doc/spel-rules.json`
+                     once. Then scan every `#{...}` template and every
+                     transition.condition in your draft for these tokens
+                     and replace them with the documented alternative:
+                       - `T(...)`            -> pre-compute in a CodeExec step.
+                       - `new Foo(...)`      -> pre-compute in CodeExec.
+                       - `@beanName`         -> not reachable from SpEL.
+                       - `.getClass()`       -> drop.
+                       - `.class` / `.classLoader` -> drop.
+                       - `{}` used as map    -> use `{:}` (empty map literal).
+                     The validator's `forbidden_spel_token` rule will
+                     reject the draft otherwise. Reference doc:
+                     `references/spel-sandbox.md`.
+                  3d. LOOP WIRING CHECK (mandatory for every `foreach`,
+                     `while`, or `batch` activity). Confirm THREE
+                     transitions exist for each loop activity:
+                       (1) body-forward: ON_SUCCESS from the loop activity
+                           to the first body activity.
+                       (2) body-back:    ON_SUCCESS from the LAST body
+                           activity BACK to the loop activity.
+                       (3) loop-exit:    ON_NO_MATCH from the loop activity
+                           to the activity after the loop, with
+                           isDefault=true and priority>=100.
+                     Missing any of these causes
+                     `foreach_wiring_incomplete`. Reference doc:
+                     `references/foreach-wiring.md`.
                   4. Compose the JSON and `write` it to the draft path
                      above. If a skeleton was provided in step 3, your
                      draft MUST contain at least every (toolName,
@@ -980,10 +1038,19 @@ public class WorkflowBuilderService {
 
     private String renderStructuralFeedback(List<ValidationError> errors) {
         StringBuilder sb = new StringBuilder("Structural validation failures:\n");
+        java.util.Set<String> seenRecipes = new java.util.LinkedHashSet<>();
         for (ValidationError e : errors) {
             sb.append("  - [").append(e.code()).append("] ");
             if (e.path() != null) sb.append("at ").append(e.path()).append(": ");
             sb.append(e.message()).append("\n");
+            // Append the catalog's fix recipe once per distinct code so the
+            // builder agent sees a corrective action keyed to the failure,
+            // not just the failure text. Repeating the recipe per error of
+            // the same code would waste prompt budget.
+            if (contractCatalog != null && seenRecipes.add(e.code())) {
+                contractCatalog.fixRecipe(e.code()).ifPresent(recipe ->
+                        sb.append("    fix: ").append(recipe).append("\n"));
+            }
         }
         return sb.toString();
     }

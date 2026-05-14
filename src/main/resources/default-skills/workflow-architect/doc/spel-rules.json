@@ -1,0 +1,40 @@
+{
+  "$comment": "SecureSpel sandbox restrictions. Each rule is enforced by WorkflowJsonValidator.forbidden_spel_token. The 'pattern' is a Java regex applied to every #{...} expression and every transition.condition. When a match is found the validator emits an error keyed on 'code' with the 'replacement' hint surfaced to the LLM. Update this file in lockstep with SecureSpelEvaluator.java.",
+  "rules": [
+    {
+      "code": "spel_type_lookup_forbidden",
+      "pattern": "T\\s*\\(",
+      "description": "T(java.lang.Foo) style type references are forbidden by the SpEL sandbox. The evaluator throws 'Access to types is forbidden' at parse time.",
+      "replacement": "Pre-compute the value in a CodeExecPlugin step (full Java available there) and read it as a workflow variable from SpEL. Common case: T(java.time.LocalDate).now() -> compute todayIso in a CodeExec activity, set it as an output variable."
+    },
+    {
+      "code": "spel_constructor_forbidden",
+      "pattern": "\\bnew\\s+[A-Za-z_][\\w.]*\\s*\\(",
+      "description": "Constructor calls (new Foo(...)) are forbidden by the SpEL sandbox.",
+      "replacement": "Construct the value in a CodeExecPlugin step and read it via a workflow variable. Inline construction in SpEL is not supported."
+    },
+    {
+      "code": "spel_bean_lookup_forbidden",
+      "pattern": "@[A-Za-z_][\\w]*",
+      "description": "Spring bean references (@beanName) are forbidden by the SpEL sandbox.",
+      "replacement": "Beans are not accessible from workflow SpEL. Use AgentToolPlugin / SkillToolPlugin / CodeExecPlugin to reach the capability you need."
+    },
+    {
+      "code": "spel_getclass_forbidden",
+      "pattern": "\\.getClass\\s*\\(",
+      "description": "Calling .getClass() is forbidden by the SpEL sandbox.",
+      "replacement": "Type inspection is not allowed at SpEL level. Branch on the actual value (e.g. check a field) instead."
+    },
+    {
+      "code": "spel_class_property_forbidden",
+      "pattern": "\\.class(?:Loader)?\\b",
+      "description": "Reading .class or .classLoader on a SpEL object is forbidden.",
+      "replacement": "Drop the .class / .classLoader access. Use a field on the value itself."
+    }
+  ],
+  "notes": [
+    "SpEL inline-list literal: {} is an EMPTY LIST, not an empty Map. To express an empty map use {:} (the colon disambiguates).",
+    "Null-safe navigation is allowed and encouraged: #var?.field. The Elvis operator (?:) provides fallback values: (#optional ?: 'default').",
+    "Workflow variables are referenced with the # prefix: #myVar. Without the #, the token is interpreted as a property of the root context and will resolve to null."
+  ]
+}

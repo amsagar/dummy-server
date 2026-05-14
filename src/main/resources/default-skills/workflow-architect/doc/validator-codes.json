@@ -1,0 +1,81 @@
+{
+  "$comment": "Per-validator-error fix recipes. WorkflowJsonValidator emits errors keyed on 'code'. The retry-feedback formatter in WorkflowBuilderService appends the matching fixRecipe so the builder LLM sees a concrete corrective sentence on each retry, not just the code name. Keep entries in lockstep with WorkflowJsonValidator's emitted codes.",
+  "codes": [
+    {
+      "code": "parse_failed",
+      "fixRecipe": "The draft is not valid JSON. Re-read your draft file, repair the syntax (unbalanced braces, trailing commas, smart quotes), and edit a minimal fix. Do NOT call write — use edit/apply_patch."
+    },
+    {
+      "code": "proposal_not_generic",
+      "fixRecipe": "The draft contains a run-specific literal (UUID or 4+ digit number) copied from the user prompt. Replace it with a top-level workflow variable (e.g. orderId, sessionId) declared in variables[] and referenced as #variableName. The skeleton is meant to apply to ANY input value of that type."
+    },
+    {
+      "code": "activity_type_invalid",
+      "fixRecipe": "Set the activity's type to one of: normal, tool, route, subflow, foreach, while, batch, ai_reasoning. See workflow-architect/references/activity-types.md."
+    },
+    {
+      "code": "route_activity_plugin_not_allowed",
+      "fixRecipe": "Set pluginName to null on this route activity. Routes are control-flow only — they evaluate transition conditions; they do not call plugins."
+    },
+    {
+      "code": "loop_activity_missing_max_iterations",
+      "fixRecipe": "Add a positive integer to this loop activity's properties.maxIterations (e.g. 1000). The engine cuts the loop short if it exceeds this guard."
+    },
+    {
+      "code": "ai_reasoning_missing_prompt",
+      "fixRecipe": "Add a non-blank properties.prompt to this ai_reasoning activity. The prompt is what the LLM sees — phrase it as a clear instruction with any #variable interpolations needed."
+    },
+    {
+      "code": "ai_reasoning_missing_output_variable",
+      "fixRecipe": "Add at least one entry to outputVariables[] on this ai_reasoning activity. Downstream steps access the LLM reply via #thatVariable.text."
+    },
+    {
+      "code": "ai_reasoning_plugin_not_allowed",
+      "fixRecipe": "Set pluginName to null on this ai_reasoning activity. The engine routes ai_reasoning through its own LLM path, not through a registered plugin."
+    },
+    {
+      "code": "transition_trigger_required",
+      "fixRecipe": "Add a trigger field to this transition. Use one of: ON_SUCCESS (default), ON_NO_MATCH (loop exit, fall-through default), ON_ERROR, ON_TIMEOUT, ON_VALIDATION_ERROR."
+    },
+    {
+      "code": "transition_trigger_invalid",
+      "fixRecipe": "Normalize trigger to one of: ON_SUCCESS, ON_NO_MATCH, ON_ERROR, ON_TIMEOUT, ON_VALIDATION_ERROR. The validator already up-cases and replaces dashes/spaces with underscores."
+    },
+    {
+      "code": "enumeration_antipattern",
+      "fixRecipe": "Replace the N hardcoded tool activities with ONE foreach activity whose body is a single tool activity that reads the varying value from #currentItem. Then add an accumulator CodeExecPlugin activity to collect per-iteration results. See workflow-architect/templates/foreach-accumulate.json."
+    },
+    {
+      "code": "template_structure_drift",
+      "fixRecipe": "The skill shipped a workflow skeleton under templates/*.json. Your draft must contain all activity ids/types and (toolName, pluginName) pairs from that skeleton. Re-read the skeleton and edit field values rather than reshaping the graph."
+    },
+    {
+      "code": "engine_mapping_failed",
+      "fixRecipe": "The graph failed to convert to a domain ProcessDefinition. Check for: missing isStart=true on the entry route, dangling transition endpoints (fromActivityId or toActivityId references a non-existent activity id), or duplicate activity ids."
+    },
+    {
+      "code": "result_expression_envelope_mismatch",
+      "fixRecipe": "Use the correct envelope path for the producing plugin. CodeExecPlugin wraps its return in {success, output, stdout, stderr} — access via #var.output.<field>. AgentToolPlugin / HttpRequestPlugin / McpToolPlugin / AiChatPlugin / SkillToolPlugin return raw — access via #var.<field> with NO .output prefix. See workflow-architect/references/output-envelopes.md."
+    },
+    {
+      "code": "tool_output_shape_mismatch",
+      "fixRecipe": "Read the documented outputShape for this tool in workflow-architect/doc/tools.json. The most common mistake: decisionTableEvaluate output columns live under .outputs (plural), not .output and not at the top level. See workflow-architect/references/decision-tables.md."
+    },
+    {
+      "code": "forbidden_spel_token",
+      "fixRecipe": "Replace the forbidden token with the documented alternative in workflow-architect/doc/spel-rules.json. Most common cases: T(...) -> pre-compute in CodeExec; new Foo(...) -> CodeExec; @bean -> SkillToolPlugin or AgentToolPlugin; {} as map -> use {:} for an empty map; .getClass() / .class -> drop."
+    },
+    {
+      "code": "foreach_wiring_incomplete",
+      "fixRecipe": "Loop activities need THREE transitions: (1) body-forward ON_SUCCESS from the loop activity to the first body activity, (2) body-back ON_SUCCESS from the LAST body activity back to the loop activity, (3) loop-exit ON_NO_MATCH from the loop activity to the activity after the loop (with isDefault=true and priority>=100). Missing any one of these breaks iteration."
+    },
+    {
+      "code": "undeclared_variable_reference",
+      "fixRecipe": "The expression references a #variable that is neither declared at top-level variables[] nor produced by any activity's outputVariables[]. Either declare it in variables[] (for workflow inputs) or add it to the producing activity's outputVariables (typically java.util.Map for tool/code outputs)."
+    },
+    {
+      "code": "workflow_json_null",
+      "fixRecipe": "The draft is empty or unreadable after parse. Read your draft file, re-emit valid JSON via edit/apply_patch (no write on retry)."
+    }
+  ]
+}

@@ -14,67 +14,6 @@ required tool call must complete before you write your final answer.** Output
 that summarizes incomplete work is a bug — keep calling tools until the
 checklist in Step 6 is satisfied, then summarize.
 
-## Building this as a workflow?
-
-If you are the workflow builder (synthesizing a ProcessDefDto JSON, not
-running tools interactively), start from
-`templates/validate-order-workflow.json` in this skill. It encodes all
-seven steps with the correct activity types, foreach loops for Steps 4
-and 5, the ItemCode→ServiceCode mapping with Sequence sort in Step 3, and
-the Step 7 output schema. Edit field values to match the order under
-test — but **do not delete activities, do not change the foreach wiring,
-and do not collapse Step 5 into an enumeration of ContainerAvailability
-calls**. The structural validator and alignment judge both reject those.
-When `toCheck` is empty the foreach naturally produces zero invocations;
-that is the correct construct, not an omitted step.
-
-### CodeExec envelope pattern (do NOT remove)
-
-Every `CodeExecPlugin` activity in this skeleton returns a Java `Map` or
-`List` from its `code`, but the plugin wraps that return as
-`{success, output, stdout, stderr}` before the workflow engine stores
-it. The engine then assigns the **entire envelope** to the activity's
-single declared `outputVariables[0].name` — extra outputVariables
-entries are ignored. Downstream activities read the actual payload via
-`.output` (e.g. `#legData.output.legLines`, `#toCheck.output`,
-`#serviceabilityResults?.output`).
-
-If you split `prepareLegLines` into multiple outputVariables thinking
-the engine will destructure the returned map, the runtime will fail
-with `decisionTableEvaluate is missing required inputs` and
-`foreach collection must be a list`, because only the first variable
-gets populated and the others stay null. The fix is **one
-outputVariable per CodeExec activity, plus `.output` sub-paths
-downstream** — same pattern workflow-architect's
-`templates/foreach-accumulate.json` uses for `#details?.output`.
-
-### SpEL sandbox — NO `T(...)` type references
-
-The workflow engine evaluates `#{ ... }` expressions inside a SpEL
-sandbox that **forbids type references**. Any `T(SomeClass)` syntax
-fails at PARSE time with
-`EvaluationException: Access to types is forbidden`, before the
-expression runs — Elvis short-circuit (`?:`) does NOT rescue it.
-The whole activity fails with `errorClass=EXPRESSION`, the tool is
-never invoked, and accumulators that branch on the (null) result
-silently record skipped rows.
-
-The skeleton avoids the trap in two ways:
-- **String-of-anything**: `(#x == null ? null : '' + #x)` instead of
-  `T(String).valueOf(#x)`. SpEL string concatenation with `''`
-  coerces numbers/booleans to their `toString()` form without a type
-  reference.
-- **Date computation**: today's ISO date is computed inside the
-  `prepareContainerCheck` CodeExec (`java.time.LocalDate.now()` — fine
-  inside CodeExec because that's plain Java, not SpEL) and stored on
-  each toCheck line as `_referenceDate`. The downstream
-  `callContainerAvailability` SpEL just reads
-  `#currentContainerLine._referenceDate` — a property access, no type.
-
-Pattern for future skills: **anything that needs `T(...)` in SpEL must
-be pre-computed in a CodeExec activity** and exposed as a plain field
-the downstream SpEL can read.
-
 ## Required resources
 
 | Resource | Type | When to call |
@@ -247,14 +186,6 @@ For each line in `toCheck`, call `ContainerAvailability` with:
 Collect entries from `GeneralAvailabilityDates` where `IsAvailableCS === true`
 and `ReasonCode` is empty. On error, mark the line `status: "unavailable"`
 with the error detail.
-
-**Workflow form:** Step 5 is a `foreach` over `toCheck` with exactly one
-`ContainerAvailability` `AgentToolPlugin` activity in the body — never
-enumerate the calls as N separate activities, never omit the foreach when
-`toCheck` is empty (an empty-collection foreach is the correct construct,
-not a skipped step). See `templates/validate-order-workflow.json` for the
-exact JSON shape (`iterateContainerAvailability` foreach +
-`callContainerAvailability` body + `accumulateContainer` accumulator).
 
 ---
 

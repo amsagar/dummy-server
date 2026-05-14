@@ -58,9 +58,23 @@ public class WorkflowJsonValidator {
     static final int ENUMERATION_THRESHOLD = 3;
 
     private final ObjectMapper objectMapper;
+    private final WorkflowContractCatalog contractCatalog;
 
-    public WorkflowJsonValidator(ObjectMapper objectMapper) {
+    /**
+     * SpEL variable reference inside an expression string: matches
+     * {@code #varName.firstField} so we can ask the catalog whether the
+     * envelope path the author chose for {@code firstField} matches the
+     * producing activity's plugin contract.
+     */
+    private static final Pattern SPEL_VAR_DEREF = Pattern.compile(
+            "#([A-Za-z_][A-Za-z0-9_]*)\\s*\\??\\.([A-Za-z_][A-Za-z0-9_]*)");
+
+    private static final Set<String> CODE_EXEC_ENVELOPE_FIELDS = Set.of(
+            "output", "success", "stdout", "stderr");
+
+    public WorkflowJsonValidator(ObjectMapper objectMapper, WorkflowContractCatalog contractCatalog) {
         this.objectMapper = objectMapper;
+        this.contractCatalog = contractCatalog;
     }
 
     /**
@@ -274,7 +288,328 @@ public class WorkflowJsonValidator {
             }
         }
         validateNoEnumerationAntipattern(dto, errors);
+        validateExpressionEnvelopes(dto, errors);
+        validateForbiddenSpelTokens(dto, errors);
+        validateForeachWiring(dto, errors);
+        validateUndeclaredVariableReferences(dto, errors);
     }
+
+    /**
+     * Scans every expression string against
+     * {@code default-skills/workflow-architect/doc/spel-rules.json} and emits
+     * {@code forbidden_spel_token} for each match. The rules mirror what
+     * {@code SecureSpelEvaluator} rejects at parse/runtime (T(...), new,
+     * @bean, .getClass, .class). Catching them in the validator means the
+     * builder LLM sees a precise corrective sentence on the same attempt
+     * rather than burning a retry on a runtime VALIDATION error.
+     */
+    private void validateForbiddenSpelTokens(ProcessDefDto dto, List<ValidationError> errors) {
+        if (dto == null || contractCatalog == null) return;
+        var rules = contractCatalog.spelRules();
+        if (rules.isEmpty()) return;
+        for (ExpressionLocation loc : collectExpressionLocations(dto)) {
+            for (var rule : rules) {
+                if (rule.pattern().matcher(loc.expression).find()) {
+                    errors.add(new ValidationError(
+                            "forbidden_spel_token",
+                            "expression at " + loc.where + " contains a SecureSpel-forbidden token ("
+                                    + rule.code() + "): " + rule.description()
+                                    + " Replacement: " + rule.replacement(),
+                            loc.where));
+                }
+            }
+        }
+    }
+
+    /**
+     * Loop activities (foreach / while / batch) need THREE transitions to
+     * iterate correctly: a body-forward {@code ON_SUCCESS} edge, a body-back
+     * {@code ON_SUCCESS} edge from the last body activity to the loop
+     * activity, and a loop-exit {@code ON_NO_MATCH} edge (typically priority
+     * >= 100 with isDefault=true). Drafts missing any of these get a
+     * {@code foreach_wiring_incomplete} error. We compute the body-back edge
+     * by checking whether any transition's target is this loop activity
+     * (any inbound edge counts — the LLM may have wired through several
+     * body steps; only the back-edge into the foreach matters).
+     */
+    private void validateForeachWiring(ProcessDefDto dto, List<ValidationError> errors) {
+        if (dto == null || dto.activities() == null || dto.transitions() == null) return;
+        Set<String> loopIds = new LinkedHashSet<>();
+        for (ProcessDefDto.ActivityDto a : dto.activities()) {
+            if (a == null || a.type() == null) continue;
+            if (isLoopType(a.type().toLowerCase(Locale.ROOT))) loopIds.add(a.id());
+        }
+        if (loopIds.isEmpty()) return;
+        Map<String, Boolean> hasBodyForward = new LinkedHashMap<>();
+        Map<String, Boolean> hasLoopExit = new LinkedHashMap<>();
+        Map<String, Boolean> hasBodyBack = new LinkedHashMap<>();
+        for (String id : loopIds) {
+            hasBodyForward.put(id, false);
+            hasLoopExit.put(id, false);
+            hasBodyBack.put(id, false);
+        }
+        for (ProcessDefDto.TransitionDto t : dto.transitions()) {
+            if (t == null) continue;
+            String trigger = t.trigger() == null ? "" : t.trigger().trim().toUpperCase(Locale.ROOT);
+            String from = t.fromActivityId();
+            String to = t.toActivityId();
+            if (loopIds.contains(from)) {
+                if ("ON_SUCCESS".equals(trigger)) hasBodyForward.put(from, true);
+                else if ("ON_NO_MATCH".equals(trigger)) hasLoopExit.put(from, true);
+            }
+            if (loopIds.contains(to) && "ON_SUCCESS".equals(trigger) && !loopIds.contains(from)) {
+                // Back-edge from a body activity into the loop activity.
+                hasBodyBack.put(to, true);
+            }
+        }
+        for (String id : loopIds) {
+            List<String> missing = new java.util.ArrayList<>();
+            if (Boolean.FALSE.equals(hasBodyForward.get(id))) missing.add("body-forward (ON_SUCCESS from " + id + " to its body)");
+            if (Boolean.FALSE.equals(hasBodyBack.get(id))) missing.add("body-back (ON_SUCCESS from last body activity back to " + id + ")");
+            if (Boolean.FALSE.equals(hasLoopExit.get(id))) missing.add("loop-exit (ON_NO_MATCH default priority>=100 from " + id + " to the next activity)");
+            if (!missing.isEmpty()) {
+                errors.add(new ValidationError(
+                        "foreach_wiring_incomplete",
+                        "loop activity '" + id + "' is missing required transition(s): "
+                                + String.join("; ", missing)
+                                + ". See workflow-architect/references/foreach-wiring.md.",
+                        "activities[" + id + "]"));
+            }
+        }
+    }
+
+    /**
+     * Every {@code #identifier} referenced in any expression string must
+     * resolve to either a declared top-level workflow variable or the output
+     * variable of some activity. Catches typos and stale renames before
+     * runtime. Skips well-known synthetic identifiers (loop guards) and
+     * convention identifiers like {@code item} / {@code index} that the
+     * engine seeds when an itemVar/indexVar wasn't explicitly named.
+     */
+    private void validateUndeclaredVariableReferences(ProcessDefDto dto, List<ValidationError> errors) {
+        if (dto == null) return;
+        Set<String> declared = new LinkedHashSet<>();
+        if (dto.variables() != null) {
+            for (ProcessDefDto.VariableSpecDto v : dto.variables()) {
+                if (v != null && v.name() != null) declared.add(v.name());
+            }
+        }
+        if (dto.activities() != null) {
+            for (ProcessDefDto.ActivityDto a : dto.activities()) {
+                if (a == null) continue;
+                if (a.outputVariables() != null) {
+                    for (ProcessDefDto.VariableSpecDto v : a.outputVariables()) {
+                        if (v != null && v.name() != null) declared.add(v.name());
+                    }
+                }
+                // Loop activities seed itemVar/indexVar/batchVar/batchIndexVar
+                // as accessible variables during body execution.
+                if (a.properties() != null) {
+                    for (String key : List.of("itemVar", "indexVar", "batchVar", "batchIndexVar")) {
+                        Object v = a.properties().get(key);
+                        if (v instanceof String s && !s.isBlank()) declared.add(s.trim());
+                    }
+                }
+            }
+        }
+        // Engine-seeded defaults when itemVar/indexVar are not specified.
+        declared.add("item");
+        declared.add("index");
+        declared.add("batchItems");
+        declared.add("batchIndex");
+        declared.add("input"); // CodeExec body-bind
+
+        Pattern varRef = Pattern.compile("#([A-Za-z_][A-Za-z0-9_]*)");
+        for (ExpressionLocation loc : collectExpressionLocations(dto)) {
+            var m = varRef.matcher(loc.expression);
+            Set<String> reported = new LinkedHashSet<>();
+            while (m.find()) {
+                String name = m.group(1);
+                if (declared.contains(name)) continue;
+                if (name.startsWith("__loop_")) continue; // synthetic loop guards
+                if (!reported.add(name)) continue;
+                errors.add(new ValidationError(
+                        "undeclared_variable_reference",
+                        "expression at " + loc.where + " references #" + name
+                                + " but no top-level variable and no activity outputVariables entry has that name."
+                                + " Either declare it in variables[] (for workflow inputs) or add it to the producing activity's outputVariables.",
+                        loc.where));
+            }
+        }
+    }
+
+    /**
+     * Walks every SpEL expression in the workflow and flags two engine-trap
+     * mistakes the LLM tends to make without a code-side check:
+     *
+     * <ol>
+     *   <li>{@code result_expression_envelope_mismatch} —
+     *       {@code CodeExecPlugin} wraps its return in
+     *       {@code {success, output, stdout, stderr}}, so authors MUST access
+     *       its result via {@code #var.output.<field>}. Every other plugin
+     *       returns its body directly with NO envelope, so authors MUST NOT
+     *       prefix with {@code .output}. Mixing these up is the root cause
+     *       of the {@code journeyType} bug that landed against the Validate
+     *       Pods Order workflow — the model wrote
+     *       {@code #legSequenceResult.output.journeyType} where
+     *       {@code legSequenceResult} was an {@code AgentToolPlugin}
+     *       (decisionTableEvaluate) result with no envelope.</li>
+     *   <li>{@code tool_output_shape_mismatch} — for
+     *       {@code AgentToolPlugin} activities whose {@code toolName} is
+     *       listed in
+     *       {@code default-skills/workflow-architect/doc/tools.json}, flag
+     *       any expression that accesses a top-level field not in the
+     *       documented output shape. {@code decisionTableEvaluate} is the
+     *       seed entry: its output fields live under {@code .outputs}
+     *       (plural), not {@code .output} (singular) and not at the top
+     *       level.</li>
+     * </ol>
+     *
+     * <p>Unknown plugins/tools (not in the contract catalog) are silently
+     * skipped so new plugins don't break validation before their contract
+     * is documented. Variables not produced by any activity (top-level
+     * workflow inputs declared in {@code variables[]} but never written by
+     * an output-variable) are also skipped — those are user-provided
+     * domain objects whose shape we don't know.
+     */
+    private void validateExpressionEnvelopes(ProcessDefDto dto, List<ValidationError> errors) {
+        if (dto == null || contractCatalog == null) return;
+        Map<String, VariableProducer> producerByVar = mapVariableProducers(dto);
+        if (producerByVar.isEmpty()) return;
+
+        for (ExpressionLocation loc : collectExpressionLocations(dto)) {
+            var matcher = SPEL_VAR_DEREF.matcher(loc.expression);
+            // Dedup repeated occurrences within the same expression — one
+            // error per (location, var, firstField) is enough to act on.
+            Set<String> reported = new LinkedHashSet<>();
+            while (matcher.find()) {
+                String varName = matcher.group(1);
+                String firstField = matcher.group(2);
+                VariableProducer producer = producerByVar.get(varName);
+                if (producer == null) continue;
+                String dedupKey = varName + "." + firstField;
+                if (!reported.add(dedupKey)) continue;
+
+                var pluginContract = contractCatalog.plugin(producer.pluginName);
+                if (pluginContract.isPresent()) {
+                    boolean wraps = pluginContract.get().wrapsInEnvelope();
+                    if (wraps && !CODE_EXEC_ENVELOPE_FIELDS.contains(firstField)) {
+                        errors.add(new ValidationError(
+                                "result_expression_envelope_mismatch",
+                                "expression at " + loc.where + " reads #" + varName + "." + firstField
+                                        + " but #" + varName + " is produced by " + producer.pluginName
+                                        + " which wraps its return in {success, output, stdout, stderr}."
+                                        + " Use #" + varName + ".output." + firstField + " instead."
+                                        + " See workflow-architect/references/output-envelopes.md.",
+                                loc.where));
+                    } else if (!wraps && "output".equals(firstField)) {
+                        errors.add(new ValidationError(
+                                "result_expression_envelope_mismatch",
+                                "expression at " + loc.where + " reads #" + varName + ".output.* but #"
+                                        + varName + " is produced by " + producer.pluginName
+                                        + " which returns its body directly (no envelope)."
+                                        + " Access fields directly: #" + varName + ".<field>."
+                                        + " See workflow-architect/references/output-envelopes.md.",
+                                loc.where));
+                    }
+                }
+
+                if (producer.toolName != null && (pluginContract.isEmpty() || !pluginContract.get().wrapsInEnvelope())) {
+                    var toolContract = contractCatalog.tool(producer.toolName);
+                    if (toolContract.isPresent()
+                            && !toolContract.get().outputTopLevelKeys().isEmpty()
+                            && !toolContract.get().outputTopLevelKeys().contains(firstField)) {
+                        errors.add(new ValidationError(
+                                "tool_output_shape_mismatch",
+                                "expression at " + loc.where + " reads #" + varName + "." + firstField
+                                        + " but tool '" + producer.toolName + "' returns top-level keys "
+                                        + toolContract.get().outputTopLevelKeys()
+                                        + ". Hint: " + String.join("; ", toolContract.get().accessorHints())
+                                        + ". See workflow-architect/references/decision-tables.md.",
+                                loc.where));
+                    }
+                }
+            }
+        }
+    }
+
+    /** Maps a workflow variable name to the activity that produced it. */
+    private Map<String, VariableProducer> mapVariableProducers(ProcessDefDto dto) {
+        Map<String, VariableProducer> out = new LinkedHashMap<>();
+        if (dto.activities() == null) return out;
+        for (ProcessDefDto.ActivityDto a : dto.activities()) {
+            if (a == null || a.outputVariables() == null || a.outputVariables().isEmpty()) continue;
+            String plugin = a.pluginName();
+            String toolName = null;
+            if (a.properties() != null) {
+                Object t = a.properties().get("toolName");
+                if (t instanceof String s && !s.isBlank()) toolName = s.trim();
+            }
+            for (ProcessDefDto.VariableSpecDto v : a.outputVariables()) {
+                if (v == null || v.name() == null || v.name().isBlank()) continue;
+                out.put(v.name(), new VariableProducer(a.id(), plugin, toolName));
+            }
+        }
+        return out;
+    }
+
+    /** Every place an expression string can live in a workflow. */
+    private List<ExpressionLocation> collectExpressionLocations(ProcessDefDto dto) {
+        List<ExpressionLocation> out = new ArrayList<>();
+        if (dto.activities() != null) {
+            for (ProcessDefDto.ActivityDto a : dto.activities()) {
+                if (a == null) continue;
+                if (a.properties() != null) {
+                    for (Map.Entry<String, Object> e : a.properties().entrySet()) {
+                        addExpressionStringsRecursively(e.getValue(),
+                                "activities[" + a.id() + "].properties." + e.getKey(), out);
+                    }
+                }
+                if (a.deadlineExpression() != null) {
+                    out.add(new ExpressionLocation(a.deadlineExpression(),
+                            "activities[" + a.id() + "].deadlineExpression"));
+                }
+            }
+        }
+        if (dto.transitions() != null) {
+            for (ProcessDefDto.TransitionDto t : dto.transitions()) {
+                if (t == null || t.condition() == null || t.condition().isBlank()) continue;
+                out.add(new ExpressionLocation(t.condition(), "transitions[" + t.id() + "].condition"));
+            }
+        }
+        if (dto.variables() != null) {
+            for (ProcessDefDto.VariableSpecDto v : dto.variables()) {
+                if (v == null || v.defaultExpression() == null) continue;
+                out.add(new ExpressionLocation(v.defaultExpression(),
+                        "variables[" + v.name() + "].defaultExpression"));
+            }
+        }
+        return out;
+    }
+
+    private static void addExpressionStringsRecursively(Object value, String path,
+                                                        List<ExpressionLocation> sink) {
+        if (value == null) return;
+        if (value instanceof String s) {
+            if (!s.isBlank()) sink.add(new ExpressionLocation(s, path));
+            return;
+        }
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                addExpressionStringsRecursively(e.getValue(), path + "." + e.getKey(), sink);
+            }
+            return;
+        }
+        if (value instanceof List<?> list) {
+            for (int i = 0; i < list.size(); i++) {
+                addExpressionStringsRecursively(list.get(i), path + "[" + i + "]", sink);
+            }
+        }
+    }
+
+    private record VariableProducer(String activityId, String pluginName, String toolName) {}
+
+    private record ExpressionLocation(String expression, String where) {}
 
     /**
      * Detects the "N copies of the same tool with hardcoded inputs differing

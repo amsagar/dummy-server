@@ -1,0 +1,37 @@
+{
+  "$comment": "Machine-readable per-tool output schemas for AgentToolPlugin. Read by the LLM (during workflow generation) and by WorkflowJsonValidator's tool_output_shape_mismatch rule. Add an entry here whenever a new agent tool ships with a stable, documented output shape. Tools not listed here are treated as 'shape unknown' — envelope check is skipped.",
+  "tools": [
+    {
+      "name": "decisionTableEvaluate",
+      "summary": "Evaluate a stored DMN-style decision table by name with structured inputs.",
+      "requiredInputKeys": ["tableName"],
+      "optionalInputKeys": ["inputs"],
+      "inputShape": {
+        "tableName": "string (exact name of the stored decision table)",
+        "inputs": "object (map of input-column-name -> value; missing inputs default to null)"
+      },
+      "outputShape": {
+        "matched": "boolean (whether at least one rule fired)",
+        "matchedRows": [
+          {
+            "ruleIndex": "integer",
+            "ruleId": "string",
+            "outputs": "object (per-rule output column values)"
+          }
+        ],
+        "outputs": "object (merged output column values across all matched rules — later rules win for Collect hit-policy)"
+      },
+      "outputAccessor": {
+        "matchedFlag": "#result.matched",
+        "perRuleOutputs": "#result.matchedRows[0].outputs.<columnName>",
+        "mergedOutputs": "#result.outputs.<columnName>",
+        "matchedRuleId": "#result.matchedRows[0].ruleId"
+      },
+      "commonMistakes": [
+        "Accessing .output (singular) — there is no such field. Use .outputs (plural) for the merged map.",
+        "Wrapping in an envelope: #result.output.outputs.<col> is wrong. AgentToolPlugin returns raw — start directly: #result.outputs.<col>.",
+        "Reading journeyType (or any column value) from the top level: #result.journeyType is null. The column value lives under .outputs."
+      ]
+    }
+  ]
+}

@@ -16,7 +16,9 @@ import tools.jackson.databind.ObjectMapper;
  */
 class WorkflowProposalServiceTest {
 
-    private final WorkflowJsonValidator validator = new WorkflowJsonValidator(new ObjectMapper());
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final WorkflowJsonValidator validator = new WorkflowJsonValidator(
+            mapper, new WorkflowContractCatalog(mapper));
 
     @Test
     void validateGenericWorkflowRejectsHardcodedRunLiteral() {
