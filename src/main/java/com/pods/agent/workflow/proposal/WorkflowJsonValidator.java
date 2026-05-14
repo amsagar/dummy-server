@@ -649,7 +649,60 @@ public class WorkflowJsonValidator {
                 hint.append(" Current usage is inside activity '").append(activityId).append("'.");
             }
         }
+        // Paste-ready declaration snippet. Models reliably follow exact
+        // JSON snippets where they thrash on abstract "either declare or
+        // produce" advice (observed in production: agents rename the
+        // variable 3-4 times rather than ever opening variables[]). The
+        // javaClass guess is intentionally permissive (String for ISO
+        // dates and code-suffixed names, Object otherwise) — alignment
+        // judge or a follow-up edit can refine the type when needed.
+        String suggestedClass = guessJavaClassForVariable(variableName);
+        hint.append(" PASTE-READY FIX — add this entry to the workflow's top-level"
+                + " variables[] array (do NOT rename the reference): "
+                + "{\"name\":\"" + variableName + "\",\"javaClass\":\""
+                + suggestedClass + "\",\"defaultExpression\":null,\"required\":false}.");
         return hint.toString();
+    }
+
+    /**
+     * Best-effort {@code javaClass} guess for an undeclared variable. Used
+     * only in the hint message and in the builder's auto-repair safety net.
+     * Conservative — when we can't infer a type from the name we hand back
+     * {@code java.lang.Object} so the engine will tolerate any value at
+     * runtime. Specific patterns we recognize:
+     *
+     * <ul>
+     *   <li>{@code *Iso}, {@code *Date}, {@code *Id}, {@code *Code},
+     *       {@code *Name}, {@code *Zip}, {@code *Url} → String.</li>
+     *   <li>{@code is*}, {@code has*}, {@code should*} → Boolean.</li>
+     *   <li>{@code *Count}, {@code *Total}, {@code *Index}, {@code *Number}
+     *       → Long.</li>
+     *   <li>{@code *List}, {@code *s} (plural-looking) → List.</li>
+     *   <li>anything else → Object.</li>
+     * </ul>
+     */
+    static String guessJavaClassForVariable(String variableName) {
+        if (variableName == null || variableName.isBlank()) return "java.lang.Object";
+        String n = variableName.trim();
+        String lower = n.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("is") || lower.startsWith("has") || lower.startsWith("should")) {
+            return "java.lang.Boolean";
+        }
+        if (lower.endsWith("iso") || lower.endsWith("date") || lower.endsWith("id")
+                || lower.endsWith("code") || lower.endsWith("name") || lower.endsWith("zip")
+                || lower.endsWith("url") || lower.endsWith("uri") || lower.endsWith("path")
+                || lower.endsWith("text") || lower.endsWith("message")) {
+            return "java.lang.String";
+        }
+        if (lower.endsWith("count") || lower.endsWith("total") || lower.endsWith("index")
+                || lower.endsWith("number") || lower.endsWith("size") || lower.endsWith("length")) {
+            return "java.lang.Long";
+        }
+        if (lower.endsWith("list") || lower.endsWith("items") || lower.endsWith("results")
+                || lower.endsWith("entries")) {
+            return "java.util.List";
+        }
+        return "java.lang.Object";
     }
 
     private static List<String> closestVariableNames(String target, Set<String> declared, int limit) {

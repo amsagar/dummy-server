@@ -27,7 +27,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
@@ -39,7 +42,10 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.DefaultToolDefinition;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Phase-2 builder agent. Runs only after a human approves a Phase-1
@@ -245,6 +251,13 @@ public class WorkflowBuilderService {
         // builder model.
         String lastErrorCode = null;
         int consecutiveSameError = 0;
+        // Variable names that the prior attempt's structural validation
+        // flagged as undeclared. Used by the rename-loop safety net below:
+        // if the SAME variable names re-appear on this attempt's errors
+        // (i.e. the agent failed to declare them and instead tried something
+        // else), the loop auto-injects them into variables[] rather than
+        // burning further productive attempts on the same advice.
+        Set<String> previousUndeclaredVars = Set.of();
         ModelRef currentModel = modelRef;
         while (productiveAttempts < maxAttempts && noopAttempts <= maxNoopRetries) {
             boolean initialAttempt = productiveAttempts == 0;
@@ -332,8 +345,74 @@ public class WorkflowBuilderService {
 
             ValidationReport report = validator.validate(
                     draftJson, proposal.getUserPrompt(), skeletonDtos);
+            // AUTO-REPAIR safety net: undeclared_variable_reference rename loop.
+            // In production the builder agent often "fixes" an
+            // undeclared_variable_reference by renaming the variable
+            // (#toCheck -> #currentCheck -> #currentDate -> ...) instead of
+            // adding it to variables[]. When the SAME variable names recur
+            // on two consecutive attempts as undeclared, we deterministically
+            // inject those names into the workflow's top-level variables[]
+            // array with a guessed javaClass (String for *Iso / *Date / *Id /
+            // *Code, Object otherwise). This breaks the rename loop without
+            // burning the productive-attempt budget on advice the model has
+            // already ignored. Alignment still gates finalize, so any
+            // semantic regression introduced by the auto-declaration is
+            // caught downstream.
+            Set<String> currentUndeclaredVars = report.ok()
+                    ? Set.of()
+                    : extractUndeclaredVarNames(report.errors());
+            boolean allErrorsAreUndeclared = !currentUndeclaredVars.isEmpty()
+                    && report.errors().stream()
+                            .allMatch(e -> "undeclared_variable_reference".equals(e.code()));
+            // Holds the auto-repair feedback prefix when we deterministically
+            // injected variable declarations on THIS iteration. Set inside
+            // the if-block below so the structural-failure path uses it
+            // verbatim (instead of overwriting it with a generic re-render).
+            String autoRepairFeedback = null;
+            if (!report.ok() && allErrorsAreUndeclared) {
+                Set<String> persistent = new LinkedHashSet<>(currentUndeclaredVars);
+                persistent.retainAll(previousUndeclaredVars);
+                if (!persistent.isEmpty()) {
+                    boolean repaired = autoInjectMissingVariables(draftFile, persistent);
+                    if (repaired) {
+                        log.warn("[WorkflowBuilder] proposal {} attempt {} AUTO-INJECTED missing variable declaration(s)"
+                                        + " into variables[] after persistent [undeclared_variable_reference] for {};"
+                                        + " clearing ChatMemory and re-validating",
+                                proposal.getId(), displayAttempt, new TreeSet<>(persistent));
+                        chatMemory.clear(proposal.getId());
+                        String repairedDraft = readDraftQuiet(draftFile);
+                        if (repairedDraft != null) {
+                            ValidationReport rerun = validator.validate(
+                                    repairedDraft, proposal.getUserPrompt(), skeletonDtos);
+                            report = rerun;
+                            draftJson = repairedDraft;
+                            currentUndeclaredVars = report.ok()
+                                    ? Set.of()
+                                    : extractUndeclaredVarNames(report.errors());
+                            if (report.ok()) {
+                                log.info("[WorkflowBuilder] proposal {} attempt {} auto-repair cleared structural failures",
+                                        proposal.getId(), displayAttempt);
+                            } else {
+                                // Tell the next attempt explicitly that we
+                                // injected these declarations so the agent
+                                // doesn't try to undo them while addressing
+                                // remaining errors.
+                                autoRepairFeedback = "auto_repair_note: the builder injected the following declaration(s)"
+                                        + " into variables[] because previous attempts kept renaming undeclared variables"
+                                        + " instead of declaring them: "
+                                        + new TreeSet<>(persistent)
+                                        + ". DO NOT remove these declarations. Remaining structural errors below:\n\n"
+                                        + renderStructuralFeedback(report.errors());
+                            }
+                        }
+                    }
+                }
+            }
+            previousUndeclaredVars = currentUndeclaredVars;
             if (!report.ok()) {
-                lastFailureSummary = renderStructuralFeedback(report.errors());
+                lastFailureSummary = autoRepairFeedback != null
+                        ? autoRepairFeedback
+                        : renderStructuralFeedback(report.errors());
                 // Log the codes at INFO for at-a-glance grep, then dump
                 // each error's full message at INFO too so a user reading
                 // logs can see WHY drift fired (which activity is missing,
@@ -534,6 +613,114 @@ public class WorkflowBuilderService {
         } catch (Exception ignored) {
         }
         return List.of();
+    }
+
+    // Pattern used to recover the variable name from an
+    // undeclared_variable_reference error message. Matches "references
+    // #name" — the validator always emits this exact phrasing.
+    private static final Pattern UNDECLARED_VAR_PATTERN =
+            Pattern.compile("references\\s+#([A-Za-z_][A-Za-z0-9_]*)");
+
+    /**
+     * Extracts the set of variable names flagged as undeclared in this
+     * structural-validation report. Names are returned without the SpEL
+     * {@code #} prefix and in insertion order so the auto-repair
+     * persistence check below can reason about them deterministically.
+     */
+    static Set<String> extractUndeclaredVarNames(List<ValidationError> errors) {
+        if (errors == null || errors.isEmpty()) return Set.of();
+        Set<String> out = new LinkedHashSet<>();
+        for (ValidationError ve : errors) {
+            if (!"undeclared_variable_reference".equals(ve.code())) continue;
+            String msg = ve.message();
+            if (msg == null) continue;
+            Matcher m = UNDECLARED_VAR_PATTERN.matcher(msg);
+            if (m.find()) {
+                out.add(m.group(1));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Deterministic safety net for the
+     * {@code undeclared_variable_reference} rename loop.
+     *
+     * <p>Adds one entry per name to the workflow draft's top-level
+     * {@code variables[]} array (creating the array if needed). The
+     * {@code javaClass} is inferred from the variable name via
+     * {@link WorkflowJsonValidator#guessJavaClassForVariable(String)}
+     * (String for {@code *Iso}/{@code *Date}/{@code *Id}/{@code *Code} etc.,
+     * Object otherwise). Skips names that already appear in
+     * {@code variables[]} so re-running this method is idempotent.
+     *
+     * <p>Returns {@code true} when at least one declaration was added and
+     * the modified draft was successfully written back; returns
+     * {@code false} on parse / I/O errors or when no name needed
+     * injection. Callers should re-validate the file when this method
+     * returns {@code true}.
+     */
+    boolean autoInjectMissingVariables(Path draftFile, Set<String> variableNames) {
+        if (draftFile == null || variableNames == null || variableNames.isEmpty()) {
+            return false;
+        }
+        String body;
+        try {
+            body = Files.readString(draftFile, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            log.warn("[WorkflowBuilder] auto-repair: failed to read draft {}: {}",
+                    draftFile.getFileName(), e.getMessage());
+            return false;
+        }
+        if (body == null || body.isBlank()) return false;
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(body);
+        } catch (Exception e) {
+            log.warn("[WorkflowBuilder] auto-repair: draft {} is not valid JSON ({}); skipping injection",
+                    draftFile.getFileName(), e.getMessage());
+            return false;
+        }
+        if (!(root instanceof ObjectNode rootObj)) {
+            log.warn("[WorkflowBuilder] auto-repair: draft root is not a JSON object; skipping");
+            return false;
+        }
+        ArrayNode variables;
+        JsonNode existing = rootObj.get("variables");
+        if (existing instanceof ArrayNode arr) {
+            variables = arr;
+        } else {
+            variables = objectMapper.createArrayNode();
+            rootObj.set("variables", variables);
+        }
+        // Collect already-declared names so we don't double-insert.
+        Set<String> alreadyDeclared = new LinkedHashSet<>();
+        for (JsonNode v : variables) {
+            if (v instanceof ObjectNode vo && vo.has("name") && vo.get("name").isTextual()) {
+                alreadyDeclared.add(vo.get("name").asText());
+            }
+        }
+        int injected = 0;
+        for (String name : variableNames) {
+            if (name == null || name.isBlank() || alreadyDeclared.contains(name)) continue;
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("name", name);
+            entry.put("javaClass", WorkflowJsonValidator.guessJavaClassForVariable(name));
+            entry.putNull("defaultExpression");
+            entry.put("required", false);
+            variables.add(entry);
+            injected++;
+        }
+        if (injected == 0) return false;
+        try {
+            String out = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+            Files.writeString(draftFile, out, StandardCharsets.UTF_8);
+            return true;
+        } catch (Exception e) {
+            log.warn("[WorkflowBuilder] auto-repair: failed to write repaired draft {}: {}",
+                    draftFile.getFileName(), e.getMessage());
+            return false;
+        }
     }
 
     private void runAgent(WorkflowProposal proposal,

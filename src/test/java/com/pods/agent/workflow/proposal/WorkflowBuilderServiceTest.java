@@ -478,6 +478,217 @@ class WorkflowBuilderServiceTest {
         verify(fx.processDefService, times(1)).save(any());
     }
 
+    /**
+     * Draft that references an undeclared SpEL variable ({@code #todayIso}).
+     * Structural validation must fail with
+     * {@code undeclared_variable_reference}. Used by the auto-repair tests
+     * below to simulate the rename-loop the builder saw in production.
+     */
+    private static final String DRAFT_WITH_UNDECLARED_VAR = """
+            {
+              "id": null,
+              "name": "Validate Order Leg Sequence",
+              "version": "1",
+              "packageId": null,
+              "description": "references #todayIso without declaring it",
+              "variables": [
+                { "name": "orderId", "javaClass": "java.lang.String", "defaultExpression": null, "required": true }
+              ],
+              "activities": [
+                { "id": "start", "name": "Start", "type": "route", "pluginName": null, "properties": {}, "inputSchema": {}, "outputSchema": {}, "deadlineExpression": null, "isStart": true, "isEnd": false, "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {}, "outputVariables": [], "andJoin": false, "errorPolicy": null },
+                { "id": "validate", "name": "Validate", "type": "tool", "pluginName": "AgentToolPlugin", "properties": {"toolName":"validate_order","input":"#{#todayIso}"}, "inputSchema": {}, "outputSchema": {}, "deadlineExpression": null, "isStart": false, "isEnd": false, "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {}, "outputVariables": [], "andJoin": false, "errorPolicy": null },
+                { "id": "end", "name": "End", "type": "route", "pluginName": null, "properties": {}, "inputSchema": {}, "outputSchema": {}, "deadlineExpression": null, "isStart": false, "isEnd": true, "subflowDefId": null, "subflowInputs": {}, "subflowOutputs": {}, "outputVariables": [], "andJoin": false, "errorPolicy": null }
+              ],
+              "transitions": [
+                { "id": "t1", "fromActivityId": "start", "toActivityId": "validate", "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS", "priority": 1, "isDefault": false },
+                { "id": "t2", "fromActivityId": "validate", "toActivityId": "end", "condition": null, "isErrorEdge": false, "matchesErrorClass": null, "trigger": "ON_SUCCESS", "priority": 1, "isDefault": false }
+              ]
+            }
+            """;
+
+    /**
+     * Regression for the rename-loop the builder hit in production. The
+     * agent keeps producing the SAME undeclared variable on two
+     * consecutive attempts. The builder must (1) detect the persistence,
+     * (2) auto-inject the declaration into {@code variables[]}, and
+     * (3) proceed past the structural barrier to alignment + finalize.
+     */
+    @Test
+    void buildAutoInjectsPersistentUndeclaredVariableIntoVariablesArray(@TempDir Path workspace) throws IOException {
+        Fixture fx = new Fixture(workspace);
+        WorkflowProposal proposal = fx.persistedPending();
+
+        AtomicInteger invocations = new AtomicInteger();
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters, prePop) -> {
+            int n = invocations.incrementAndGet();
+            // Attempts 1 and 2 both produce a draft that references
+            // #todayIso without declaring it — exactly the rename-loop
+            // pattern. We mutate description on attempt 2 so the no-op
+            // detector doesn't catch us first; the undeclared variable
+            // is still present.
+            if (n == 1) {
+                Files.writeString(draft, DRAFT_WITH_UNDECLARED_VAR, StandardCharsets.UTF_8);
+            } else if (n == 2) {
+                Files.writeString(draft,
+                        DRAFT_WITH_UNDECLARED_VAR.replace(
+                                "references #todayIso without declaring it",
+                                "renamed, still undeclared"),
+                        StandardCharsets.UTF_8);
+                assertNotNull(feedback);
+                assertTrue(feedback.contains("undeclared_variable_reference")
+                                || feedback.contains("#todayIso"),
+                        "attempt 2 must see the undeclared-var feedback, was: " + feedback);
+            } else {
+                throw new AssertionError("auto-repair should have closed the build by attempt 2; got attempt " + n);
+            }
+        });
+        fx.judgeAligned();
+
+        WorkflowProposal result = fx.builder.build(proposal);
+
+        assertEquals("materialized", result.getStatus(),
+                "auto-repair must inject the missing declaration and let the build proceed");
+        assertEquals(2, invocations.get(),
+                "build should materialize on attempt 2 right after auto-repair fires");
+        // The persisted draft must contain the auto-injected declaration.
+        String finalDraft = Files.readString(workspace.resolve(
+                ".pods-agent/workflow/proposals/" + proposal.getId() + ".draft.json"),
+                StandardCharsets.UTF_8);
+        assertTrue(finalDraft.contains("\"todayIso\""),
+                "auto-injected variable name must appear in variables[]: " + finalDraft);
+        assertTrue(finalDraft.contains("java.lang.String"),
+                "auto-injected javaClass for *Iso name should be String: " + finalDraft);
+    }
+
+    /**
+     * Negative case: when only ONE attempt produces a given undeclared
+     * variable name (no persistence across two consecutive attempts),
+     * auto-repair must NOT fire. The agent gets its normal feedback
+     * loop instead.
+     */
+    @Test
+    void buildDoesNotAutoInjectOnSingleOccurrence(@TempDir Path workspace) throws IOException {
+        Fixture fx = new Fixture(workspace);
+        WorkflowProposal proposal = fx.persistedPending();
+
+        AtomicInteger invocations = new AtomicInteger();
+        fx.builder.setAgentInvoker((p, ws, draft, log, model, allowlist, initial, feedback, memory, counters, prePop) -> {
+            int n = invocations.incrementAndGet();
+            if (n == 1) {
+                // First attempt: produces an undeclared-var error.
+                Files.writeString(draft, DRAFT_WITH_UNDECLARED_VAR, StandardCharsets.UTF_8);
+            } else {
+                // Second attempt: the agent ACTUALLY declares the variable.
+                // Auto-repair must not have fired (no persistence yet) and
+                // the build must materialize via the model's own fix.
+                Files.writeString(draft, VALID_DRAFT, StandardCharsets.UTF_8);
+            }
+        });
+        fx.judgeAligned();
+
+        WorkflowProposal result = fx.builder.build(proposal);
+
+        assertEquals("materialized", result.getStatus());
+        assertEquals(2, invocations.get());
+        // The finalized draft is VALID_DRAFT — auto-repair did not inject
+        // anything because the first occurrence had no prior streak.
+        String finalDraft = Files.readString(workspace.resolve(
+                ".pods-agent/workflow/proposals/" + proposal.getId() + ".draft.json"),
+                StandardCharsets.UTF_8);
+        assertTrue(!finalDraft.contains("\"todayIso\""),
+                "no auto-injection expected; agent's own fix should be the final state: " + finalDraft);
+    }
+
+    /**
+     * The validator hint must now include a paste-ready JSON snippet so
+     * the LLM can apply the fix verbatim rather than abstracting it into
+     * a rename. Smoke-tests both that the snippet is present AND that
+     * the inferred {@code javaClass} matches the name pattern (String
+     * for {@code *Iso}).
+     */
+    @Test
+    void undeclaredVariableHintIncludesPasteReadyDeclaration() {
+        ObjectMapper mapper = new ObjectMapper();
+        WorkflowJsonValidator validator = new WorkflowJsonValidator(
+                mapper, new WorkflowContractCatalog(mapper));
+
+        WorkflowJsonValidator.ValidationReport report = validator.validate(
+                DRAFT_WITH_UNDECLARED_VAR, "validate", List.of());
+
+        assertTrue(!report.ok(),
+                "DRAFT_WITH_UNDECLARED_VAR must surface a validation error");
+        WorkflowJsonValidator.ValidationError err = report.errors().stream()
+                .filter(e -> "undeclared_variable_reference".equals(e.code()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "expected undeclared_variable_reference, got: " + report.errors()));
+        String msg = err.message();
+        assertTrue(msg.contains("PASTE-READY FIX"),
+                "hint must include the paste-ready label: " + msg);
+        assertTrue(msg.contains("\"name\":\"todayIso\""),
+                "snippet must include the exact variable name: " + msg);
+        assertTrue(msg.contains("\"javaClass\":\"java.lang.String\""),
+                "*Iso suffix must be inferred as String: " + msg);
+    }
+
+    /**
+     * Unit test for the static name-extraction helper. The builder relies
+     * on it to thread persistence detection through the build loop.
+     */
+    @Test
+    void extractUndeclaredVarNamesParsesValidatorMessages() {
+        WorkflowJsonValidator.ValidationError e1 = new WorkflowJsonValidator.ValidationError(
+                "undeclared_variable_reference",
+                "expression at activities[x].properties.input references #todayIso but no top-level variable...",
+                "activities[x].properties.input");
+        WorkflowJsonValidator.ValidationError e2 = new WorkflowJsonValidator.ValidationError(
+                "undeclared_variable_reference",
+                "expression at activities[y].properties.input references #currentCheck but no top-level variable...",
+                "activities[y].properties.input");
+        WorkflowJsonValidator.ValidationError unrelated = new WorkflowJsonValidator.ValidationError(
+                "parse_failed",
+                "Illegal character...",
+                null);
+
+        Set<String> names = WorkflowBuilderService.extractUndeclaredVarNames(
+                List.of(e1, e2, unrelated));
+
+        assertEquals(2, names.size());
+        assertTrue(names.contains("todayIso"));
+        assertTrue(names.contains("currentCheck"));
+    }
+
+    /**
+     * Direct test of the file-mutating helper: ensures it adds entries
+     * to {@code variables[]}, infers types from the name, dedupes against
+     * existing declarations, and remains idempotent.
+     */
+    @Test
+    void autoInjectMissingVariablesIsIdempotentAndTypeAware(@TempDir Path workspace) throws IOException {
+        Fixture fx = new Fixture(workspace);
+        Path draft = workspace.resolve(".pods-agent/workflow/proposals/p-x.draft.json");
+        Files.createDirectories(draft.getParent());
+        Files.writeString(draft, DRAFT_WITH_UNDECLARED_VAR, StandardCharsets.UTF_8);
+
+        boolean firstRun = fx.builder.autoInjectMissingVariables(
+                draft, new java.util.LinkedHashSet<>(List.of("todayIso", "itemCount", "isReady")));
+        assertTrue(firstRun, "first injection must succeed");
+
+        String afterFirst = Files.readString(draft, StandardCharsets.UTF_8);
+        assertTrue(afterFirst.contains("\"todayIso\""));
+        assertTrue(afterFirst.contains("java.lang.String"), "*Iso -> String");
+        assertTrue(afterFirst.contains("\"itemCount\""));
+        assertTrue(afterFirst.contains("java.lang.Long"), "*Count -> Long");
+        assertTrue(afterFirst.contains("\"isReady\""));
+        assertTrue(afterFirst.contains("java.lang.Boolean"), "is* -> Boolean");
+
+        // Second run with the same set: nothing to inject — must report
+        // false so the caller doesn't loop forever.
+        boolean secondRun = fx.builder.autoInjectMissingVariables(
+                draft, new java.util.LinkedHashSet<>(List.of("todayIso")));
+        assertTrue(!secondRun, "no new injections expected when variable already declared");
+    }
+
     @Test
     void buildFailsWhenWorkspaceUnresolvable() {
         Path workspace = Path.of(System.getProperty("java.io.tmpdir"), "pods-builder-test-" + System.nanoTime());
