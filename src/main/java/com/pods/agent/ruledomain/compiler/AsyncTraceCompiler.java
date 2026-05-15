@@ -16,7 +16,6 @@ import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository;
 import com.pods.agent.service.ToolRegistryService;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
 import java.util.HashSet;
@@ -83,15 +82,19 @@ public class AsyncTraceCompiler {
     }
 
     /**
-     * Schedule a trace-based compile for the rules declared by this skill.
-     * Returns immediately — actual compile runs on a Spring async executor.
+     * Run a trace-based compile for the rules declared by this skill.
+     *
+     * <p>Caller dispatches this onto {@code ForkJoinPool.commonPool()}: Spring
+     * AI's Azure SDK Netty client only binds correctly when invoked from FJ
+     * commonPool threads on this setup. Spring's {@code @Async} pool and
+     * Reactor's {@code boundedElastic} both fail with "channel not registered
+     * to an event loop". See {@code AgentOrchestrator.scheduleTraceCompile}.
      *
      * <p>Idempotency: if every rule in the manifest already has a
      * {@code LLM_TRACE}-sourced row, this is a no-op (we don't recompile
      * rules that are already trace-grounded — Phase 3's CoverageMerger
      * handles widening coverage on existing rules).
      */
-    @Async
     public void scheduleCompile(SkillRouter.RoutedSkill routed, String sessionId, String turnId) {
         if (routed == null) return;
         try {

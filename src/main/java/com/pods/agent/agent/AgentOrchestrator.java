@@ -304,16 +304,22 @@ public class AgentOrchestrator {
         SkillRouter router = skillRouter == null ? null : skillRouter.getIfAvailable();
         AsyncTraceCompiler compiler = asyncTraceCompiler == null ? null : asyncTraceCompiler.getIfAvailable();
         if (router == null || compiler == null) return;
-        try {
-            // Schedule the trace compile even when the skill has no manifest —
-            // AsyncTraceCompiler will derive one from the trace + prose first
-            // (Option B), persist it on the skill row, then compile per-rule
-            // BPMNs. Business authors never have to write YAML.
-            router.route(userText).ifPresent(routed ->
-                    compiler.scheduleCompile(routed, session.getSessionId(), turnId));
-        } catch (Exception ex) {
-            log.debug("[AgentOrchestrator] scheduleTraceCompile failed (suppressed): {}", ex.getMessage());
-        }
+        String sessionId = session.getSessionId();
+        // Dispatch onto ForkJoinPool.commonPool(). The trace compile
+        // ultimately makes an LLM call (manifest derive + per-rule
+        // BPMN compile) through Spring AI's Azure SDK Netty client,
+        // which fails with "channel not registered to an event loop"
+        // when invoked from Spring's @Async pool or Reactor's
+        // boundedElastic. FJ commonPool is the one pool whose threads
+        // the SDK's Netty client binds correctly to on this setup.
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                router.route(userText).ifPresent(routed ->
+                        compiler.scheduleCompile(routed, sessionId, turnId));
+            } catch (Exception ex) {
+                log.debug("[AgentOrchestrator] scheduleTraceCompile failed (suppressed): {}", ex.getMessage());
+            }
+        });
     }
 
     private String buildSystemPrompt(ChatState state, AgentSession session) {

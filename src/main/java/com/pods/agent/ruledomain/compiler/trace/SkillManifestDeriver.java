@@ -6,8 +6,6 @@ import com.pods.agent.domain.ModelRef;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -72,23 +70,20 @@ public class SkillManifestDeriver {
     }
 
     /**
-     * Run the blocking LLM call on a Reactor scheduler. The async-trace
-     * compiler runs on Spring's {@code @Async} pool (e.g. {@code task-1}).
-     * Some providers build HTTP clients that bind Netty resources to the
-     * constructing thread. Resolve + execute on the same bounded-elastic
-     * worker to avoid "channel not registered to an event loop" failures.
+     * Caller is responsible for invoking this from a ForkJoinPool.commonPool()
+     * thread (see {@code AgentOrchestrator.scheduleTraceCompile}). Spring AI's
+     * Azure SDK Netty client fails with "channel not registered to an event
+     * loop" when invoked from Spring's {@code @Async} pool or from a Reactor
+     * {@code boundedElastic} worker; the FJ commonPool is the one thread
+     * context where the SDK's Netty client binds correctly.
      */
     private String callWithRetry(ModelRef compilerRef, String system, String user, String skillName) {
         try {
-            return Mono.fromCallable(() -> {
-                        ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
-                        var client = spec.client();
-                        var req = client.prompt().system(system).user(user);
-                        if (spec.options() != null) req = req.options(spec.options());
-                        return req.call().content();
-                    })
-                    .subscribeOn(Schedulers.boundedElastic())
-                    .block();
+            ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
+            var client = spec.client();
+            var req = client.prompt().system(system).user(user);
+            if (spec.options() != null) req = req.options(spec.options());
+            return req.call().content();
         } catch (Exception ex) {
             log.warn("[SkillManifestDeriver] LLM call failed for skill={}: {}",
                     skillName, ex.getMessage());
