@@ -160,5 +160,95 @@ public class RuleDomainRepository {
         return v == null ? 0 : v;
     }
 
+    /**
+     * Paginated + searchable listing. When {@code onlyLatest} is true, the query
+     * collapses rows to one-per-(skill_id, intent_label), keeping only the row
+     * with the highest version. {@code search} runs an ILIKE filter against
+     * skill_name, intent_label, and status.
+     */
+    public PageResult<RuleDomain> list(String search,
+                                       String skillId,
+                                       boolean onlyLatest,
+                                       int page,
+                                       int pageSize) {
+        int effectivePage = Math.max(page, 0);
+        int effectiveSize = Math.max(Math.min(pageSize, 200), 1);
+        int offset = effectivePage * effectiveSize;
+
+        StringBuilder where = new StringBuilder(" WHERE 1=1");
+        var params = new MapSqlParameterSource();
+        if (search != null && !search.isBlank()) {
+            where.append(" AND (skill_name ILIKE :search OR intent_label ILIKE :search OR status ILIKE :search)");
+            params.addValue("search", "%" + search.trim() + "%");
+        }
+        if (skillId != null && !skillId.isBlank()) {
+            where.append(" AND skill_id = :sid");
+            params.addValue("sid", skillId);
+        }
+
+        String baseRel;
+        if (onlyLatest) {
+            baseRel = """
+                    (
+                      SELECT DISTINCT ON (skill_id, intent_label) *
+                      FROM agent.rule_domains
+                      ORDER BY skill_id, intent_label, version DESC, updated_at DESC
+                    ) AS rd
+                    """;
+        } else {
+            baseRel = "agent.rule_domains rd";
+        }
+
+        Integer total = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM " + baseRel + where, params, Integer.class);
+
+        var pageParams = new MapSqlParameterSource(params.getValues())
+                .addValue("limit", effectiveSize)
+                .addValue("offset", offset);
+        var rows = jdbc.query(
+                "SELECT * FROM " + baseRel + where + " ORDER BY updated_at DESC LIMIT :limit OFFSET :offset",
+                pageParams,
+                ROW);
+
+        return new PageResult<>(rows, total == null ? 0 : total, effectivePage, effectiveSize);
+    }
+
+    /** All revisions for the (skill_id, intent_label) belonging to the given row. */
+    public List<RuleDomain> findVersionsOf(String id) {
+        Optional<RuleDomain> ref = findById(id);
+        if (ref.isEmpty()) return List.of();
+        return jdbc.query("""
+                SELECT * FROM agent.rule_domains
+                WHERE skill_id = :sid AND intent_label = :il
+                ORDER BY version DESC
+                """, new MapSqlParameterSource()
+                .addValue("sid", ref.get().getSkillId())
+                .addValue("il", ref.get().getIntentLabel()),
+                ROW);
+    }
+
+    /**
+     * Mark every other version of the same (skill, intent) as DEPRECATED.
+     * Used right after activating a specific revision so the "only one active"
+     * invariant holds.
+     */
+    public int deactivateSiblings(String id) {
+        return jdbc.update("""
+                UPDATE agent.rule_domains
+                SET status = 'DEPRECATED',
+                    last_error = 'Superseded by newer activated version',
+                    updated_at = :now
+                WHERE id <> :id
+                  AND status = 'ACTIVE'
+                  AND (skill_id, intent_label) = (
+                    SELECT skill_id, intent_label FROM agent.rule_domains WHERE id = :id
+                  )
+                """, new MapSqlParameterSource()
+                .addValue("id", id)
+                .addValue("now", System.currentTimeMillis()));
+    }
+
     public record Match(RuleDomain domain, double similarity) {}
+
+    public record PageResult<T>(List<T> items, int total, int page, int pageSize) {}
 }

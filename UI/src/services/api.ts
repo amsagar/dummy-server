@@ -172,13 +172,30 @@ export const api = {
     registry: () => fetch(`${BASE_URL}/skills/registry`, { headers: getHeaders() }).then(handleResponse),
   },
   ruleDomains: {
-    list: (skillId?: string) => fetch(
-      `${BASE_URL}/rule-domains${skillId ? `?skillId=${encodeURIComponent(skillId)}` : ''}`,
-      { headers: getHeaders() }
-    ).then(handleResponse),
+    list: (params: {
+      search?: string;
+      skillId?: string;
+      onlyLatest?: boolean;
+      page?: number;
+      pageSize?: number;
+    } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.search) qs.set('search', params.search);
+      if (params.skillId) qs.set('skillId', params.skillId);
+      qs.set('onlyLatest', String(params.onlyLatest ?? true));
+      qs.set('page', String(params.page ?? 0));
+      qs.set('pageSize', String(params.pageSize ?? 20));
+      return fetch(`${BASE_URL}/rule-domains?${qs.toString()}`, { headers: getHeaders() })
+        .then(handleResponse);
+    },
     get: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}`, { headers: getHeaders() }).then(handleResponse),
+    versions: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/versions`, { headers: getHeaders() }).then(handleResponse),
     executions: (id: string, limit: number = 50) => fetch(
       `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions?limit=${limit}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    executionTrace: (id: string, execId: string) => fetch(
+      `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions/${encodeURIComponent(execId)}/trace`,
       { headers: getHeaders() }
     ).then(handleResponse),
     deprecate: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/deprecate`, {

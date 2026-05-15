@@ -1,12 +1,12 @@
-import { useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useNavigate, Link } from "react-router-dom";
 import { api } from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { Settings as SettingsIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Settings as SettingsIcon } from "lucide-react";
 
 interface RuleDomainRow {
   id: string;
@@ -21,6 +21,13 @@ interface RuleDomainRow {
   updatedAt: number;
 }
 
+interface PageResp {
+  items: RuleDomainRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 const STATUS_COLOR: Record<string, string> = {
   ACTIVE: "bg-green-100 text-green-800",
   DRAFT: "bg-yellow-100 text-yellow-800",
@@ -28,31 +35,39 @@ const STATUS_COLOR: Record<string, string> = {
   FAILED: "bg-red-100 text-red-800",
 };
 
+const PAGE_SIZE = 20;
+
 export default function RuleDomainsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchActive, setSearchActive] = useState("");
+  const [page, setPage] = useState(0);
 
-  const { data: rows = [], isLoading } = useQuery<RuleDomainRow[]>({
-    queryKey: ["rule-domains"],
-    queryFn: () => api.ruleDomains.list(),
+  // Debounce the search input → push to the value used in the query.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearchActive(searchInput.trim());
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  const { data, isLoading, isFetching } = useQuery<PageResp>({
+    queryKey: ["rule-domains", searchActive, page],
+    queryFn: () =>
+      api.ruleDomains.list({ search: searchActive, page, pageSize: PAGE_SIZE, onlyLatest: true }),
+    placeholderData: keepPreviousData,
   });
 
-  const { data: cfg } = useQuery<{ enabled: boolean; enabledSkills: string[] }>({
+  const { data: cfg } = useQuery<{ enabled: boolean }>({
     queryKey: ["rule-domain-config"],
     queryFn: () => api.ruleDomainConfig.get(),
   });
 
-  const filtered = useMemo(() => {
-    const q = search.toLowerCase().trim();
-    if (!q) return rows;
-    return rows.filter(
-      (r) =>
-        r.skillName.toLowerCase().includes(q) ||
-        r.intentLabel.toLowerCase().includes(q) ||
-        r.status.toLowerCase().includes(q)
-    );
-  }, [rows, search]);
+  const rows = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const deprecateMutation = useMutation({
     mutationFn: (id: string) => api.ruleDomains.deprecate(id),
@@ -65,12 +80,20 @@ export default function RuleDomainsPage() {
 
   const activateMutation = useMutation({
     mutationFn: (id: string) => api.ruleDomains.activate(id),
-    onSuccess: () => {
+    onSuccess: (resp: any) => {
       qc.invalidateQueries({ queryKey: ["rule-domains"] });
-      toast.success("Domain activated");
+      const n = Number(resp?.deactivatedCount ?? 0);
+      toast.success(
+        n > 0
+          ? `Activated · superseded ${n} previous ${n === 1 ? "version" : "versions"}`
+          : "Activated",
+      );
     },
     onError: (e: any) => toast.error(e?.message || "Failed to activate"),
   });
+
+  const pageStart = useMemo(() => (rows.length > 0 ? page * PAGE_SIZE + 1 : 0), [rows.length, page]);
+  const pageEnd = useMemo(() => page * PAGE_SIZE + rows.length, [page, rows.length]);
 
   return (
     <div className="space-y-4">
@@ -78,7 +101,7 @@ export default function RuleDomainsPage() {
         <div>
           <h2 className="text-xl font-semibold text-[#123262]">Compiled Rule Domains</h2>
           <p className="text-sm text-gray-500">
-            BPMN workflows compiled from skills + intents. Cache hits skip the LLM entirely.
+            Showing the latest revision of each (skill, intent). Click any row to see all revisions and execution history.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -100,13 +123,17 @@ export default function RuleDomainsPage() {
         </div>
       </div>
 
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-between gap-4">
         <Input
-          placeholder="Filter by skill, intent, status…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="max-w-xs"
+          placeholder="Search skill / intent / status…"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          className="max-w-sm"
         />
+        <div className="text-xs text-gray-500">
+          {total === 0 ? "No results" : `${pageStart}–${pageEnd} of ${total}`}
+          {isFetching && <span className="ml-2 text-gray-400">refreshing…</span>}
+        </div>
       </div>
 
       <div className="bg-white rounded-lg border">
@@ -128,19 +155,21 @@ export default function RuleDomainsPage() {
                 <TableCell colSpan={7} className="text-center text-gray-400 py-8">Loading…</TableCell>
               </TableRow>
             )}
-            {!isLoading && filtered.length === 0 && (
+            {!isLoading && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-gray-400 py-8">No compiled domains yet</TableCell>
+                <TableCell colSpan={7} className="text-center text-gray-400 py-8">
+                  {searchActive ? "No matches for that search." : "No compiled domains yet."}
+                </TableCell>
               </TableRow>
             )}
-            {filtered.map((r) => (
+            {rows.map((r) => (
               <TableRow
                 key={r.id}
                 className="cursor-pointer hover:bg-gray-50"
                 onClick={() => navigate(`/rule-domains/${encodeURIComponent(r.id)}`)}
               >
                 <TableCell className="font-medium">{r.skillName}</TableCell>
-                <TableCell>{r.intentLabel}</TableCell>
+                <TableCell className="font-mono text-xs">{r.intentLabel}</TableCell>
                 <TableCell>
                   <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLOR[r.status] ?? ""}`}>
                     {r.status}
@@ -166,6 +195,32 @@ export default function RuleDomainsPage() {
           </TableBody>
         </Table>
       </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={page === 0 || isFetching}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            className="gap-1"
+          >
+            <ChevronLeft className="h-4 w-4" /> Previous
+          </Button>
+          <span className="text-xs text-gray-500 px-2">
+            Page {page + 1} of {totalPages}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={page + 1 >= totalPages || isFetching}
+            onClick={() => setPage((p) => p + 1)}
+            className="gap-1"
+          >
+            Next <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

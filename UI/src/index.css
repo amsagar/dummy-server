@@ -320,6 +320,40 @@
 
 }
 
+/* Runtime and selection states for legacy bpmn-js renderer */
+.bpmn-diagram-wrapper .legacy-state-completed .djs-visual > rect,
+.bpmn-diagram-wrapper .legacy-state-completed .djs-visual > circle,
+.bpmn-diagram-wrapper .legacy-state-completed .djs-visual > polygon,
+.bpmn-diagram-wrapper .legacy-state-completed .djs-visual > path {
+  stroke: #0f766e !important;
+}
+
+.bpmn-diagram-wrapper .legacy-state-running .djs-visual > rect,
+.bpmn-diagram-wrapper .legacy-state-running .djs-visual > circle,
+.bpmn-diagram-wrapper .legacy-state-running .djs-visual > polygon,
+.bpmn-diagram-wrapper .legacy-state-running .djs-visual > path {
+  stroke: #2563eb !important;
+}
+
+.bpmn-diagram-wrapper .legacy-state-failed .djs-visual > rect,
+.bpmn-diagram-wrapper .legacy-state-failed .djs-visual > circle,
+.bpmn-diagram-wrapper .legacy-state-failed .djs-visual > polygon,
+.bpmn-diagram-wrapper .legacy-state-failed .djs-visual > path {
+  stroke: #b91c1c !important;
+}
+
+.bpmn-diagram-wrapper .legacy-state-warning .djs-visual > rect,
+.bpmn-diagram-wrapper .legacy-state-warning .djs-visual > circle,
+.bpmn-diagram-wrapper .legacy-state-warning .djs-visual > polygon,
+.bpmn-diagram-wrapper .legacy-state-warning .djs-visual > path {
+  stroke: #b45309 !important;
+}
+
+.bpmn-diagram-wrapper .legacy-state-selected .djs-outline {
+  stroke: #e31837 !important;
+  stroke-width: 2.5px !important;
+}
+
 
 
 /* Slightly larger labels for readability inside the small task boxes */

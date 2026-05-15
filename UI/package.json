@@ -14,8 +14,6 @@
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@dagrejs/dagre": "^1.1.8",
-    "bpmn-js": "^17.11.1",
-    "bpmn-moddle": "^9.0.1",
     "@fontsource-variable/geist": "^5.2.8",
     "@google/genai": "^1.29.0",
     "@monaco-editor/react": "^4.7.0",
@@ -23,6 +21,8 @@
     "@tanstack/react-query": "^5.99.2",
     "@vitejs/plugin-react": "^5.0.4",
     "@xyflow/react": "^12.9.2",
+    "bpmn-js": "^17.11.1",
+    "bpmn-moddle": "^9.0.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
