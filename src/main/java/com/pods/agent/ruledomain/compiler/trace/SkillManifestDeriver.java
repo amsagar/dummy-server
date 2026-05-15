@@ -7,6 +7,8 @@ import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -73,38 +75,30 @@ public class SkillManifestDeriver {
     }
 
     /**
-     * Run the LLM call with one retry. Reactor Netty's keep-alive can close
-     * an idle channel between the chat turn and the async manifest derive
-     * (a few seconds gap), so the first call sometimes hits
-     * "channel not registered to an event loop". A fresh attempt opens a
-     * new connection and succeeds.
+     * Run the blocking LLM call on a Reactor scheduler. The async-trace
+     * compiler runs on Spring's {@code @Async} pool (e.g. {@code task-1}),
+     * which isn't Reactor-aware. The Azure SDK's Netty HTTP client expects
+     * its Mono subscription to occur on a Reactor-compatible thread; calling
+     * {@code .call().content()} directly from {@code task-1} fails with
+     * "channel not registered to an event loop". Dispatching through
+     * {@code Schedulers.boundedElastic()} routes the call onto a thread the
+     * underlying Reactor Netty stack handles correctly.
      */
     private String callWithRetry(ChatClient client, ModelProviderRouter.Spec spec,
                                  String system, String user, String skillName) {
-        Exception last = null;
-        for (int attempt = 1; attempt <= 2; attempt++) {
-            try {
-                var req = client.prompt().system(system).user(user);
-                if (spec.options() != null) req = req.options(spec.options());
-                return req.call().content();
-            } catch (Exception ex) {
-                last = ex;
-                String msg = ex.getMessage() == null ? "" : ex.getMessage();
-                boolean transientNetty = msg.contains("channel not registered")
-                        || msg.contains("Connection reset")
-                        || msg.contains("Connection prematurely closed");
-                if (attempt < 2 && transientNetty) {
-                    log.debug("[SkillManifestDeriver] transient Netty failure for skill={} (attempt={}): {}; retrying",
-                            skillName, attempt, msg);
-                    try { Thread.sleep(150); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-                    continue;
-                }
-                break;
-            }
+        try {
+            return Mono.fromCallable(() -> {
+                        var req = client.prompt().system(system).user(user);
+                        if (spec.options() != null) req = req.options(spec.options());
+                        return req.call().content();
+                    })
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .block();
+        } catch (Exception ex) {
+            log.warn("[SkillManifestDeriver] LLM call failed for skill={}: {}",
+                    skillName, ex.getMessage());
+            return null;
         }
-        log.warn("[SkillManifestDeriver] LLM call failed for skill={}: {}",
-                skillName, last == null ? "unknown" : last.getMessage());
-        return null;
     }
 
     private static String systemPrompt() {
