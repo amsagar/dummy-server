@@ -37,6 +37,12 @@ pods:
     jwt-expiration-ms: 86400000
   encryption:
     key: "d13b66074da5bb8e7db8a52c4a968e813a8407fee56d5549f932e4c1e80e0355"
+  tool-execution:
+    # Per-request body timeout for HTTP tool calls in seconds. TCP connect
+    # timeout is separate (8s, hard-coded). Tune up when upstream APIs are
+    # slow. ToolCallDelegate owns timeout retries on top of this; non-timeout
+    # errors keep the existing internal 2-retry behavior.
+    http-timeout-seconds: 45
   models:
     allowed-providers: openai, azure, azure_openai, azure_claude, anthropic, google-vertex, ollama
   runtime:
@@ -149,13 +155,6 @@ pods:
       default-token-url: ""
 # Rule-domain runtime config lives in agent.rule_domain_config (single row).
 # Edit through the admin UI (/rule-domains) or via PUT /api/v1/rule-domain-config.
-pods:
-  tool-execution:
-    # Per-request body timeout for HTTP tool calls in seconds. TCP connect
-    # timeout is separate (8s, hard-coded). Tune up when upstream APIs are
-    # slow. ToolCallDelegate owns timeout retries on top of this; non-timeout
-    # errors keep the existing internal 2-retry behavior.
-    http-timeout-seconds: 45
 logging:
   level:
     root: INFO

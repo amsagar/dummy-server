@@ -145,7 +145,5 @@ public class RuleDomainProperties {
         private int toolTimeoutMaxAttempts = 3;
         /** Backoff between attempts in milliseconds. Last entry is used for any remaining attempts. */
         private long[] toolTimeoutBackoffMs = {0L, 2000L, 5000L};
-
-        public ToolRetry() {}
     }
 }

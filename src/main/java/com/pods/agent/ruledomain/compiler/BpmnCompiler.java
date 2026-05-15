@@ -113,7 +113,7 @@ public class BpmnCompiler {
         String user = promptBuilder.buildUser(skillMarkdown, tools, userRequest);
 
         bus.emit("rule_domain.compile.llm_call", Map.of(
-                "model", compilerRef.modelId(), "provider", compilerRef.providerId()));
+                "model", compilerRef.modelID(), "provider", compilerRef.providerID()));
 
         // First attempt
         long llmStart = System.currentTimeMillis();
