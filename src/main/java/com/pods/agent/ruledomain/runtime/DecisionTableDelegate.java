@@ -47,9 +47,9 @@ public class DecisionTableDelegate implements JavaDelegate {
 
     @Override
     public void execute(DelegateExecution execution) {
-        String tableName = requireString(execution, "tableName");
-        String inputsTemplateJson = requireString(execution, "inputsTemplate");
-        String outputBinding = requireString(execution, "outputBinding");
+        String tableName = BpmnFieldReader.required(execution, "tableName");
+        String inputsTemplateJson = BpmnFieldReader.required(execution, "inputsTemplate");
+        String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
 
         Map<String, String> template;
         try {
@@ -87,11 +87,4 @@ public class DecisionTableDelegate implements JavaDelegate {
         execution.setVariable(outputBinding, out);
     }
 
-    private static String requireString(DelegateExecution exec, String name) {
-        Object v = exec.getVariable(name);
-        if (v == null || v.toString().isBlank()) {
-            throw new BpmnError("MISSING_VARIABLE", "Required BPMN variable: " + name);
-        }
-        return v.toString();
-    }
 }

@@ -123,7 +123,11 @@ public class AgentOrchestrator {
         if (rdo != null && summarizer != null) {
             try {
                 ExecutionOutcome outcome = rdo.handleIfApplicable(userText, null, session.getSessionId(), turnId);
-                if (outcome.handled()) {
+                // Only short-circuit when the compiled BPMN completed cleanly.
+                // On failure we deliberately fall through to the existing LLM
+                // loop so the user still gets a useful answer instead of a
+                // "sorry, the workflow errored" stub.
+                if (outcome.handled() && outcome.error() == null) {
                     String summary = summarizer.summarize(outcome, userText);
                     if (summary != null && !summary.isBlank()) {
                         sender.sendTextDelta(summary);
@@ -134,9 +138,19 @@ public class AgentOrchestrator {
                             "procId", outcome.flowableProcId() == null ? "" : outcome.flowableProcId(),
                             "fromCacheHit", outcome.fromCacheHit(),
                             "latencyMs", outcome.latencyMs(),
-                            "error", outcome.error() == null ? "" : outcome.error()
+                            "error", ""
                     ));
                     return summary == null ? "" : summary;
+                }
+                if (outcome.handled() && outcome.error() != null) {
+                    log.warn("[AgentOrchestrator] Compiled rule-domain failed ({}); falling back to LLM loop.",
+                            outcome.error());
+                    sender.sendCustom("rule_domain.failed", Map.of(
+                            "domainId", outcome.domainId() == null ? "" : outcome.domainId(),
+                            "procId", outcome.flowableProcId() == null ? "" : outcome.flowableProcId(),
+                            "error", outcome.error()
+                    ));
+                    // intentional fall-through below
                 }
             } catch (Exception ex) {
                 log.warn("[AgentOrchestrator] Rule-domain path threw; falling back to LLM loop: {}",

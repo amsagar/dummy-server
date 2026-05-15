@@ -37,8 +37,8 @@ public class FeelExtractDelegate implements JavaDelegate {
 
     @Override
     public void execute(DelegateExecution execution) {
-        String expr = requireString(execution, "feelExpr");
-        String outputBinding = requireString(execution, "outputBinding");
+        String expr = BpmnFieldReader.required(execution, "feelExpr");
+        String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
 
         Map<String, Object> ctx = new LinkedHashMap<>(execution.getVariables());
         Object value;
@@ -52,11 +52,4 @@ public class FeelExtractDelegate implements JavaDelegate {
         execution.setVariable(outputBinding, value);
     }
 
-    private static String requireString(DelegateExecution exec, String name) {
-        Object v = exec.getVariable(name);
-        if (v == null || v.toString().isBlank()) {
-            throw new BpmnError("MISSING_VARIABLE", "Required BPMN variable: " + name);
-        }
-        return v.toString();
-    }
 }

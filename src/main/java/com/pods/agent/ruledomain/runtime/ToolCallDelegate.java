@@ -60,10 +60,10 @@ public class ToolCallDelegate implements JavaDelegate {
 
     @Override
     public void execute(DelegateExecution execution) {
-        String toolName = requireString(execution, "toolName");
-        String argTemplateJson = requireString(execution, "argTemplate");
-        String outputBinding = requireString(execution, "outputBinding");
-        String postTransformJson = optString(execution, "postTransform");
+        String toolName = BpmnFieldReader.required(execution, "toolName");
+        String argTemplateJson = BpmnFieldReader.required(execution, "argTemplate");
+        String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
+        String postTransformJson = BpmnFieldReader.optional(execution, "postTransform");
 
         AgentTool tool = toolRegistry.getEnabledToolByName(toolName);
         if (tool == null) {
@@ -146,16 +146,4 @@ public class ToolCallDelegate implements JavaDelegate {
         }
     }
 
-    private static String requireString(DelegateExecution exec, String name) {
-        Object v = exec.getVariable(name);
-        if (v == null || v.toString().isBlank()) {
-            throw new BpmnError("MISSING_VARIABLE", "Required BPMN variable: " + name);
-        }
-        return v.toString();
-    }
-
-    private static String optString(DelegateExecution exec, String name) {
-        Object v = exec.getVariable(name);
-        return v == null ? null : v.toString();
-    }
 }
