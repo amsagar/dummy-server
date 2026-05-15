@@ -1,8 +1,9 @@
 package com.pods.agent.ruledomain.runtime;
 
-import org.flowable.bpmn.model.Activity;
 import org.flowable.bpmn.model.FieldExtension;
 import org.flowable.bpmn.model.FlowElement;
+import org.flowable.bpmn.model.SendTask;
+import org.flowable.bpmn.model.ServiceTask;
 import org.flowable.engine.delegate.BpmnError;
 import org.flowable.engine.delegate.DelegateExecution;
 
@@ -36,21 +37,29 @@ public final class BpmnFieldReader {
     }
 
     public static String optional(DelegateExecution execution, String fieldName) {
-        FlowElement fe = execution.getCurrentFlowElement();
-        if (fe instanceof Activity activity) {
-            List<FieldExtension> fields = activity.getFieldExtensions();
-            if (fields != null) {
-                for (FieldExtension f : fields) {
-                    if (!fieldName.equals(f.getFieldName())) continue;
-                    String s = f.getStringValue();
-                    if (s != null && !s.isBlank()) return s.trim();
-                    String e = f.getExpression();
-                    if (e != null && !e.isBlank()) return e.trim();
-                }
+        List<FieldExtension> fields = fieldExtensionsOf(execution.getCurrentFlowElement());
+        if (fields != null) {
+            for (FieldExtension f : fields) {
+                if (!fieldName.equals(f.getFieldName())) continue;
+                String s = f.getStringValue();
+                if (s != null && !s.isBlank()) return s.trim();
+                String e = f.getExpression();
+                if (e != null && !e.isBlank()) return e.trim();
             }
         }
         Object v = execution.getVariable(fieldName);
         return v == null ? null : v.toString();
+    }
+
+    /** Extract field extensions from whichever task subtype actually carries them.
+     *  In our compiler the relevant element is always a ServiceTask (every
+     *  delegate is wired through {@code flowable:delegateExpression} on a
+     *  serviceTask). SendTask is included for completeness; other task
+     *  subtypes don't expose field extensions in Flowable 7. */
+    private static List<FieldExtension> fieldExtensionsOf(FlowElement fe) {
+        if (fe instanceof ServiceTask st) return st.getFieldExtensions();
+        if (fe instanceof SendTask snd) return snd.getFieldExtensions();
+        return null;
     }
 
     private static String activityIdOf(DelegateExecution execution) {
