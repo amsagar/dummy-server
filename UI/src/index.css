@@ -265,3 +265,71 @@
     font-family: 'Poppins', ui-sans-serif, system-ui, sans-serif;
     }
 }
+
+/* ─── BPMN diagram styling ─────────────────────────────────────── */
+
+/* Hide the bpmn.io attribution watermark in the canvas corner */
+
+.bpmn-diagram-wrapper .bjs-powered-by,
+
+.bpmn-diagram-wrapper a.bjs-powered-by {
+
+  display: none !important;
+
+}
+
+
+
+/* Make sequence-flow arrows + task strokes thicker and bluish so they read
+
+   from a distance against the white canvas. */
+
+.bpmn-diagram-wrapper .djs-connection .djs-visual > path {
+
+  stroke: #123262 !important;
+
+  stroke-width: 1.6px !important;
+
+}
+
+/* (intentionally not overriding marker-end — bpmn-js sets the correct
+   arrowhead marker id per-edge; overriding here can blank arrows out if
+   the referenced marker isn't registered.) */
+
+.bpmn-diagram-wrapper .djs-element .djs-visual > rect:not([fill="none"]) {
+
+  stroke: #1f3a5f !important;
+
+  stroke-width: 1.4px !important;
+
+}
+
+.bpmn-diagram-wrapper .djs-element .djs-visual > circle {
+
+  stroke: #1f3a5f !important;
+
+  stroke-width: 1.6px !important;
+
+}
+
+.bpmn-diagram-wrapper .djs-element .djs-visual > polygon {
+
+  stroke: #1f3a5f !important;
+
+  stroke-width: 1.4px !important;
+
+}
+
+
+
+/* Slightly larger labels for readability inside the small task boxes */
+
+.bpmn-diagram-wrapper .djs-label {
+
+  font-family: 'Poppins', ui-sans-serif, sans-serif !important;
+
+  font-size: 11px !important;
+
+  fill: #1a2a3f !important;
+
+}

@@ -426,7 +426,11 @@ CREATE TABLE IF NOT EXISTS agent.rule_domains (
     tool_signature      TEXT NOT NULL,
     bpmn_xml            TEXT NOT NULL,
     flowable_proc_key   TEXT NOT NULL,
-    intent_embedding    vector(3072),
+    -- Sized for the most common default embedding models (text-embedding-3-small,
+    -- text-embedding-ada-002). If you switch to a larger model (e.g. 3072-dim
+    -- text-embedding-3-large with no dimension override), alter this column and
+    -- rebuild the HNSW index — see notes below.
+    intent_embedding    vector(1536),
     status              TEXT NOT NULL,
     version             INTEGER NOT NULL DEFAULT 1,
     compile_attempts    INTEGER NOT NULL DEFAULT 1,
@@ -437,7 +441,7 @@ CREATE TABLE IF NOT EXISTS agent.rule_domains (
 );
 
 ALTER TABLE agent.rule_domains
-    ALTER COLUMN intent_embedding TYPE halfvec(3072);
+    ALTER COLUMN intent_embedding TYPE halfvec(1536);
 
 CREATE INDEX IF NOT EXISTS idx_rule_domains_skill
     ON agent.rule_domains (skill_id);
@@ -448,6 +452,21 @@ CREATE INDEX IF NOT EXISTS idx_rule_domains_status
 CREATE INDEX IF NOT EXISTS idx_rule_domains_embedding_hnsw
     ON agent.rule_domains
     USING hnsw (intent_embedding halfvec_cosine_ops);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- If you upgrade the rule-domain embedding model to one with a different
+-- dimension (e.g. text-embedding-3-large = 3072), run these once:
+--
+--   DROP INDEX IF EXISTS agent.idx_rule_domains_embedding_hnsw;
+--   ALTER TABLE agent.rule_domains
+--     ALTER COLUMN intent_embedding TYPE halfvec(3072) USING NULL;
+--   UPDATE agent.rule_domains SET status = 'DEPRECATED', last_error = 'embedding dim changed';
+--   CREATE INDEX idx_rule_domains_embedding_hnsw
+--     ON agent.rule_domains USING hnsw (intent_embedding halfvec_cosine_ops);
+--
+-- (All ACTIVE rows get deprecated since their old embeddings are now NULL,
+-- so they'll be recompiled+re-embedded on next request.)
+-- ────────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS agent.rule_executions (
     id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { Button } from "@/components/ui/button";
+import { BpmnDiagram } from "@/components/BpmnDiagram";
 
 interface RuleDomainDetail {
   id: string;
@@ -88,13 +89,7 @@ export default function RuleDomainEditorPage() {
       </div>
 
       {tab === "diagram" && (
-        <div className="bg-white rounded border p-6 text-center text-sm text-gray-500">
-          <p>BPMN visualization placeholder.</p>
-          <p className="text-xs mt-2">
-            Install <code className="bg-gray-100 px-1 rounded">bpmn-js</code> in <code>UI/package.json</code> to
-            render the workflow diagram here. The XML tab shows the raw definition.
-          </p>
-        </div>
+        <BpmnDiagram xml={domain.bpmnXml} className="h-[70vh]" />
       )}
 
       {tab === "xml" && (
