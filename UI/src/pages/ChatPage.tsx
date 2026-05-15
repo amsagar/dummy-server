@@ -222,6 +222,13 @@ export default function ChatPage() {
         return `Coverage widened for ${ev.ruleName || '?'}${ev.toolsWidened ? ' [+tools]' : ''}${ev.inputsWidened ? ' [+inputs]' : ''}`;
       case 'rule_domain.merge_conflict':
         return `⚠ Merge conflict on ${ev.ruleName || '?'} — review in Settings → Rule Domains`;
+      // Option B: auto-derived rule manifest from skill prose + trace.
+      case 'rule_domain.manifest_derivation.start':
+        return `Analyzing skill "${ev.skillName || '?'}" to identify sub-rules…`;
+      case 'rule_domain.manifest_derivation.failed':
+        return `Couldn't auto-derive rules for "${ev.skillName || '?'}" — will retry on next successful turn`;
+      case 'rule_domain.manifest_derived':
+        return `Derived ${ev.ruleCount || '?'} rule(s) for "${ev.skillName || '?'}": ${(ev.ruleNames || []).join(', ')}`;
       default: return ev.type;
     }
   };
@@ -1023,6 +1030,10 @@ export default function ChatPage() {
           case 'rule_domain.coverage_miss':
           case 'rule_domain.coverage_extended':
           case 'rule_domain.merge_conflict':
+          // Option B: auto-derived rule manifest lifecycle.
+          case 'rule_domain.manifest_derivation.start':
+          case 'rule_domain.manifest_derivation.failed':
+          case 'rule_domain.manifest_derived':
             appendSystemMessage(ev.type, ruleDomainShortLabel(ev), undefined, ev);
             break;
 

@@ -71,6 +71,17 @@ public class IntentMatcher {
      * list (fan-out), or empty (cold path — caller compiles).
      */
     public List<RuleMatch> findMatches(String skillId, String userMessage) {
+        return findMatches(skillId, userMessage, /*skipLegacyFallback*/ false);
+    }
+
+    /**
+     * Variant that lets the caller suppress the legacy single-row fallback.
+     * Callers with a skill that opts into the rule manifest should pass
+     * {@code skipLegacyFallback = true} so old prose-compiled monolithic rows
+     * (created before the skill was opted in) don't keep serving requests
+     * and prevent the new trace-based per-rule BPMNs from getting compiled.
+     */
+    public List<RuleMatch> findMatches(String skillId, String userMessage, boolean skipLegacyFallback) {
         float[] vec = embed(userMessage);
         if (vec == null) return List.of();
 
@@ -105,6 +116,10 @@ public class IntentMatcher {
         }
 
         // ── Pass 3: legacy single-row fallback (no domain_group_id) ──
+        // Suppressed when caller indicates this skill has a manifest —
+        // returning a legacy row would short-circuit the trace-based
+        // compile that the skill is opted into.
+        if (skipLegacyFallback) return List.of();
         Optional<RuleDomainRepository.Match> legacy = findMatch(skillId, userMessage);
         return legacy.map(m -> List.of(RuleMatch.narrow(m))).orElse(List.of());
     }

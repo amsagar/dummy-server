@@ -176,6 +176,12 @@ public class SkillController {
         file.setContentSha256(sha256(content));
         file.setSizeBytes(content.length);
         skillRepository.updateFile(file);
+        // When the root SKILL.md (the prose the manifest is derived from)
+        // changes, the existing derived manifest is stale. Clear it so the
+        // next successful turn re-derives from a fresh trace + new prose.
+        if ("SKILL.md".equalsIgnoreCase(file.getFilePath())) {
+            skillRepository.clearDerivedManifest(skillId);
+        }
         skillRegistryService.refresh();
         return ResponseEntity.ok(file);
     }
@@ -323,6 +329,11 @@ public class SkillController {
             file.setContentSha256(sha256(content));
             file.setSizeBytes(content.length);
             skillRepository.updateFile(file);
+            // SKILL.md edit → invalidate any auto-derived manifest so the
+            // next successful turn re-derives from the new prose.
+            if ("SKILL.md".equalsIgnoreCase(filePath)) {
+                skillRepository.clearDerivedManifest(skillId);
+            }
             return file;
         } else {
             SkillFile file = SkillFile.builder()

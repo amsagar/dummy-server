@@ -152,6 +152,15 @@ CREATE TABLE IF NOT EXISTS agent.skills (
     updated_at  BIGINT NOT NULL
     );
 
+-- System-derived rule manifest (Phase 4 / Option B). Populated after a
+-- successful LLM-loop run by SkillManifestDeriver; cleared whenever the
+-- skill markdown changes so the system re-derives from the next trace.
+-- Authors never edit this — it's a derived artifact stored alongside the
+-- skill so we don't pay an LLM call on every chat to figure it out.
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_json TEXT;
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_source_hash TEXT;
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_at BIGINT;
+
 CREATE TABLE IF NOT EXISTS agent.skill_files (
                                                  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     skill_id         TEXT NOT NULL REFERENCES agent.skills (id) ON DELETE CASCADE,

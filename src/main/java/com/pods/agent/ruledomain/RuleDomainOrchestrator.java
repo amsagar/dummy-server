@@ -111,16 +111,31 @@ public class RuleDomainOrchestrator {
                 "skillName", safe(skill.getName())));
 
         try {
+            boolean hasManifest = routed.get().manifest() != null
+                    && !routed.get().manifest().isEmpty();
+
             bus.emit("rule_domain.cache_lookup", Map.of("turnId", safe(turnId)));
-            List<RuleMatch> matches = intentMatcher.findMatches(skill.getId(), userMessage);
+            // Skill that opts into the rule manifest: skip the legacy
+            // single-row fallback so a stale prose-compiled monolithic row
+            // doesn't keep running and prevent the trace-based compile
+            // from producing the new per-rule BPMNs.
+            List<RuleMatch> matches = intentMatcher.findMatches(
+                    skill.getId(), userMessage, /*skipLegacyFallback=*/ hasManifest);
 
             if (matches.isEmpty()) {
-                // Cold path — no compiled rule matches. Compile a single
-                // monolithic rule via the legacy prose-based path; future
-                // requests will hit the new rule.
                 bus.emit("rule_domain.cache_miss", Map.of(
                         "turnId", safe(turnId), "skillName", skill.getName()));
-                return compileAndExecute(routed.get(), userMessage, userInputs, sessionId, turnId);
+                // First request for this skill: fall through to the LLM loop.
+                // AgentOrchestrator.scheduleTraceCompile will run after the
+                // turn ends; AsyncTraceCompiler derives a manifest from prose
+                // + trace (Option B) and compiles per-rule BPMNs. The next
+                // request hits those compiled rules.
+                //
+                // We no longer call the legacy prose-based BpmnCompiler here.
+                // That path produced field-path-hallucinated BPMNs because
+                // the compiler couldn't see real tool response shapes; the
+                // trace-grounded path doesn't have that problem.
+                return ExecutionOutcome.notHandled();
             }
 
             // Filter out circuit-open + coverage-miss rules. Rules removed

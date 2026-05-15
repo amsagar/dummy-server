@@ -46,6 +46,9 @@ public class SkillRepository {
                 .enabled(rs.getBoolean("enabled"))
                 .createdAt(rs.getLong("created_at"))
                 .updatedAt(rs.getLong("updated_at"))
+                .derivedManifestJson(safeColumn(rs, "derived_manifest_json"))
+                .derivedManifestSourceHash(safeColumn(rs, "derived_manifest_source_hash"))
+                .derivedManifestAt(safeLong(rs, "derived_manifest_at"))
                 .build());
     }
 
@@ -57,8 +60,56 @@ public class SkillRepository {
                 .enabled(rs.getBoolean("enabled"))
                 .createdAt(rs.getLong("created_at"))
                 .updatedAt(rs.getLong("updated_at"))
+                .derivedManifestJson(safeColumn(rs, "derived_manifest_json"))
+                .derivedManifestSourceHash(safeColumn(rs, "derived_manifest_source_hash"))
+                .derivedManifestAt(safeLong(rs, "derived_manifest_at"))
                 .build(), id);
         return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+    }
+
+    /** Write the system-derived rule manifest produced by SkillManifestDeriver. */
+    public void updateDerivedManifest(String skillId, String manifestJson, String sourceHash) {
+        namedJdbc.update("""
+                UPDATE agent.skills
+                   SET derived_manifest_json        = :json,
+                       derived_manifest_source_hash = :hash,
+                       derived_manifest_at          = :ts,
+                       updated_at                   = :ts
+                 WHERE id = :id
+                """, new MapSqlParameterSource()
+                .addValue("id", skillId)
+                .addValue("json", manifestJson)
+                .addValue("hash", sourceHash)
+                .addValue("ts", System.currentTimeMillis()));
+    }
+
+    /** Clear the derived manifest (e.g. after the skill markdown is edited).
+     *  The next successful turn re-derives it from a fresh trace. */
+    public void clearDerivedManifest(String skillId) {
+        namedJdbc.update("""
+                UPDATE agent.skills
+                   SET derived_manifest_json        = NULL,
+                       derived_manifest_source_hash = NULL,
+                       derived_manifest_at          = NULL,
+                       updated_at                   = :ts
+                 WHERE id = :id
+                """, new MapSqlParameterSource()
+                .addValue("id", skillId)
+                .addValue("ts", System.currentTimeMillis()));
+    }
+
+    private static String safeColumn(java.sql.ResultSet rs, String column) {
+        try { return rs.getString(column); }
+        catch (java.sql.SQLException ex) { return null; }
+    }
+
+    private static long safeLong(java.sql.ResultSet rs, String column) {
+        try {
+            long v = rs.getLong(column);
+            return rs.wasNull() ? 0L : v;
+        } catch (java.sql.SQLException ex) {
+            return 0L;
+        }
     }
 
     public void update(Skill skill) {

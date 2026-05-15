@@ -307,10 +307,12 @@ public class AgentOrchestrator {
         AsyncTraceCompiler compiler = asyncTraceCompiler == null ? null : asyncTraceCompiler.getIfAvailable();
         if (router == null || compiler == null) return;
         try {
-            router.route(userText).ifPresent(routed -> {
-                if (routed.manifest() == null || routed.manifest().isEmpty()) return;
-                compiler.scheduleCompile(routed, session.getSessionId(), turnId);
-            });
+            // Schedule the trace compile even when the skill has no manifest —
+            // AsyncTraceCompiler will derive one from the trace + prose first
+            // (Option B), persist it on the skill row, then compile per-rule
+            // BPMNs. Business authors never have to write YAML.
+            router.route(userText).ifPresent(routed ->
+                    compiler.scheduleCompile(routed, session.getSessionId(), turnId));
         } catch (Exception ex) {
             log.debug("[AgentOrchestrator] scheduleTraceCompile failed (suppressed): {}", ex.getMessage());
         }

@@ -2,10 +2,12 @@ package com.pods.agent.ruledomain;
 
 import com.pods.agent.config.RuleDomainProperties;
 import com.pods.agent.domain.Skill;
+import com.pods.agent.ruledomain.compiler.trace.SkillManifestDeriver;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.SkillRegistryService.SkillSnapshot;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
@@ -29,11 +31,14 @@ public class SkillRouter {
 
     private final SkillRegistryService skillRegistryService;
     private final RuleDomainProperties props;
+    private final ObjectProvider<SkillManifestDeriver> manifestDeriver;
 
     public SkillRouter(SkillRegistryService skillRegistryService,
-                       RuleDomainProperties props) {
+                       RuleDomainProperties props,
+                       ObjectProvider<SkillManifestDeriver> manifestDeriver) {
         this.skillRegistryService = skillRegistryService;
         this.props = props;
+        this.manifestDeriver = manifestDeriver;
     }
 
     public Optional<RoutedSkill> route(String userMessage) {
@@ -62,11 +67,35 @@ public class SkillRouter {
             if (hit) {
                 String markdown = snapshot.files() == null ? "" :
                         snapshot.files().values().stream().findFirst().orElse("");
-                SkillRuleManifest manifest = SkillRegistryService.parseRuleManifest(markdown);
+                SkillRuleManifest manifest = resolveManifest(skill, markdown);
                 return Optional.of(new RoutedSkill(skill, markdown, manifest));
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Resolve the manifest in priority order:
+     * <ol>
+     *   <li><b>Author-written frontmatter</b> — {@code rules:} block in the
+     *       skill's YAML. Always wins when present; authors have explicit control.</li>
+     *   <li><b>System-derived manifest</b> — JSON saved on the skill row by
+     *       {@code SkillManifestDeriver} after a successful LLM-loop run.
+     *       Used for skills whose authors stuck to prose.</li>
+     *   <li><b>Empty</b> — falls through to the legacy single-monolithic-BPMN flow.
+     *       AgentOrchestrator's post-turn hook will then trigger a derivation.</li>
+     * </ol>
+     */
+    private SkillRuleManifest resolveManifest(Skill skill, String markdown) {
+        SkillRuleManifest fromMarkdown = SkillRegistryService.parseRuleManifest(markdown);
+        if (!fromMarkdown.isEmpty()) return fromMarkdown;
+
+        String derivedJson = skill.getDerivedManifestJson();
+        if (derivedJson == null || derivedJson.isBlank()) return SkillRuleManifest.EMPTY;
+
+        SkillManifestDeriver deriver = manifestDeriver == null ? null : manifestDeriver.getIfAvailable();
+        if (deriver == null) return SkillRuleManifest.EMPTY;
+        return deriver.fromJson(derivedJson);
     }
 
     /**

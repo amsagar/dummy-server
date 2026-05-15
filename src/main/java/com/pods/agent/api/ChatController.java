@@ -86,7 +86,11 @@ public class ChatController {
             // Phase 3: coverage signals.
             "rule_domain.coverage_miss",
             "rule_domain.coverage_extended",
-            "rule_domain.merge_conflict"
+            "rule_domain.merge_conflict",
+            // Option B: skill manifest auto-derivation from prose + trace.
+            "rule_domain.manifest_derivation.start",
+            "rule_domain.manifest_derivation.failed",
+            "rule_domain.manifest_derived"
     );
 
     private final ChatService chatService;

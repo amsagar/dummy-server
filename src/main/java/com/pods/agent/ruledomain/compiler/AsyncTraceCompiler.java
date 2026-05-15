@@ -1,12 +1,15 @@
 package com.pods.agent.ruledomain.compiler;
 
 import com.pods.agent.domain.AgentTool;
+import com.pods.agent.repository.SkillRepository;
 import com.pods.agent.ruledomain.RuleDomainEventBus;
 import com.pods.agent.ruledomain.SkillRouter;
 import com.pods.agent.ruledomain.compiler.trace.ExecutionTrace;
 import com.pods.agent.ruledomain.compiler.trace.ExecutionTraceReader;
 import com.pods.agent.ruledomain.compiler.trace.RuleSlicer;
+import com.pods.agent.ruledomain.compiler.trace.SkillManifestDeriver;
 import com.pods.agent.ruledomain.compiler.trace.TraceBasedBpmnCompiler;
+import com.pods.agent.ruledomain.invalidation.SkillSourceHasher;
 import com.pods.agent.ruledomain.invalidation.ToolSignatureHasher;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
@@ -53,6 +56,9 @@ public class AsyncTraceCompiler {
     private final ToolRegistryService toolRegistry;
     private final ToolSignatureHasher toolHasher;
     private final RuleDomainEventBus bus;
+    private final SkillManifestDeriver manifestDeriver;
+    private final SkillRepository skillRepository;
+    private final SkillSourceHasher skillSourceHasher;
 
     public AsyncTraceCompiler(ExecutionTraceReader traceReader,
                               RuleSlicer slicer,
@@ -60,7 +66,10 @@ public class AsyncTraceCompiler {
                               RuleDomainRepository repo,
                               ToolRegistryService toolRegistry,
                               ToolSignatureHasher toolHasher,
-                              RuleDomainEventBus bus) {
+                              RuleDomainEventBus bus,
+                              SkillManifestDeriver manifestDeriver,
+                              SkillRepository skillRepository,
+                              SkillSourceHasher skillSourceHasher) {
         this.traceReader = traceReader;
         this.slicer = slicer;
         this.traceCompiler = traceCompiler;
@@ -68,6 +77,9 @@ public class AsyncTraceCompiler {
         this.toolRegistry = toolRegistry;
         this.toolHasher = toolHasher;
         this.bus = bus;
+        this.manifestDeriver = manifestDeriver;
+        this.skillRepository = skillRepository;
+        this.skillSourceHasher = skillSourceHasher;
     }
 
     /**
@@ -81,11 +93,7 @@ public class AsyncTraceCompiler {
      */
     @Async
     public void scheduleCompile(SkillRouter.RoutedSkill routed, String sessionId, String turnId) {
-        if (routed == null || routed.manifest() == null || routed.manifest().isEmpty()) {
-            log.debug("[AsyncTraceCompiler] Skill {} has no rule manifest — skipping",
-                    routed == null ? "?" : routed.skill().getName());
-            return;
-        }
+        if (routed == null) return;
         try {
             doCompile(routed, sessionId, turnId);
         } catch (Exception ex) {
@@ -104,6 +112,18 @@ public class AsyncTraceCompiler {
             return;
         }
         ExecutionTrace trace = traceOpt.get();
+
+        // Option B: derive a manifest from prose + trace if the skill didn't
+        // ship one. Persisted on the skill row so we only pay this LLM call
+        // once per (skill, markdown-revision) pair.
+        if (manifest == null || manifest.isEmpty()) {
+            manifest = deriveAndPersistManifest(routed, trace, turnId);
+            if (manifest.isEmpty()) {
+                log.debug("[AsyncTraceCompiler] Skill {} manifest derivation produced nothing — leaving as legacy",
+                        skill.getName());
+                return;
+            }
+        }
 
         Map<String, ExecutionTrace> slices = slicer.slice(trace, manifest);
         if (slices.isEmpty()) {
@@ -186,6 +206,51 @@ public class AsyncTraceCompiler {
             }
         }
         return already;
+    }
+
+    /**
+     * Ask the LLM to derive a rule manifest from the skill's prose + the
+     * recorded trace, then persist it on the skill row so subsequent
+     * requests find it via {@code SkillRouter.resolveManifest}.
+     *
+     * <p>Returns {@link SkillRuleManifest#EMPTY} on any failure — caller
+     * treats that as "leave the skill un-manifested for now".
+     */
+    private SkillRuleManifest deriveAndPersistManifest(SkillRouter.RoutedSkill routed,
+                                                       ExecutionTrace trace,
+                                                       String turnId) {
+        var skill = routed.skill();
+        bus.emit("rule_domain.manifest_derivation.start", Map.of(
+                "turnId", turnId == null ? "" : turnId,
+                "skillName", skill.getName()));
+
+        SkillRuleManifest derived = manifestDeriver.derive(skill.getName(), routed.markdown(), trace);
+        if (derived == null || derived.isEmpty()) {
+            bus.emit("rule_domain.manifest_derivation.failed", Map.of(
+                    "turnId", turnId == null ? "" : turnId,
+                    "skillName", skill.getName()));
+            return SkillRuleManifest.EMPTY;
+        }
+
+        String json = manifestDeriver.toJson(derived);
+        String sourceHash = skillSourceHasher.hash(routed.markdown());
+        try {
+            skillRepository.updateDerivedManifest(skill.getId(), json, sourceHash);
+        } catch (Exception ex) {
+            log.warn("[AsyncTraceCompiler] failed to persist derived manifest for skill={}: {}",
+                    skill.getName(), ex.getMessage());
+        }
+
+        bus.emit("rule_domain.manifest_derived", Map.of(
+                "turnId", turnId == null ? "" : turnId,
+                "skillName", skill.getName(),
+                "ruleCount", derived.rules().size(),
+                "ruleNames", derived.rules().stream().map(SkillRuleManifest.Rule::name).toList()));
+
+        log.info("[AsyncTraceCompiler] Derived manifest for skill={}: {} rules ({})",
+                skill.getName(), derived.rules().size(),
+                derived.rules().stream().map(SkillRuleManifest.Rule::name).toList());
+        return derived;
     }
 
     private Optional<String> existingGroupIdForSkill(String skillId) {
