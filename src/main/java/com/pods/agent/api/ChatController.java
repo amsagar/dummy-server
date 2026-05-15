@@ -41,7 +41,38 @@ public class ChatController {
             "tool.match", "tool.call", "tool.done", "tool.result",
             "question", "approval_required",
             "reasoning",
-            "task.started", "task.done"
+            "task.started", "task.done",
+            // Compiled rule-domain pipeline events. The set is intentionally
+            // explicit (rather than a "rule_domain.*" prefix match) so that any
+            // future event type has to be reviewed before becoming part of the
+            // replayable session history.
+            "rule_domain.routed",
+            "rule_domain.cache_lookup",
+            "rule_domain.cache_hit",
+            "rule_domain.cache_miss",
+            "rule_domain.circuit_open",
+            "rule_domain.compile.start",
+            "rule_domain.compile.llm_call",
+            "rule_domain.compile.validating",
+            "rule_domain.compile.repair_attempt",
+            "rule_domain.compile.deployed",
+            "rule_domain.compile.embedding",
+            "rule_domain.compile.saved",
+            "rule_domain.compile.done",
+            "rule_domain.compile.failed",
+            "rule_domain.execute.start",
+            "rule_domain.execute.done",
+            "rule_domain.node.started",
+            "rule_domain.node.finished",
+            "rule_domain.node.cancelled",
+            "rule_domain.tool.call",
+            "rule_domain.tool.result",
+            "rule_domain.tool.retry",
+            "rule_domain.decision.call",
+            "rule_domain.decision.result",
+            "rule_domain.feel.eval",
+            "rule_domain.executed",
+            "rule_domain.failed"
     );
 
     private final ChatService chatService;
