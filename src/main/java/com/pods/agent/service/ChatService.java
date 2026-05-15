@@ -1,6 +1,7 @@
 package com.pods.agent.service;
 
 import tools.jackson.databind.ObjectMapper;
+import com.pods.agent.agent.AgentOrchestrator;
 import com.pods.agent.agent.AgentSession;
 import com.pods.agent.agent.AgentSessionManager;
 import com.pods.agent.agent.SseEventSender;
@@ -79,6 +80,7 @@ public class ChatService {
     private final SessionWorkspaceService sessionWorkspaceService;
     private final WorkspaceSkillSyncService workspaceSkillSyncService;
     private final ExecutionLogService executionLogService;
+    private final AgentOrchestrator agentOrchestrator;
     private final ObjectMapper objectMapper;
 
     public ChatService(AgentSessionManager sessionManager,
@@ -97,6 +99,7 @@ public class ChatService {
                        SessionWorkspaceService sessionWorkspaceService,
                        WorkspaceSkillSyncService workspaceSkillSyncService,
                        ExecutionLogService executionLogService,
+                       AgentOrchestrator agentOrchestrator,
                        ObjectMapper objectMapper) {
         this.sessionManager = sessionManager;
         this.agentRuntimeService = agentRuntimeService;
@@ -114,6 +117,7 @@ public class ChatService {
         this.sessionWorkspaceService = sessionWorkspaceService;
         this.workspaceSkillSyncService = workspaceSkillSyncService;
         this.executionLogService = executionLogService;
+        this.agentOrchestrator = agentOrchestrator;
         this.objectMapper = objectMapper;
     }
 
@@ -238,6 +242,10 @@ public class ChatService {
                             state.getModel(),
                             turnStart,
                             System.currentTimeMillis());
+                    // Trace-based compile must run AFTER the per-turn log
+                    // file is on disk; firing earlier races the log writer
+                    // and the compiler reads an empty trace.
+                    agentOrchestrator.scheduleTraceCompile(session, finalUserMessage, turnId, response);
                 } catch (Exception e) {
                     log.warn("[ChatService] Failed to write execution log for turn={}: {}",
                             turnId, e.getMessage());

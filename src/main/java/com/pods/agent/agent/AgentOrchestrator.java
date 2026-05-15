@@ -265,12 +265,10 @@ public class AgentOrchestrator {
                 }
             }
 
-            // Schedule a trace-based compile in the background. The user
-            // already has their answer; this runs async and produces compiled
-            // rule BPMNs from the recorded tool trace. Idempotent — no-op
-            // when the skill has no rule manifest, or when every rule is
-            // already trace-compiled. See AsyncTraceCompiler.
-            scheduleTraceCompile(session, userText, turnId, finalContent);
+            // NOTE: the trace-based compile is scheduled by ChatService
+            // *after* ExecutionLogService.finalizeTurnLog() writes the per-turn
+            // log file. Firing here races the log writer (~8s gap) and the
+            // compiler reads an empty trace.
 
             return finalContent.isEmpty() ? "Done." : finalContent;
         } catch (java.util.concurrent.CancellationException e) {
@@ -300,7 +298,7 @@ public class AgentOrchestrator {
      *   <li>any of the trace-compile beans isn't wired in.</li>
      * </ul>
      */
-    private void scheduleTraceCompile(AgentSession session, String userText, String turnId, String finalContent) {
+    public void scheduleTraceCompile(AgentSession session, String userText, String turnId, String finalContent) {
         if (finalContent == null || finalContent.isBlank()) return;
         if (turnId == null || turnId.isBlank()) return;
         SkillRouter router = skillRouter == null ? null : skillRouter.getIfAvailable();
