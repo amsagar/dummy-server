@@ -66,17 +66,45 @@ public class SkillManifestDeriver {
         String system = systemPrompt();
         String user = userPrompt(skillName, skillMarkdown, trace);
 
-        String response;
-        try {
-            var req = client.prompt().system(system).user(user);
-            if (spec.options() != null) req = req.options(spec.options());
-            response = req.call().content();
-        } catch (Exception ex) {
-            log.warn("[SkillManifestDeriver] LLM call failed for skill={}: {}", skillName, ex.getMessage());
-            return SkillRuleManifest.EMPTY;
-        }
+        String response = callWithRetry(client, spec, system, user, skillName);
+        if (response == null) return SkillRuleManifest.EMPTY;
 
         return parseManifest(response, trace);
+    }
+
+    /**
+     * Run the LLM call with one retry. Reactor Netty's keep-alive can close
+     * an idle channel between the chat turn and the async manifest derive
+     * (a few seconds gap), so the first call sometimes hits
+     * "channel not registered to an event loop". A fresh attempt opens a
+     * new connection and succeeds.
+     */
+    private String callWithRetry(ChatClient client, ModelProviderRouter.Spec spec,
+                                 String system, String user, String skillName) {
+        Exception last = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                var req = client.prompt().system(system).user(user);
+                if (spec.options() != null) req = req.options(spec.options());
+                return req.call().content();
+            } catch (Exception ex) {
+                last = ex;
+                String msg = ex.getMessage() == null ? "" : ex.getMessage();
+                boolean transientNetty = msg.contains("channel not registered")
+                        || msg.contains("Connection reset")
+                        || msg.contains("Connection prematurely closed");
+                if (attempt < 2 && transientNetty) {
+                    log.debug("[SkillManifestDeriver] transient Netty failure for skill={} (attempt={}): {}; retrying",
+                            skillName, attempt, msg);
+                    try { Thread.sleep(150); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    continue;
+                }
+                break;
+            }
+        }
+        log.warn("[SkillManifestDeriver] LLM call failed for skill={}: {}",
+                skillName, last == null ? "unknown" : last.getMessage());
+        return null;
     }
 
     private static String systemPrompt() {
