@@ -162,7 +162,7 @@ public class TurnToolCache {
         if (node.isObject()) {
             ObjectNode obj = (ObjectNode) node;
             List<String> keys = new ArrayList<>();
-            obj.propertyNames().forEachRemaining(keys::add);
+            keys.addAll(obj.propertyNames());
             Collections.sort(keys);
             ObjectNode sorted = CANONICALIZER.createObjectNode();
             for (String k : keys) {

@@ -43,14 +43,14 @@ public class CoverageEvaluator {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public CoverageResult check(RuleDomain rule, Map<String, Object> inputs) {
-        if (rule == null) return CoverageResult.covered();
+        if (rule == null) return CoverageResult.ok();
         String manifestJson = rule.getCoverageManifest();
         if (manifestJson == null || manifestJson.isBlank()) {
             // No manifest = legacy or freshly-prose-compiled rule — vacuously covered.
-            return CoverageResult.covered();
+            return CoverageResult.ok();
         }
         if (RuleDomain.COVERAGE_COMPLETE.equals(rule.getCoverageState())) {
-            return CoverageResult.covered();
+            return CoverageResult.ok();
         }
 
         JsonNode manifest;
@@ -59,22 +59,20 @@ public class CoverageEvaluator {
         } catch (Exception ex) {
             log.debug("[CoverageEvaluator] manifest parse failed for rule {} — treating as covered: {}",
                     rule.getId(), ex.getMessage());
-            return CoverageResult.covered();
+            return CoverageResult.ok();
         }
 
         JsonNode observed = manifest.path("observed_inputs");
         if (observed.isMissingNode() || !observed.isObject() || observed.isEmpty()) {
-            return CoverageResult.covered();
+            return CoverageResult.ok();
         }
 
         // Each child describes a derived condition. We look up the derived
         // value by name from the inputs map (simple lookup — if Phase 3
         // grows complex derived predicates, swap this for a registry of
         // condition extractors).
-        var fields = observed.propertyStream().toList();
-        for (var entry : fields) {
-            String condName = entry.getKey();
-            JsonNode condSpec = entry.getValue();
+        for (String condName : observed.propertyNames()) {
+            JsonNode condSpec = observed.get(condName);
             Object actual = inputs == null ? null : inputs.get(condName);
 
             if (condSpec.has("observed_values")) {
@@ -98,7 +96,7 @@ public class CoverageEvaluator {
             }
         }
 
-        return CoverageResult.covered();
+        return CoverageResult.ok();
     }
 
     private static boolean valueInSet(Object actual, JsonNode set) {
@@ -127,7 +125,7 @@ public class CoverageEvaluator {
     }
 
     public record CoverageResult(boolean covered, String firstMissingCondition, String reason) {
-        public static CoverageResult covered() {
+        public static CoverageResult ok() {
             return new CoverageResult(true, null, null);
         }
 

@@ -176,7 +176,7 @@ public class CoverageMerger {
             if (s.name() == null) continue;
             if (s.input() == null || !s.input().isObject()) continue;
             Set<String> keys = newKeysByTool.computeIfAbsent(s.name(), k -> new HashSet<>());
-            s.input().propertyNames().forEachRemaining(keys::add);
+            keys.addAll(s.input().propertyNames());
         }
         // existing manifest may not have arg shapes (v1 didn't record them);
         // in that case nothing to compare → no conflict.

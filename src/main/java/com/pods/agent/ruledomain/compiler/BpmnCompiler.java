@@ -243,7 +243,7 @@ public class BpmnCompiler {
      * primary deploy pass in {@link #tryDeploy} is still the source of truth for
      * compile validity.
      */
-    static String injectErrorBoundaries(String xml) {
+    public static String injectErrorBoundaries(String xml) {
         if (xml == null || xml.isBlank()) return xml;
         try {
             BpmnXMLConverter converter = new BpmnXMLConverter();
