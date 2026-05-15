@@ -1,6 +1,7 @@
 package com.pods.agent.ruledomain.runtime;
 
 import com.pods.agent.dmn.EvaluationResult;
+import com.pods.agent.ruledomain.RuleDomainEventBus;
 import com.pods.agent.service.DecisionTableService;
 import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.delegate.BpmnError;
@@ -36,13 +37,16 @@ public class DecisionTableDelegate implements JavaDelegate {
     private final DecisionTableService decisionTableService;
     private final ObjectMapper objectMapper;
     private final FeelHelper feel;
+    private final RuleDomainEventBus bus;
 
     public DecisionTableDelegate(DecisionTableService decisionTableService,
                                  ObjectMapper objectMapper,
-                                 FeelHelper feel) {
+                                 FeelHelper feel,
+                                 RuleDomainEventBus bus) {
         this.decisionTableService = decisionTableService;
         this.objectMapper = objectMapper;
         this.feel = feel;
+        this.bus = bus;
     }
 
     @Override
@@ -70,11 +74,25 @@ public class DecisionTableDelegate implements JavaDelegate {
             }
         }
 
+        String nodeId = execution.getCurrentActivityId();
+        Object turnId = execution.getVariable("_turnId");
+        bus.emit("rule_domain.decision.call", Map.of(
+                "turnId", turnId == null ? "" : turnId.toString(),
+                "nodeId", nodeId == null ? "" : nodeId,
+                "tableName", tableName,
+                "inputs", inputs));
+
         log.debug("BPMN decision table eval: table={} inputs={}", tableName, inputs);
         EvaluationResult result;
         try {
             result = decisionTableService.evaluate(tableName, inputs);
         } catch (Exception ex) {
+            bus.emit("rule_domain.decision.result", Map.of(
+                    "turnId", turnId == null ? "" : turnId.toString(),
+                    "nodeId", nodeId == null ? "" : nodeId,
+                    "tableName", tableName,
+                    "success", false,
+                    "error", ex.getMessage() == null ? "" : ex.getMessage()));
             throw new BpmnError("DECISION_TABLE_FAILED",
                     "Decision table " + tableName + " failed: " + ex.getMessage());
         }
@@ -83,6 +101,13 @@ public class DecisionTableDelegate implements JavaDelegate {
         out.put("matched", result.matched());
         out.put("rows", result.matchedRows());
         out.put("outputs", result.outputs());
+
+        bus.emit("rule_domain.decision.result", Map.of(
+                "turnId", turnId == null ? "" : turnId.toString(),
+                "nodeId", nodeId == null ? "" : nodeId,
+                "tableName", tableName,
+                "success", true,
+                "matched", result.matched()));
 
         execution.setVariable(outputBinding, out);
     }

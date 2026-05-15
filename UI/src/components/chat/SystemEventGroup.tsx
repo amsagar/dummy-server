@@ -36,7 +36,26 @@ const SystemEventGroup: FC<Props> = ({
     (msg) => msg.requestId && pendingInteractions.some((p) => p.requestId === msg.requestId)
   );
 
+  // Compact summary of any rule_domain.* events in this group.
+  const rdMessages = messages.filter((msg) => msg.eventType?.startsWith("rule_domain."));
+  let rdSummary = "";
+  if (rdMessages.length > 0) {
+    const phases: string[] = [];
+    const sawCompile = rdMessages.some((m) => m.eventType === "rule_domain.compile.start");
+    const sawCacheHit = rdMessages.some((m) => m.eventType === "rule_domain.cache_hit");
+    const sawExecuted = rdMessages.some((m) => m.eventType === "rule_domain.executed");
+    const sawFailed = rdMessages.some((m) => m.eventType === "rule_domain.failed" || m.eventType === "rule_domain.compile.failed");
+    const sawRetry = rdMessages.some((m) => m.eventType === "rule_domain.tool.retry");
+    if (sawCacheHit && !sawCompile) phases.push("cache hit");
+    if (sawCompile) phases.push("compiled");
+    if (sawRetry) phases.push("retried");
+    if (sawExecuted) phases.push("ran");
+    if (sawFailed) phases.push("failed → fallback");
+    rdSummary = `Compiled flow (${phases.join(" → ") || rdMessages.length + " step(s)"})`;
+  }
+
   const parts: string[] = [];
+  if (rdSummary) parts.push(rdSummary);
   if (toolNames.length === 1) parts.push(`Called ${toolNames[0]}`);
   else if (toolNames.length === 2) parts.push(`Called ${toolNames[0]}, ${toolNames[1]}`);
   else if (toolNames.length > 2) parts.push(`Called ${toolNames[0]} +${toolNames.length - 1} more`);

@@ -17,6 +17,7 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -52,6 +53,14 @@ public class ToolExecutionService {
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .build();
+
+    /**
+     * Per-request body timeout for tool HTTP calls. Defaults to 45s, configurable
+     * via {@code pods.tool-execution.http-timeout-seconds}. The TCP connect timeout
+     * above is separate and intentionally tight.
+     */
+    @org.springframework.beans.factory.annotation.Value("${pods.tool-execution.http-timeout-seconds:45}")
+    private int httpTimeoutSeconds = 45;
     private final ObjectMapper objectMapper;
     private final McpClientService mcpClientService;
     private final McpRuntimeAdapter mcpRuntimeAdapter;
@@ -164,7 +173,7 @@ public class ToolExecutionService {
                         asCurl(method, endpoint, headers, ("GET".equals(method) || "DELETE".equals(method)) ? null : body));
                 HttpRequest.Builder req = HttpRequest.newBuilder()
                         .uri(URI.create(endpoint))
-                        .timeout(Duration.ofSeconds(15));
+                        .timeout(Duration.ofSeconds(httpTimeoutSeconds));
                 headers.forEach(req::header);
                 if ("GET".equals(method) || "DELETE".equals(method)) {
                     req.method(method, HttpRequest.BodyPublishers.noBody());
@@ -186,6 +195,18 @@ public class ToolExecutionService {
                     return new ExecutionResult(true, responseBody, null);
                 }
                 last = new RuntimeException("HTTP " + response.statusCode() + ": " + truncate(response.body(), 500));
+            } catch (HttpTimeoutException te) {
+                // Caller (ToolCallDelegate) owns timeout retries — return immediately
+                // with a TIMEOUT: prefix so it can pattern-match. Don't burn through
+                // our internal retry budget on a slow upstream when the delegate is
+                // already willing to wait longer.
+                log.info("[ToolExecutionService] http tool={} attempt={} timeout after {}s",
+                        tool.getName(),
+                        attempt + 1,
+                        httpTimeoutSeconds);
+                state.recordFailure(now);
+                return new ExecutionResult(false, null,
+                        "TIMEOUT: " + tool.getName() + " did not respond within " + httpTimeoutSeconds + "s");
             } catch (Exception e) {
                 log.info("[ToolExecutionService] http tool={} attempt={} error={}",
                         tool.getName(),
@@ -279,7 +300,7 @@ public class ToolExecutionService {
             }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
+                    .timeout(Duration.ofSeconds(httpTimeoutSeconds))
                     .GET()
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -320,7 +341,7 @@ public class ToolExecutionService {
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("https://mcp.exa.ai/mcp"))
-                    .timeout(Duration.ofSeconds(25))
+                    .timeout(Duration.ofSeconds(httpTimeoutSeconds))
                     .header("Accept", "application/json, text/event-stream")
                     .header("Content-Type", "application/json")
                     .header("User-Agent", "Mozilla/5.0 (compatible; pods-ai-agent/1.0)")

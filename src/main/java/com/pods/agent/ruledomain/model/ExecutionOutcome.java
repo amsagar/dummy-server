@@ -14,6 +14,7 @@ import java.util.Map;
  * @param fromCacheHit    true if the intent matched an existing domain; false if compiled fresh
  * @param latencyMs       wall time from orchestrator entry to BPMN end event
  * @param error           non-null if the BPMN run completed but with a recorded error
+ * @param errorMeta       optional structured metadata about the error (e.g. {"failedTool": "Get_OrderID"})
  */
 public record ExecutionOutcome(
         boolean handled,
@@ -22,10 +23,11 @@ public record ExecutionOutcome(
         Map<String, Object> outputs,
         boolean fromCacheHit,
         long latencyMs,
-        String error
+        String error,
+        Map<String, String> errorMeta
 ) {
     public static ExecutionOutcome notHandled() {
-        return new ExecutionOutcome(false, null, null, Map.of(), false, 0L, null);
+        return new ExecutionOutcome(false, null, null, Map.of(), false, 0L, null, null);
     }
 
     public static ExecutionOutcome handled(String domainId,
@@ -33,10 +35,18 @@ public record ExecutionOutcome(
                                            Map<String, Object> outputs,
                                            boolean fromCacheHit,
                                            long latencyMs) {
-        return new ExecutionOutcome(true, domainId, procId, outputs, fromCacheHit, latencyMs, null);
+        return new ExecutionOutcome(true, domainId, procId, outputs, fromCacheHit, latencyMs, null, null);
     }
 
     public static ExecutionOutcome failed(String domainId, String procId, String error, long latencyMs) {
-        return new ExecutionOutcome(true, domainId, procId, Map.of(), false, latencyMs, error);
+        return new ExecutionOutcome(true, domainId, procId, Map.of(), false, latencyMs, error, null);
+    }
+
+    public static ExecutionOutcome failed(String domainId,
+                                          String procId,
+                                          String error,
+                                          long latencyMs,
+                                          Map<String, String> errorMeta) {
+        return new ExecutionOutcome(true, domainId, procId, Map.of(), false, latencyMs, error, errorMeta);
     }
 }

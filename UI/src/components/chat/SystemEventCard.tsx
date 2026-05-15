@@ -41,6 +41,57 @@ const SystemEventCard: FC<Props> = ({
     pending?.metadata || normalizeQuestionMetadata(m.eventPayload?.metadata || m.eventPayload);
   const mode = metadata?.responseMode || "text";
 
+  // ── Rule-domain progress events ──
+  // Renders each rule_domain.* event as a compact timeline row with a phase
+  // icon (▸ active, ✓ done, ↻ retry, ✗ failed) and the short label produced by
+  // ChatPage's ruleDomainShortLabel helper. The full payload is exposed in the
+  // <details> body so a developer can drill into nodeId / args / errors.
+  if (m.eventType?.startsWith("rule_domain.")) {
+    const isFailure =
+      m.eventType === "rule_domain.failed" ||
+      m.eventType === "rule_domain.compile.failed" ||
+      (m.eventType === "rule_domain.execute.done" && m.eventPayload?.success === false) ||
+      (m.eventType === "rule_domain.tool.result" && m.eventPayload?.success === false) ||
+      (m.eventType === "rule_domain.decision.result" && m.eventPayload?.success === false);
+    const isRetry = m.eventType === "rule_domain.tool.retry";
+    const isStart =
+      m.eventType.endsWith(".start") ||
+      m.eventType.endsWith(".started") ||
+      m.eventType === "rule_domain.cache_lookup" ||
+      m.eventType === "rule_domain.compile.llm_call" ||
+      m.eventType === "rule_domain.compile.validating" ||
+      m.eventType === "rule_domain.compile.embedding" ||
+      m.eventType === "rule_domain.tool.call" ||
+      m.eventType === "rule_domain.decision.call" ||
+      m.eventType === "rule_domain.feel.eval";
+    const icon = isFailure ? "✗" : isRetry ? "↻" : isStart ? "▸" : "✓";
+    const phaseColor = isFailure
+      ? "text-red-600"
+      : isRetry
+      ? "text-amber-600"
+      : isStart
+      ? "text-blue-600"
+      : "text-emerald-600";
+    const payloadText = formatPayload(m.eventPayload);
+    return (
+      <details className="group/item rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
+        <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+          <ChevronRight size={9} className="shrink-0 text-slate-400 transition-transform group-open/item:rotate-90" />
+          <span className={`w-3 shrink-0 font-mono text-[11px] ${phaseColor}`}>{icon}</span>
+          <span className="min-w-0 flex-1 truncate text-slate-700">{m.content}</span>
+          <span className="shrink-0 font-mono text-[9px] text-slate-400">
+            {m.eventType.replace("rule_domain.", "")}
+          </span>
+        </summary>
+        {payloadText ? (
+          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-300 bg-white p-2.5 text-xs leading-5 text-slate-900">
+            {payloadText}
+          </pre>
+        ) : null}
+      </details>
+    );
+  }
+
   if (m.eventType === "task.started" || m.eventType === "task.done") {
     const taskName = m.eventPayload?.taskName || m.eventPayload?.taskId || "node";
     const status = m.eventPayload?.status || m.eventPayload?.result;

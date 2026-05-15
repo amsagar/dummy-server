@@ -5,18 +5,33 @@ import com.pods.agent.config.ModelProviderRouter;
 import com.pods.agent.config.RuleDomainProperties;
 import com.pods.agent.domain.AgentTool;
 import com.pods.agent.domain.ModelRef;
+import com.pods.agent.ruledomain.RuleDomainEventBus;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository;
 import com.pods.agent.ruledomain.invalidation.SkillSourceHasher;
 import com.pods.agent.ruledomain.invalidation.ToolSignatureHasher;
 import lombok.extern.slf4j.Slf4j;
+import org.flowable.bpmn.converter.BpmnXMLConverter;
+import org.flowable.bpmn.model.BoundaryEvent;
+import org.flowable.bpmn.model.BpmnModel;
+import org.flowable.bpmn.model.EndEvent;
+import org.flowable.bpmn.model.ErrorEventDefinition;
+import org.flowable.bpmn.model.FlowElement;
+import org.flowable.bpmn.model.Process;
+import org.flowable.bpmn.model.SequenceFlow;
+import org.flowable.bpmn.model.ServiceTask;
+import org.flowable.common.engine.api.io.InputStreamProvider;
 import org.flowable.engine.RepositoryService;
 import org.flowable.engine.repository.Deployment;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -60,6 +75,7 @@ public class BpmnCompiler {
     private final RuleDomainRepository repo;
     private final SkillSourceHasher skillHasher;
     private final ToolSignatureHasher toolHasher;
+    private final RuleDomainEventBus bus;
 
     public BpmnCompiler(ModelProviderRouter modelProviderRouter,
                         EmbeddingProviderRouter embeddingRouter,
@@ -68,7 +84,8 @@ public class BpmnCompiler {
                         RepositoryService repositoryService,
                         RuleDomainRepository repo,
                         SkillSourceHasher skillHasher,
-                        ToolSignatureHasher toolHasher) {
+                        ToolSignatureHasher toolHasher,
+                        RuleDomainEventBus bus) {
         this.modelProviderRouter = modelProviderRouter;
         this.embeddingRouter = embeddingRouter;
         this.props = props;
@@ -77,6 +94,7 @@ public class BpmnCompiler {
         this.repo = repo;
         this.skillHasher = skillHasher;
         this.toolHasher = toolHasher;
+        this.bus = bus;
     }
 
     public RuleDomain compile(String skillId,
@@ -94,15 +112,24 @@ public class BpmnCompiler {
         String system = promptBuilder.buildSystem();
         String user = promptBuilder.buildUser(skillMarkdown, tools, userRequest);
 
+        bus.emit("rule_domain.compile.llm_call", Map.of(
+                "model", compilerRef.modelId(), "provider", compilerRef.providerId()));
+
         // First attempt
+        long llmStart = System.currentTimeMillis();
         String xml = invokeLlm(client, spec.options(), system, user);
+        long llmMs = System.currentTimeMillis() - llmStart;
         xml = sanitize(xml);
+        xml = injectErrorBoundaries(xml);
+        bus.emit("rule_domain.compile.validating", Map.of("llmMs", llmMs));
         String error = tryDeploy(xml, skillName, intentLabel);
         int attempts = 1;
         if (error != null && props.getMaxCompileAttempts() > 1) {
             log.warn("First compile attempt rejected: {}", error);
+            bus.emit("rule_domain.compile.repair_attempt", Map.of("error", error));
             String repairUser = promptBuilder.buildRepair(xml, error);
             xml = sanitize(invokeLlm(client, spec.options(), system, repairUser));
+            xml = injectErrorBoundaries(xml);
             error = tryDeploy(xml, skillName, intentLabel);
             attempts = 2;
         }
@@ -141,12 +168,18 @@ public class BpmnCompiler {
             return repo.save(failed, null);
         }
 
+        bus.emit("rule_domain.compile.deployed", Map.of("procKey", procKey, "attempts", attempts));
+        bus.emit("rule_domain.compile.embedding", Map.of());
         float[] embedding = embed(userRequest);
         RuleDomain saved = builder
                 .status(RuleDomain.STATUS_DRAFT)
                 .flowableProcKey(procKey)
                 .build();
-        return repo.save(saved, embedding);
+        RuleDomain persisted = repo.save(saved, embedding);
+        bus.emit("rule_domain.compile.saved", Map.of(
+                "domainId", persisted.getId() == null ? "" : persisted.getId(),
+                "procKey", procKey));
+        return persisted;
     }
 
     private String invokeLlm(ChatClient client,
@@ -194,6 +227,105 @@ public class BpmnCompiler {
         if (close.find()) s = s.substring(0, close.start());
         return s.trim();
     }
+
+    /**
+     * Attach a {@code <bpmn:boundaryEvent>} with {@code errorCode="TOOL_EXECUTION_FAILED"}
+     * to every service task wired through {@code ${toolCallDelegate}}. All boundaries
+     * route to a single shared error end event so a failed tool call terminates the
+     * process cleanly (with {@code error} set on the historic process instance)
+     * instead of escaping as an uncaught {@link org.flowable.engine.delegate.BpmnError}.
+     *
+     * <p>The {@code _failedTool} process variable is set by {@code ToolCallDelegate}
+     * before it throws, so the orchestrator can include it in the user-facing
+     * advisory message on fallback.
+     *
+     * <p>On any parse failure this method returns the input XML unchanged — the
+     * primary deploy pass in {@link #tryDeploy} is still the source of truth for
+     * compile validity.
+     */
+    static String injectErrorBoundaries(String xml) {
+        if (xml == null || xml.isBlank()) return xml;
+        try {
+            BpmnXMLConverter converter = new BpmnXMLConverter();
+            InputStreamProvider isp = () -> new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8));
+            BpmnModel model = converter.convertToBpmnModel(isp, false, false);
+            if (model == null || model.getProcesses() == null || model.getProcesses().isEmpty()) return xml;
+
+            boolean changed = false;
+            for (Process proc : model.getProcesses()) {
+                changed |= attachBoundariesToProc(proc);
+            }
+            if (!changed) return xml;
+
+            byte[] out = converter.convertToXML(model);
+            return new String(out, StandardCharsets.UTF_8);
+        } catch (Exception ex) {
+            // Don't fail compilation just because boundary injection couldn't run.
+            // The tryDeploy() step below catches genuine XML problems.
+            return xml;
+        }
+    }
+
+    private static boolean attachBoundariesToProc(Process proc) {
+        List<ServiceTask> toolTasks = new ArrayList<>();
+        for (FlowElement fe : proc.getFlowElements()) {
+            if (fe instanceof ServiceTask st && isToolCallDelegate(st)) {
+                if (st.getBoundaryEvents() != null && !st.getBoundaryEvents().isEmpty()) {
+                    boolean alreadyHandled = st.getBoundaryEvents().stream().anyMatch(b ->
+                            b.getEventDefinitions() != null && b.getEventDefinitions().stream()
+                                    .anyMatch(d -> d instanceof ErrorEventDefinition));
+                    if (alreadyHandled) continue;
+                }
+                toolTasks.add(st);
+            }
+        }
+        if (toolTasks.isEmpty()) return false;
+
+        EndEvent sharedEnd = ensureSharedErrorEnd(proc);
+
+        for (ServiceTask st : toolTasks) {
+            String beId = st.getId() + "_onError";
+            BoundaryEvent be = new BoundaryEvent();
+            be.setId(beId);
+            be.setAttachedToRefId(st.getId());
+            be.setAttachedToRef(st);
+            be.setCancelActivity(true);
+
+            ErrorEventDefinition eed = new ErrorEventDefinition();
+            eed.setErrorCode("TOOL_EXECUTION_FAILED");
+            be.addEventDefinition(eed);
+
+            proc.addFlowElement(be);
+            if (st.getBoundaryEvents() == null) st.setBoundaryEvents(new ArrayList<>());
+            st.getBoundaryEvents().add(be);
+
+            SequenceFlow sf = new SequenceFlow(beId, sharedEnd.getId());
+            sf.setId(beId + "_flow");
+            proc.addFlowElement(sf);
+        }
+        return true;
+    }
+
+    private static boolean isToolCallDelegate(ServiceTask st) {
+        String impl = st.getImplementation();
+        return impl != null && impl.contains("toolCallDelegate");
+    }
+
+    private static EndEvent ensureSharedErrorEnd(Process proc) {
+        String sharedId = "endOnToolFailure";
+        FlowElement existing = proc.getFlowElement(sharedId);
+        if (existing instanceof EndEvent ee) return ee;
+
+        EndEvent ee = new EndEvent();
+        ee.setId(sharedId);
+        ee.setName("Tool failure");
+        ErrorEventDefinition errDef = new ErrorEventDefinition();
+        errDef.setErrorCode("TOOL_EXECUTION_FAILED");
+        ee.addEventDefinition(errDef);
+        proc.addFlowElement(ee);
+        return ee;
+    }
+
 
     private static String extractProcessId(String xml) {
         Matcher m = PROC_ID.matcher(xml);

@@ -131,6 +131,18 @@ markdown), never when the value is something a future user might change.
 | Null/empty check | `field = null` / `field = ""` |
 | Count | `count(xs)` |
 
+## Error handling
+
+**Do not emit `<bpmn:boundaryEvent>` elements.** The compiler post-processes
+your output and automatically attaches an interrupting error boundary to every
+`${toolCallDelegate}` service task. The boundary catches a
+`TOOL_EXECUTION_FAILED` error code and routes to a shared error end event that
+terminates the process cleanly. The runtime then falls back to the LLM tool
+loop and surfaces the failure to the user.
+
+Concretely: focus on the happy path. Tool timeouts and HTTP failures are
+handled outside your BPMN.
+
 ## Common mistakes to avoid
 
 - ❌ `"ORD_ID":"\"600030447\""` — hardcoding the literal from the example request.
@@ -140,6 +152,8 @@ markdown), never when the value is something a future user might change.
      `outputBinding` as a single variable.
 - ❌ Wrapping the BPMN in markdown fences in the output.
   ✅ Output the raw XML only.
+- ❌ Adding your own `<bpmn:boundaryEvent>` for tool failures.
+  ✅ Trust the auto-injection — emit a clean happy-path flow only.
 
 ## Skill specification
 

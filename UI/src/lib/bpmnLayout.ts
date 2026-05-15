@@ -141,24 +141,68 @@ function layoutOneContainer(container: any): string {
   const flows = flowElements.filter((fe) => fe.$type === "bpmn:SequenceFlow");
   if (nodes.length === 0) return "";
 
+  // Boundary events attach to a host activity's perimeter. We exclude them
+  // from the dagre graph (otherwise they get laid out as detached vertices
+  // floating next to the host), then place them on the host's bottom-right
+  // corner after the main layout has run, n8n-style.
+  const boundaryByHost = new Map<string, any[]>();
+  const mainNodes: any[] = [];
+  for (const n of nodes) {
+    if (n.$type === "bpmn:BoundaryEvent") {
+      const hostId = n.attachedToRef?.id ?? n.attachedToRef;
+      if (hostId) {
+        if (!boundaryByHost.has(hostId)) boundaryByHost.set(hostId, []);
+        boundaryByHost.get(hostId)!.push(n);
+        continue;
+      }
+    }
+    mainNodes.push(n);
+  }
+
   const g = new (dagre as any).graphlib.Graph();
   g.setGraph({ rankdir: "LR", nodesep: 50, ranksep: 90, marginx: 30, marginy: 30 });
   g.setDefaultEdgeLabel(() => ({}));
 
-  for (const n of nodes) {
+  for (const n of mainNodes) {
     const { width, height } = sizeFor(n);
     g.setNode(n.id, { width, height });
   }
+  // Boundary-event-outgoing flows still need their source coordinates resolved.
+  // We compute boundary positions from the host, so we can route their edges
+  // by hand. The non-boundary edges go through dagre as usual.
+  const dagreFlows: any[] = [];
+  const boundaryFlows: any[] = [];
   for (const f of flows) {
     const src = f.sourceRef?.id ?? f.sourceRef;
     const tgt = f.targetRef?.id ?? f.targetRef;
-    if (!src || !tgt || !g.hasNode(src) || !g.hasNode(tgt)) continue;
-    g.setEdge(src, tgt, { id: f.id });
+    if (!src || !tgt) continue;
+    if (g.hasNode(src) && g.hasNode(tgt)) {
+      dagreFlows.push(f);
+      g.setEdge(src, tgt, { id: f.id });
+    } else if (!g.hasNode(src) && g.hasNode(tgt)) {
+      // Source is a boundary event — route manually.
+      boundaryFlows.push(f);
+    }
   }
 
   (dagre as any).layout(g);
 
-  const shapeXml = nodes
+  // Position boundary events at host's bottom-right corner.
+  const boundaryPositions = new Map<string, { x: number; y: number; width: number; height: number }>();
+  for (const [hostId, boundaries] of boundaryByHost.entries()) {
+    const hostPos = g.node(hostId);
+    if (!hostPos) continue;
+    boundaries.forEach((be, idx) => {
+      const sz = sizeFor(be);
+      // Offset each subsequent boundary 24px to the left along the host's
+      // bottom edge so multiple boundary events don't stack.
+      const cx = hostPos.x + hostPos.width / 2 - 18 - idx * 24;
+      const cy = hostPos.y + hostPos.height / 2 - 4;
+      boundaryPositions.set(be.id, { x: cx, y: cy, width: sz.width, height: sz.height });
+    });
+  }
+
+  const mainShapeXml = mainNodes
     .map((n) => {
       const pos = g.node(n.id);
       if (!pos) return "";
@@ -174,7 +218,17 @@ function layoutOneContainer(container: any): string {
     .filter(Boolean)
     .join("\n");
 
-  const edgeXml = flows
+  const boundaryShapeXml = Array.from(boundaryPositions.entries())
+    .map(([beId, pos]) => {
+      const x = Math.round(pos.x - pos.width / 2);
+      const y = Math.round(pos.y - pos.height / 2);
+      return `      <bpmndi:BPMNShape id="${beId}_di" bpmnElement="${beId}">
+        <dc:Bounds x="${x}" y="${y}" width="${pos.width}" height="${pos.height}" />
+      </bpmndi:BPMNShape>`;
+    })
+    .join("\n");
+
+  const dagreEdgeXml = dagreFlows
     .map((f) => {
       const src = f.sourceRef?.id ?? f.sourceRef;
       const tgt = f.targetRef?.id ?? f.targetRef;
@@ -191,10 +245,30 @@ function layoutOneContainer(container: any): string {
     .filter(Boolean)
     .join("\n");
 
+  const boundaryEdgeXml = boundaryFlows
+    .map((f) => {
+      const src = f.sourceRef?.id ?? f.sourceRef;
+      const tgt = f.targetRef?.id ?? f.targetRef;
+      const bePos = boundaryPositions.get(src);
+      const tgtNode = g.node(tgt);
+      if (!bePos || !tgtNode) return "";
+      const start = { x: bePos.x, y: bePos.y };
+      const end = boundaryPoint(tgtNode, { x: bePos.x, y: bePos.y, width: tgtNode.width, height: tgtNode.height });
+      return `      <bpmndi:BPMNEdge id="${f.id}_di" bpmnElement="${f.id}">
+        <di:waypoint x="${Math.round(start.x)}" y="${Math.round(start.y)}" />
+        <di:waypoint x="${Math.round(end.x)}" y="${Math.round(end.y)}" />
+      </bpmndi:BPMNEdge>`;
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  const shapesAndEdges = [mainShapeXml, boundaryShapeXml, dagreEdgeXml, boundaryEdgeXml]
+    .filter((s) => s && s.length > 0)
+    .join("\n");
+
   return `  <bpmndi:BPMNDiagram id="BPMNDiagram_${container.id}">
     <bpmndi:BPMNPlane id="BPMNPlane_${container.id}" bpmnElement="${container.id}">
-${shapeXml}
-${edgeXml}
+${shapesAndEdges}
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>`;
 }

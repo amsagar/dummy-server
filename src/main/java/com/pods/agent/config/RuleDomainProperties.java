@@ -61,6 +61,15 @@ public class RuleDomainProperties {
      */
     private ModelSelector embeddingModel = new ModelSelector("", "");
 
+    /** Tool-call retry config used by ToolCallDelegate when a tool times out. */
+    private ToolRetry toolRetry = new ToolRetry();
+
+    /** Soft circuit-breaker: skip a compiled domain temporarily after this many consecutive failures. */
+    private int circuitBreakerConsecutiveFailures = 3;
+
+    /** Soft circuit-breaker: how long to skip a domain after the threshold is hit, in seconds. */
+    private int circuitBreakerOpenSeconds = 300;
+
     private final RuleDomainConfigRepository configRepository;
 
     @Autowired
@@ -126,5 +135,17 @@ public class RuleDomainProperties {
     public static class ModelSelector {
         private String providerId;
         private String modelId;
+    }
+
+    @lombok.Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
+    public static class ToolRetry {
+        /** Maximum attempts (initial + retries) when a tool call times out. */
+        private int toolTimeoutMaxAttempts = 3;
+        /** Backoff between attempts in milliseconds. Last entry is used for any remaining attempts. */
+        private long[] toolTimeoutBackoffMs = {0L, 2000L, 5000L};
+
+        public ToolRetry() {}
     }
 }

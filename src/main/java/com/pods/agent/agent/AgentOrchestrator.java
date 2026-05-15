@@ -10,6 +10,7 @@ import com.pods.agent.repository.AgentProfileRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.ruledomain.ResponseSummarizer;
 import com.pods.agent.ruledomain.RuleDomainOrchestrator;
+import com.pods.agent.ruledomain.SseRuleDomainEventBus;
 import com.pods.agent.ruledomain.model.ExecutionOutcome;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.instruction.InstructionLoaderService;
@@ -58,6 +59,7 @@ public class AgentOrchestrator {
     /** Optional — only present when the compiled-rule-domain feature is wired in. */
     private final ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator;
     private final ObjectProvider<ResponseSummarizer> responseSummarizer;
+    private final ObjectProvider<SseRuleDomainEventBus> ruleDomainEventBus;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
 
@@ -70,7 +72,8 @@ public class AgentOrchestrator {
                              ObjectMapper objectMapper,
                              AgentProfileRepository agentProfileRepository,
                              ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator,
-                             ObjectProvider<ResponseSummarizer> responseSummarizer) {
+                             ObjectProvider<ResponseSummarizer> responseSummarizer,
+                             ObjectProvider<SseRuleDomainEventBus> ruleDomainEventBus) {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.instructionLoaderService = instructionLoaderService;
@@ -81,6 +84,7 @@ public class AgentOrchestrator {
         this.agentProfileRepository = agentProfileRepository;
         this.ruleDomainOrchestrator = ruleDomainOrchestrator;
         this.responseSummarizer = responseSummarizer;
+        this.ruleDomainEventBus = ruleDomainEventBus;
         this.baseSystemPrompt = loadBaseSystemPrompt();
         this.memoryToolsPrompt = loadPromptResource("prompts/AUTO_MEMORY_TOOLS_SYSTEM_PROMPT.md");
     }
@@ -120,13 +124,15 @@ public class AgentOrchestrator {
         // falls through to the existing LLM loop below.
         RuleDomainOrchestrator rdo = ruleDomainOrchestrator == null ? null : ruleDomainOrchestrator.getIfAvailable();
         ResponseSummarizer summarizer = responseSummarizer == null ? null : responseSummarizer.getIfAvailable();
+        SseRuleDomainEventBus rdBus = ruleDomainEventBus == null ? null : ruleDomainEventBus.getIfAvailable();
+        // State threaded to the LLM-loop block below so it can append the
+        // fallback advisory to the assistant response.
+        boolean fellBackFromRuleDomain = false;
+        String fallbackFailedTool = null;
         if (rdo != null && summarizer != null) {
+            if (rdBus != null) rdBus.bind(turnId, sender);
             try {
                 ExecutionOutcome outcome = rdo.handleIfApplicable(userText, null, session.getSessionId(), turnId);
-                // Only short-circuit when the compiled BPMN completed cleanly.
-                // On failure we deliberately fall through to the existing LLM
-                // loop so the user still gets a useful answer instead of a
-                // "sorry, the workflow errored" stub.
                 if (outcome.handled() && outcome.error() == null) {
                     String summary = summarizer.summarize(outcome, userText);
                     if (summary != null && !summary.isBlank()) {
@@ -145,16 +151,23 @@ public class AgentOrchestrator {
                 if (outcome.handled() && outcome.error() != null) {
                     log.warn("[AgentOrchestrator] Compiled rule-domain failed ({}); falling back to LLM loop.",
                             outcome.error());
+                    if (outcome.errorMeta() != null) {
+                        fallbackFailedTool = outcome.errorMeta().get("failedTool");
+                    }
+                    fellBackFromRuleDomain = true;
                     sender.sendCustom("rule_domain.failed", Map.of(
                             "domainId", outcome.domainId() == null ? "" : outcome.domainId(),
                             "procId", outcome.flowableProcId() == null ? "" : outcome.flowableProcId(),
-                            "error", outcome.error()
+                            "error", outcome.error(),
+                            "failedTool", fallbackFailedTool == null ? "" : fallbackFailedTool
                     ));
                     // intentional fall-through below
                 }
             } catch (Exception ex) {
                 log.warn("[AgentOrchestrator] Rule-domain path threw; falling back to LLM loop: {}",
                         ex.getMessage());
+            } finally {
+                if (rdBus != null) rdBus.unbind(turnId);
             }
         }
 
@@ -197,6 +210,20 @@ public class AgentOrchestrator {
                     })
                     .blockLast();
             thinkParser.flush();
+
+            // If we fell back here from a failed compiled rule-domain, append a
+            // one-line advisory so the user knows the precompiled workflow had
+            // trouble and can investigate it in the admin UI. Both stream and
+            // persist (appending to fullResponse before .toString()) so the
+            // advisory survives into the next turn's conversation history.
+            if (fellBackFromRuleDomain) {
+                String advisory = "\n\n> *Note: the precompiled workflow for this intent failed"
+                        + (fallbackFailedTool != null && !fallbackFailedTool.isBlank()
+                            ? " (`" + fallbackFailedTool + "`)" : "")
+                        + ". This answer came from the live agent — review the domain at **Settings → Rule Domains**.*";
+                sender.sendTextDelta(advisory);
+                fullResponse.append(advisory);
+            }
 
             String finalContent = fullResponse.toString();
             if (!finalContent.isBlank()) {

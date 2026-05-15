@@ -1,5 +1,6 @@
 package com.pods.agent.ruledomain.runtime;
 
+import com.pods.agent.ruledomain.RuleDomainEventBus;
 import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.delegate.BpmnError;
 import org.flowable.engine.delegate.DelegateExecution;
@@ -30,15 +31,24 @@ import java.util.Map;
 public class FeelExtractDelegate implements JavaDelegate {
 
     private final FeelHelper feel;
+    private final RuleDomainEventBus bus;
 
-    public FeelExtractDelegate(FeelHelper feel) {
+    public FeelExtractDelegate(FeelHelper feel, RuleDomainEventBus bus) {
         this.feel = feel;
+        this.bus = bus;
     }
 
     @Override
     public void execute(DelegateExecution execution) {
         String expr = BpmnFieldReader.required(execution, "feelExpr");
         String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
+
+        String nodeId = execution.getCurrentActivityId();
+        Object turnId = execution.getVariable("_turnId");
+        bus.emit("rule_domain.feel.eval", Map.of(
+                "turnId", turnId == null ? "" : turnId.toString(),
+                "nodeId", nodeId == null ? "" : nodeId,
+                "outputBinding", outputBinding));
 
         Map<String, Object> ctx = new LinkedHashMap<>(execution.getVariables());
         Object value;

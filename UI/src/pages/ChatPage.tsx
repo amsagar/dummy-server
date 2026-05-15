@@ -153,6 +153,57 @@ export default function ChatPage() {
     return () => window.clearInterval(intervalId);
   }, [isStreaming]);
 
+  /**
+   * Compact one-line label for a rule_domain.* event. The full payload is
+   * preserved in the system message's eventPayload field; this is only the
+   * collapsed-line label that SystemEventCard shows when the timeline is
+   * folded.
+   */
+  const ruleDomainShortLabel = (ev: any): string => {
+    switch (ev.type) {
+      case 'rule_domain.routed': return `Routed to skill: ${ev.skillName || ev.skillId || '?'}`;
+      case 'rule_domain.cache_lookup': return 'Looking up cached domain…';
+      case 'rule_domain.cache_hit': return 'Cache hit — using compiled domain';
+      case 'rule_domain.cache_miss': return 'Cache miss — compiling new domain';
+      case 'rule_domain.circuit_open': return 'Cached domain temporarily skipped (recent failures)';
+      case 'rule_domain.compile.start': return 'Compiling BPMN…';
+      case 'rule_domain.compile.llm_call': return `Calling compiler (${ev.model || 'LLM'})…`;
+      case 'rule_domain.compile.validating': return 'Validating BPMN';
+      case 'rule_domain.compile.repair_attempt': return 'Compiler retry (parse error)';
+      case 'rule_domain.compile.deployed': return `Deployed (proc key ${ev.procKey || '?'})`;
+      case 'rule_domain.compile.embedding': return 'Embedding intent…';
+      case 'rule_domain.compile.saved': return 'Domain saved';
+      case 'rule_domain.compile.done': return 'Compile complete';
+      case 'rule_domain.compile.failed': return `Compile failed: ${ev.error || 'unknown'}`;
+      case 'rule_domain.execute.start': return `Executing BPMN (${ev.fromCacheHit ? 'cached' : 'fresh'})…`;
+      case 'rule_domain.execute.done':
+        return ev.success
+          ? `Execution complete (${ev.latencyMs || 0}ms)`
+          : `Execution failed: ${ev.error || 'unknown'}`;
+      case 'rule_domain.node.started': return `▸ ${ev.nodeName || ev.nodeId || 'node'}`;
+      case 'rule_domain.node.finished': return `✓ ${ev.nodeName || ev.nodeId || 'node'}`;
+      case 'rule_domain.node.cancelled': return `✗ ${ev.nodeName || ev.nodeId || 'node'} (cancelled)`;
+      case 'rule_domain.tool.call': return `→ ${ev.toolName || 'tool'}`;
+      case 'rule_domain.tool.result':
+        return ev.success
+          ? `← ${ev.toolName || 'tool'}`
+          : `✗ ${ev.toolName || 'tool'}: ${(ev.error || '').slice(0, 80)}`;
+      case 'rule_domain.tool.retry': return `↻ ${ev.toolName || 'tool'} retry ${ev.attempt || ''}`;
+      case 'rule_domain.decision.call': return `▸ Decision: ${ev.tableName || '?'}`;
+      case 'rule_domain.decision.result':
+        return ev.success
+          ? `✓ Decision: ${ev.tableName} (matched=${ev.matched})`
+          : `✗ Decision: ${ev.tableName} failed`;
+      case 'rule_domain.feel.eval': return `→ FEEL → ${ev.outputBinding || '?'}`;
+      case 'rule_domain.executed': return `Compiled flow done${ev.fromCacheHit ? ' (cache hit)' : ''} — ${ev.latencyMs || 0}ms`;
+      case 'rule_domain.failed':
+        return ev.failedTool
+          ? `Compiled flow failed at ${ev.failedTool} — falling back to live agent`
+          : 'Compiled flow failed — falling back to live agent';
+      default: return ev.type;
+    }
+  };
+
   const appendSystemMessage = (eventType: string, content: string, requestId?: string, eventPayload?: any) => {
     setMessages((prev) => {
       if (requestId && eventType === "approval_status") {
@@ -904,6 +955,41 @@ export default function ChatPage() {
           case 'cost.updated':
             break;
           case 'summary.updated':
+            break;
+
+          // ── Rule-domain progress (compiled BPMN path) ──
+          // Every rule_domain.* event lands in the system-message stream so
+          // SystemEventCard can render a grouped progress timeline. The user
+          // sees real-time progress through routing → compile → execute
+          // instead of a frozen chat while the BPMN runs.
+          case 'rule_domain.routed':
+          case 'rule_domain.cache_lookup':
+          case 'rule_domain.cache_hit':
+          case 'rule_domain.cache_miss':
+          case 'rule_domain.circuit_open':
+          case 'rule_domain.compile.start':
+          case 'rule_domain.compile.llm_call':
+          case 'rule_domain.compile.validating':
+          case 'rule_domain.compile.repair_attempt':
+          case 'rule_domain.compile.deployed':
+          case 'rule_domain.compile.embedding':
+          case 'rule_domain.compile.saved':
+          case 'rule_domain.compile.done':
+          case 'rule_domain.compile.failed':
+          case 'rule_domain.execute.start':
+          case 'rule_domain.execute.done':
+          case 'rule_domain.node.started':
+          case 'rule_domain.node.finished':
+          case 'rule_domain.node.cancelled':
+          case 'rule_domain.tool.call':
+          case 'rule_domain.tool.result':
+          case 'rule_domain.tool.retry':
+          case 'rule_domain.decision.call':
+          case 'rule_domain.decision.result':
+          case 'rule_domain.feel.eval':
+          case 'rule_domain.executed':
+          case 'rule_domain.failed':
+            appendSystemMessage(ev.type, ruleDomainShortLabel(ev), undefined, ev);
             break;
 
           case 'done':

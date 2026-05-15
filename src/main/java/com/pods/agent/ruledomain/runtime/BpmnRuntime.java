@@ -93,6 +93,14 @@ public class BpmnRuntime {
         long start = System.currentTimeMillis();
 
         Map<String, Object> variables = new LinkedHashMap<>(inputs == null ? Map.of() : inputs);
+        // Propagate the chat turn id into process variables so cross-thread
+        // emitters (BpmnTraceListener, etc.) can resolve the right SSE stream.
+        if (turnId != null && !turnId.isBlank()) {
+            variables.putIfAbsent("_turnId", turnId);
+        }
+        if (sessionId != null && !sessionId.isBlank()) {
+            variables.putIfAbsent("_sessionId", sessionId);
+        }
         String businessKey = "rd-" + UUID.randomUUID();
 
         ProcessInstance pi;
@@ -121,17 +129,31 @@ public class BpmnRuntime {
                 ? (Map<String, Object>) r
                 : new LinkedHashMap<>(historicVars);
 
-        boolean failed = historic != null && historic.getEndTime() == null;
-        String error = historic == null ? null : historic.getDeleteReason();
+        Object failedToolVar = historicVars.get("_failedTool");
+        boolean processAborted = historic != null && historic.getEndTime() == null;
+        boolean tookErrorPath = failedToolVar != null;
+        boolean failed = processAborted || tookErrorPath;
+
+        String error;
+        if (tookErrorPath) {
+            error = "Tool execution failed: " + failedToolVar;
+        } else if (processAborted) {
+            error = historic == null ? null : historic.getDeleteReason();
+        } else {
+            error = null;
+        }
         long latency = System.currentTimeMillis() - start;
 
         String outputsJson = safeJson(resultVar);
-        String inputsJson = safeJson(inputs);
         persist(domain, pi.getProcessInstanceId(), sessionId, turnId, inputs,
                 outputsJson, !failed, error, latency);
 
         if (failed) {
-            return ExecutionOutcome.failed(domain.getId(), pi.getProcessInstanceId(), error, latency);
+            Map<String, String> errorMeta = null;
+            if (failedToolVar != null) {
+                errorMeta = Map.of("failedTool", failedToolVar.toString());
+            }
+            return ExecutionOutcome.failed(domain.getId(), pi.getProcessInstanceId(), error, latency, errorMeta);
         }
         return ExecutionOutcome.handled(domain.getId(), pi.getProcessInstanceId(),
                 resultVar, fromCacheHit, latency);
