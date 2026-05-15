@@ -88,7 +88,7 @@ public class ToolCallDelegate implements JavaDelegate {
             throw new BpmnError("TOOL_NOT_FOUND", "No enabled tool named: " + toolName);
         }
 
-        Map<String, Object> feelCtx = new LinkedHashMap<>(execution.getVariables());
+        Map<String, Object> feelCtx = BpmnVariables.readContext(execution);
         Map<String, String> argTemplate = parseStringMap(argTemplateJson, "argTemplate");
         Map<String, Object> resolved = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : argTemplate.entrySet()) {
@@ -152,7 +152,7 @@ public class ToolCallDelegate implements JavaDelegate {
             finalValue = transformed;
         }
 
-        execution.setVariable(outputBinding, finalValue);
+        BpmnVariables.set(execution, outputBinding, finalValue);
     }
 
     private ToolExecutionService.ExecutionResult executeWithTimeoutRetry(

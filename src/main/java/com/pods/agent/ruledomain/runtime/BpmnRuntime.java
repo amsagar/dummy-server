@@ -124,10 +124,15 @@ public class BpmnRuntime {
                 .singleResult();
 
         Map<String, Object> historicVars = readHistoricVariables(pi.getProcessInstanceId());
+        // Variables may come back as Jackson JsonNode (when stored via
+        // BpmnVariables.set for Flowable's JSON type). Unwrap to plain
+        // Java types so the summarizer + serializer downstream don't have
+        // to know about Jackson 2.x vs 3.x.
+        Object resultRaw = BpmnVariables.toJavaNative(historicVars.get("result"));
         @SuppressWarnings("unchecked")
-        Map<String, Object> resultVar = historicVars.get("result") instanceof Map<?, ?> r
+        Map<String, Object> resultVar = resultRaw instanceof Map<?, ?> r
                 ? (Map<String, Object>) r
-                : new LinkedHashMap<>(historicVars);
+                : flattenedHistoricVars(historicVars);
 
         Object failedToolVar = historicVars.get("_failedTool");
         boolean processAborted = historic != null && historic.getEndTime() == null;
@@ -165,6 +170,17 @@ public class BpmnRuntime {
                 .processInstanceId(procInstanceId)
                 .list()
                 .forEach(v -> out.put(v.getVariableName(), v.getValue()));
+        return out;
+    }
+
+    /** Like {@code new LinkedHashMap<>(historicVars)} but with every value
+     *  passed through {@link BpmnVariables#toJavaNative} so any leftover
+     *  Jackson 2.x JsonNode trees become plain Java structures. */
+    private static Map<String, Object> flattenedHistoricVars(Map<String, Object> historicVars) {
+        Map<String, Object> out = new LinkedHashMap<>(historicVars.size());
+        for (Map.Entry<String, Object> e : historicVars.entrySet()) {
+            out.put(e.getKey(), BpmnVariables.toJavaNative(e.getValue()));
+        }
         return out;
     }
 

@@ -63,7 +63,7 @@ public class DecisionTableDelegate implements JavaDelegate {
                     "inputsTemplate must be {column: feelExpr}: " + ex.getMessage());
         }
 
-        Map<String, Object> feelCtx = new LinkedHashMap<>(execution.getVariables());
+        Map<String, Object> feelCtx = BpmnVariables.readContext(execution);
         Map<String, Object> inputs = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : template.entrySet()) {
             try {
@@ -109,7 +109,7 @@ public class DecisionTableDelegate implements JavaDelegate {
                 "success", true,
                 "matched", result.matched()));
 
-        execution.setVariable(outputBinding, out);
+        BpmnVariables.set(execution, outputBinding, out);
     }
 
 }

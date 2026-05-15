@@ -50,7 +50,7 @@ public class FeelExtractDelegate implements JavaDelegate {
                 "nodeId", nodeId == null ? "" : nodeId,
                 "outputBinding", outputBinding));
 
-        Map<String, Object> ctx = new LinkedHashMap<>(execution.getVariables());
+        Map<String, Object> ctx = BpmnVariables.readContext(execution);
         Object value;
         try {
             value = feel.eval(expr, ctx);
@@ -59,7 +59,7 @@ public class FeelExtractDelegate implements JavaDelegate {
         }
 
         log.debug("BPMN feel-extract: {} -> {}", expr, value);
-        execution.setVariable(outputBinding, value);
+        BpmnVariables.set(execution, outputBinding, value);
     }
 
 }
