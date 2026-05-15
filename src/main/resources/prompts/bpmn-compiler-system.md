@@ -131,6 +131,57 @@ markdown), never when the value is something a future user might change.
 | Null/empty check | `field = null` / `field = ""` |
 | Count | `count(xs)` |
 
+## Reading data shapes from sample responses
+
+Skills are written in business prose; tool responses are written in JSON.
+The two don't always line up. The skill may name a concept ("the primary
+contact", "the source location", "the active record"), but the underlying
+JSON usually expresses that concept indirectly — most often as an entry
+in a sibling array that's tagged with a discriminator field.
+
+**Rule: always navigate to the field path that actually exists in the
+sample response. Never treat a business noun from the skill text as a
+literal property name unless the sample response shows that exact key.**
+
+Common indirection patterns to watch for:
+
+| Skill describes | Likely JSON shape | ❌ Naive | ✅ Correct |
+|---|---|---|---|
+| A named role / category | `items: [{type:"X", …}, {type:"Y", …}]` | `parent.X` | `parent.items[type = "X"][1]` |
+| The "primary" / "main" one | `entries: [{isPrimary:true, …}, …]` | `parent.primary` | `parent.entries[isPrimary = true][1]` |
+| An item by its identifier | `items: [{id:"abc", …}, …]` | `parent.abc` | `parent.items[id = "abc"][1]` |
+| The "latest" / "current" | `history: [{date, …}, …]` | `parent.current` | `sort(parent.history, function(a,b) a.date > b.date)[1]` |
+| A flag-derived subset | `lines: [{active:true, …}, …]` | `parent.activeLines` | `parent.lines[active = true]` |
+
+When the skill text uses a noun and the sample data shows an array with
+a `type`/`kind`/`role`/`use`/`isPrimary`/`status`-style discriminator,
+resolve the concept **once** in a `feelExtractDelegate` upstream of any
+gate or loop that uses it. Bind the resolved view to a named variable so
+the rest of the BPMN reads cleanly:
+
+```xml
+<serviceTask id="t_resolve" name="Resolve named records"
+             flowable:delegateExpression="${feelExtractDelegate}">
+  <extensionElements>
+    <flowable:field name="feelExpr"><flowable:string><![CDATA[
+      for item in items return {
+        item: item,
+        primary:   item.entries[type = "Primary"][1],
+        secondary: item.entries[type = "Secondary"][1]
+      }
+    ]]></flowable:string></flowable:field>
+    <flowable:field name="outputBinding"><flowable:string>resolvedItems</flowable:string></flowable:field>
+  </extensionElements>
+</serviceTask>
+```
+
+A downstream gate then checks `resolved.primary = null` (or whatever
+real condition matters), not a fictional `item.primary`. This pattern
+is the single biggest source of "everything skipped / nothing matched"
+bugs — always do the discriminator lookup *before* the missing-data
+gate, and use the same resolved variable in both the gate and the
+tool call that follows.
+
 ## Error handling
 
 **Do not emit `<bpmn:boundaryEvent>` elements.** The compiler post-processes
@@ -154,6 +205,19 @@ handled outside your BPMN.
   ✅ Output the raw XML only.
 - ❌ Adding your own `<bpmn:boundaryEvent>` for tool failures.
   ✅ Trust the auto-injection — emit a clean happy-path flow only.
+- ❌ Treating a business noun from the skill text ("the primary contact",
+     "the source location") as a literal property name on the response
+     object.
+  ✅ Use the property path that actually exists in the sample response.
+     When the concept is expressed as an array entry tagged with a
+     discriminator field, look it up via the filter syntax —
+     `parent.items[type = "X"][1]` — not as `parent.X`.
+- ❌ Writing a downstream missing-data gate against the original raw
+     response, repeating the same lookup logic in the gate and again in
+     the tool call.
+  ✅ Resolve once, gate once. Bind the named concepts as variables in a
+     single `feelExtractDelegate` upstream of the loop; the gate and the
+     tool call then share one consistent view.
 
 ## Skill specification
 

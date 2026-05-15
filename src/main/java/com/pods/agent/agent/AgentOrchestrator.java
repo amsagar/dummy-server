@@ -130,7 +130,7 @@ public class AgentOrchestrator {
         boolean fellBackFromRuleDomain = false;
         String fallbackFailedTool = null;
         if (rdo != null && summarizer != null) {
-            if (rdBus != null) rdBus.bind(turnId, sender);
+            if (rdBus != null) rdBus.bind(turnId, session.getSessionId(), sender);
             try {
                 ExecutionOutcome outcome = rdo.handleIfApplicable(userText, null, session.getSessionId(), turnId);
                 if (outcome.handled() && outcome.error() == null) {
