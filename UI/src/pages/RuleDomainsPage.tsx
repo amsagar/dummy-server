@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { ChevronLeft, ChevronRight, Settings as SettingsIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Settings as SettingsIcon, Trash2 } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface RuleDomainRow {
   id: string;
@@ -43,6 +44,7 @@ export default function RuleDomainsPage() {
   const [searchInput, setSearchInput] = useState("");
   const [searchActive, setSearchActive] = useState("");
   const [page, setPage] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState<RuleDomainRow | null>(null);
 
   // Debounce the search input → push to the value used in the query.
   useEffect(() => {
@@ -90,6 +92,22 @@ export default function RuleDomainsPage() {
       );
     },
     onError: (e: any) => toast.error(e?.message || "Failed to activate"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.ruleDomains.delete(id),
+    onSuccess: (resp: any) => {
+      qc.invalidateQueries({ queryKey: ["rule-domains"] });
+      const n = Number(resp?.deletedRevisions ?? 0);
+      const u = Number(resp?.undeployedFlowableDefinitions ?? 0);
+      const revisionsMsg = `Deleted ${n} ${n === 1 ? "revision" : "revisions"}`;
+      const undeployMsg = u > 0
+        ? ` · undeployed ${u} Flowable ${u === 1 ? "definition" : "definitions"}`
+        : "";
+      toast.success(revisionsMsg + undeployMsg);
+      setPendingDelete(null);
+    },
+    onError: (e: any) => toast.error(e?.message || "Failed to delete"),
   });
 
   const pageStart = useMemo(() => (rows.length > 0 ? page * PAGE_SIZE + 1 : 0), [rows.length, page]);
@@ -189,6 +207,16 @@ export default function RuleDomainsPage() {
                       Activate
                     </Button>
                   )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setPendingDelete(r)}
+                    disabled={deleteMutation.isPending}
+                    title="Delete this rule domain"
+                    className="text-red-700 hover:bg-red-50 hover:border-red-300"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
@@ -221,6 +249,35 @@ export default function RuleDomainsPage() {
           </Button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+        title="Delete this rule domain?"
+        description="This removes ALL revisions of this rule domain (every version), every execution recorded against them, and any Flowable deployments that no longer have a reference. This cannot be undone."
+        detail={
+          pendingDelete && (
+            <div className="space-y-0.5">
+              <div>
+                <span className="font-medium text-gray-900">{pendingDelete.skillName}</span>
+              </div>
+              <div className="font-mono text-[11px]">{pendingDelete.intentLabel}</div>
+              <div className="text-[11px] text-gray-500">
+                Latest revision shown: v{pendingDelete.version} · {pendingDelete.status}
+              </div>
+              <div className="text-[11px] text-gray-500">All other revisions of this (skill, intent) will be deleted as well.</div>
+            </div>
+          )
+        }
+        confirmLabel="Delete all revisions"
+        tone="danger"
+        busy={deleteMutation.isPending}
+        onConfirm={() => {
+          if (pendingDelete) deleteMutation.mutate(pendingDelete.id);
+        }}
+      />
     </div>
   );
 }

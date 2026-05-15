@@ -63,6 +63,17 @@ public class RuleExecutionRepository {
         return e;
     }
 
+    public java.util.Optional<RuleExecution> findByFlowableProcId(String procInstanceId) {
+        if (procInstanceId == null || procInstanceId.isBlank()) return java.util.Optional.empty();
+        var rows = jdbc.query("""
+                SELECT * FROM agent.rule_executions
+                WHERE flowable_proc_id = :pid
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, new MapSqlParameterSource("pid", procInstanceId), ROW);
+        return rows.stream().findFirst();
+    }
+
     public List<RuleExecution> listForDomain(String domainId, int limit) {
         return jdbc.query("""
                 SELECT * FROM agent.rule_executions

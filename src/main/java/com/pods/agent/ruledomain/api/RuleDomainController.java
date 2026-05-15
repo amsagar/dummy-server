@@ -1,19 +1,24 @@
 package com.pods.agent.ruledomain.api;
 
+import com.pods.agent.ruledomain.model.ExecutionOutcome;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.RuleExecution;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository.PageResult;
 import com.pods.agent.ruledomain.repository.RuleExecutionRepository;
+import com.pods.agent.ruledomain.runtime.BpmnRuntime;
 import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.HistoryService;
+import org.flowable.engine.RepositoryService;
 import org.flowable.engine.history.HistoricActivityInstance;
+import org.flowable.engine.repository.ProcessDefinition;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Admin REST for compiled rule domains.
@@ -42,13 +47,19 @@ public class RuleDomainController {
     private final RuleDomainRepository domainRepo;
     private final RuleExecutionRepository executionRepo;
     private final HistoryService historyService;
+    private final RepositoryService repositoryService;
+    private final BpmnRuntime bpmnRuntime;
 
     public RuleDomainController(RuleDomainRepository domainRepo,
                                 RuleExecutionRepository executionRepo,
-                                HistoryService historyService) {
+                                HistoryService historyService,
+                                RepositoryService repositoryService,
+                                BpmnRuntime bpmnRuntime) {
         this.domainRepo = domainRepo;
         this.executionRepo = executionRepo;
         this.historyService = historyService;
+        this.repositoryService = repositoryService;
+        this.bpmnRuntime = bpmnRuntime;
     }
 
     @GetMapping
@@ -143,6 +154,97 @@ public class RuleDomainController {
         if (a.getDeleteReason() != null && !a.getDeleteReason().isBlank()) return "failed";
         if (a.getEndTime() == null) return "running";
         return "completed";
+    }
+
+    /**
+     * Manually invoke a compiled rule domain with the supplied inputs. Used by
+     * the editor's "Test" tab to verify a BPMN works without going through chat.
+     * The run is persisted just like any other execution (session_id is
+     * tagged so a test run is identifiable in history).
+     */
+    @PostMapping("/{id}/test")
+    public ResponseEntity<Map<String, Object>> test(@PathVariable String id,
+                                                    @RequestBody(required = false) Map<String, Object> body) {
+        var maybeDomain = domainRepo.findById(id);
+        if (maybeDomain.isEmpty()) return ResponseEntity.notFound().build();
+        RuleDomain domain = maybeDomain.get();
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inputs = body != null && body.get("inputs") instanceof Map<?, ?>
+                ? (Map<String, Object>) body.get("inputs")
+                : Map.of();
+        String sessionId = "test-" + UUID.randomUUID();
+        String turnId = "test-turn";
+
+        ExecutionOutcome outcome = bpmnRuntime.execute(domain, inputs, sessionId, turnId, false);
+
+        // Look up the execution row we just created so the frontend can pull the trace.
+        String executionId = executionRepo.findByFlowableProcId(outcome.flowableProcId())
+                .map(RuleExecution::getId)
+                .orElse(null);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", outcome.error() == null);
+        response.put("error", outcome.error());
+        response.put("outputs", outcome.outputs());
+        response.put("latencyMs", outcome.latencyMs());
+        response.put("flowableProcId", outcome.flowableProcId());
+        response.put("executionId", executionId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Hard-delete every revision for the same (skill, intent) as the given row.
+     * The list page collapses to one row per (skill, intent), so the user's
+     * mental model is "delete this rule domain", which means every version.
+     * The FK on rule_executions cascades, so all execution history is removed too.
+     *
+     * For every Flowable process-definition key referenced by the deleted rows,
+     * if no surviving rule_domain row still references it, the corresponding
+     * Flowable deployment is removed so the engine doesn't carry orphan
+     * definitions.
+     */
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Map<String, Object>> delete(@PathVariable String id) {
+        var maybe = domainRepo.findById(id);
+        if (maybe.isEmpty()) return ResponseEntity.notFound().build();
+
+        // Snapshot every revision's proc key BEFORE we delete so we know what
+        // to consider for undeployment afterward.
+        List<RuleDomain> versions = domainRepo.findVersionsOf(id);
+        java.util.Set<String> procKeys = new java.util.LinkedHashSet<>();
+        for (RuleDomain v : versions) {
+            if (v.getFlowableProcKey() != null && !v.getFlowableProcKey().isBlank()) {
+                procKeys.add(v.getFlowableProcKey());
+            }
+        }
+
+        int deletedRows = domainRepo.deleteGroupContaining(id);
+
+        int undeployed = 0;
+        for (String procKey : procKeys) {
+            // After the group delete, ask if any *other* group still uses this key.
+            if (domainRepo.countByFlowableProcKey(procKey) > 0) continue;
+            try {
+                List<ProcessDefinition> defs = repositoryService.createProcessDefinitionQuery()
+                        .processDefinitionKey(procKey)
+                        .list();
+                for (ProcessDefinition def : defs) {
+                    repositoryService.deleteDeployment(def.getDeploymentId(), true);
+                    undeployed++;
+                }
+            } catch (Exception ex) {
+                // Non-fatal — rows are gone from our table; the Flowable deployment
+                // becomes orphaned and is harmless until the next restart at worst.
+                log.warn("[RuleDomain] failed to undeploy Flowable proc {} after delete: {}",
+                        procKey, ex.getMessage());
+            }
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("deletedRevisions", deletedRows);
+        body.put("undeployedFlowableDefinitions", undeployed);
+        return ResponseEntity.ok(body);
     }
 
     @PostMapping("/{id}/deprecate")

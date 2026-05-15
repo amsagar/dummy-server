@@ -198,11 +198,22 @@ export const api = {
       `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions/${encodeURIComponent(execId)}/trace`,
       { headers: getHeaders() }
     ).then(handleResponse),
+    test: (id: string, inputs: Record<string, unknown>) => fetch(
+      `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/test`,
+      {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ inputs }),
+      }
+    ).then(handleResponse),
     deprecate: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/deprecate`, {
       method: 'POST', headers: getHeaders(),
     }).then(handleResponse),
     activate: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}/activate`, {
       method: 'POST', headers: getHeaders(),
+    }).then(handleResponse),
+    delete: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}`, {
+      method: 'DELETE', headers: getHeaders(),
     }).then(handleResponse),
   },
   decisionTables: {

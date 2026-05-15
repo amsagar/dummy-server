@@ -67,9 +67,26 @@ public class CompilerPromptBuilder {
                 }
             }
         }
-        sb.append("\n## User request\n\n").append(userRequest == null ? "" : userRequest)
-                .append("\n\n## Output\n\nProduce the BPMN XML now. XML only.");
+        // Templatize the user request: every long numeric run (likely a domain
+        // id like an order id) becomes a placeholder so the LLM can't bake it
+        // into the BPMN as a literal. The intent is preserved but the specific
+        // values are clearly marked as runtime parameters.
+        String templatized = templatizeRequest(userRequest);
+        sb.append("\n## User request (templatized — specific ids replaced with `<param>` placeholders)\n\n")
+                .append(templatized)
+                .append("\n\n## Output\n\nProduce the BPMN XML now. XML only. ")
+                .append("Remember: the BPMN must work for every future request that matches this intent, ")
+                .append("not just the one shown above. Reference process variables (`orderId`, `userMessage`, etc.), ")
+                .append("not the placeholder strings.");
         return sb.toString();
+    }
+
+    /** Replace 4+ digit numeric runs with `<orderId>` placeholders so the LLM
+     *  can't copy them as literals. Other proper-noun-looking tokens are
+     *  preserved since they may be part of the intent itself. */
+    static String templatizeRequest(String userRequest) {
+        if (userRequest == null) return "";
+        return userRequest.replaceAll("\\b\\d{4,}\\b", "<orderId>");
     }
 
     /** Build a repair-pass user prompt when the first compile attempt was rejected. */

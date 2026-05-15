@@ -248,6 +248,38 @@ public class RuleDomainRepository {
                 .addValue("now", System.currentTimeMillis()));
     }
 
+    /** Hard-delete one rule_domain row. The FK on rule_executions cascades. */
+    public int deleteById(String id) {
+        return jdbc.update(
+                "DELETE FROM agent.rule_domains WHERE id = :id",
+                new MapSqlParameterSource("id", id));
+    }
+
+    /**
+     * Hard-delete every revision for the (skill, intent) of the given row, including the
+     * referenced row itself. The FK on rule_executions cascades all execution history.
+     * Returns the number of deleted rule_domain rows.
+     */
+    public int deleteGroupContaining(String id) {
+        return jdbc.update("""
+                DELETE FROM agent.rule_domains
+                WHERE (skill_id, intent_label) = (
+                    SELECT skill_id, intent_label FROM agent.rule_domains WHERE id = :id
+                )
+                """, new MapSqlParameterSource("id", id));
+    }
+
+    /** How many domain rows reference this Flowable process-definition key.
+     *  Used to decide whether it's safe to undeploy the BPMN from Flowable. */
+    public int countByFlowableProcKey(String procKey) {
+        if (procKey == null || procKey.isBlank()) return 0;
+        Integer n = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM agent.rule_domains
+                WHERE flowable_proc_key = :k
+                """, new MapSqlParameterSource("k", procKey), Integer.class);
+        return n == null ? 0 : n;
+    }
+
     public record Match(RuleDomain domain, double similarity) {}
 
     public record PageResult<T>(List<T> items, int total, int page, int pageSize) {}

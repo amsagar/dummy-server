@@ -124,9 +124,12 @@ public class RuleDomainOrchestrator {
         int needed = Math.max(1, props.getPromoteAfterSuccessfulRuns());
         int successes = executionRepo.countRecentSuccesses(domain.getId());
         if (successes >= needed) {
-            log.info("[RuleDomain] Promoting domain {} from DRAFT to ACTIVE ({} successful runs)",
-                    domain.getId(), successes);
+            // Maintain the single-active invariant: deprecate any previous ACTIVE
+            // version of the same (skill, intent) before flipping the new one ON.
+            int deprecated = repo.deactivateSiblings(domain.getId());
             repo.updateStatus(domain.getId(), RuleDomain.STATUS_ACTIVE, null);
+            log.info("[RuleDomain] Promoted domain {} from DRAFT to ACTIVE ({} successful runs, {} sibling(s) deprecated)",
+                    domain.getId(), successes, deprecated);
         }
     }
 

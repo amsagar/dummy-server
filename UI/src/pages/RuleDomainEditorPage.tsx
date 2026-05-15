@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { BpmnDiagram } from "@/components/BpmnDiagram";
 import { RevisionPicker } from "@/components/bpmn/RevisionPicker";
 import type { BpmnElementRuntimeState, BpmnExecutionDecoration } from "@/components/bpmn/types";
+import { Play, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface RuleDomainDetail {
   id: string;
@@ -52,13 +55,40 @@ interface TraceEntry {
   status: BpmnElementRuntimeState | "running";
 }
 
-type Tab = "diagram" | "configuration" | "executions";
+type Tab = "diagram" | "configuration" | "executions" | "test";
+
+interface TestRunResult {
+  success: boolean;
+  error?: string | null;
+  outputs?: Record<string, unknown> | null;
+  latencyMs?: number;
+  flowableProcId?: string | null;
+  executionId?: string | null;
+}
 
 export default function RuleDomainEditorPage() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>("diagram");
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
+  const deleteMutation = useMutation({
+    mutationFn: (rid: string) => api.ruleDomains.delete(rid),
+    onSuccess: (resp: any) => {
+      qc.invalidateQueries({ queryKey: ["rule-domains"] });
+      const n = Number(resp?.deletedRevisions ?? 0);
+      const u = Number(resp?.undeployedFlowableDefinitions ?? 0);
+      const revisionsMsg = `Deleted ${n} ${n === 1 ? "revision" : "revisions"}`;
+      const undeployMsg = u > 0
+        ? ` · undeployed ${u} Flowable ${u === 1 ? "definition" : "definitions"}`
+        : "";
+      toast.success(revisionsMsg + undeployMsg);
+      navigate("/rule-domains");
+    },
+    onError: (e: any) => toast.error(e?.message || "Failed to delete"),
+  });
 
   const { data: domain } = useQuery<RuleDomainDetail>({
     queryKey: ["rule-domain", id],
@@ -144,7 +174,20 @@ export default function RuleDomainEditorPage() {
             <span>{domain.status}</span>
           </div>
         </div>
-        <RevisionPicker revisions={revisions} currentId={domain.id} />
+        <div className="flex items-center gap-2">
+          <RevisionPicker revisions={revisions} currentId={domain.id} />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmDeleteOpen(true)}
+            disabled={deleteMutation.isPending}
+            className="gap-1.5 text-red-700 hover:bg-red-50 hover:border-red-300"
+            title="Delete this rule domain"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </Button>
+        </div>
       </div>
 
       {domain.lastError && (
@@ -169,6 +212,9 @@ export default function RuleDomainEditorPage() {
             </span>
           )}
         </TabButton>
+        <TabButton active={tab === "test"} onClick={() => setTab("test")}>
+          Test
+        </TabButton>
       </div>
 
       {tab === "diagram" && (
@@ -185,6 +231,10 @@ export default function RuleDomainEditorPage() {
         <pre className="bg-gray-900 text-gray-100 rounded p-4 text-xs overflow-x-auto leading-relaxed max-h-[70vh]">
           {domain.bpmnXml}
         </pre>
+      )}
+
+      {tab === "test" && (
+        <TestPanel domainId={domain.id} bpmnXml={domain.bpmnXml} />
       )}
 
       {tab === "executions" && (
@@ -234,6 +284,232 @@ export default function RuleDomainEditorPage() {
             )}
           </div>
         </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        onOpenChange={setConfirmDeleteOpen}
+        title="Delete this rule domain?"
+        description="This removes ALL revisions of this rule domain (every version), every execution recorded against them, and any Flowable deployments that no longer have a reference. This cannot be undone."
+        detail={
+          <div className="space-y-0.5">
+            <div>
+              <span className="font-medium text-gray-900">{domain.skillName}</span>
+            </div>
+            <div className="font-mono text-[11px]">{domain.intentLabel}</div>
+            <div className="text-[11px] text-gray-500">
+              Currently viewing v{domain.version} · {domain.status}
+              {revisions.length > 1 && ` · ${revisions.length} total revisions`}
+            </div>
+            {revisions.length > 1 && (
+              <div className="text-[11px] text-gray-500">
+                All revisions ({revisions.map((r) => `v${r.version}`).join(", ")}) will be deleted.
+              </div>
+            )}
+          </div>
+        }
+        confirmLabel={
+          revisions.length > 1
+            ? `Delete all ${revisions.length} revisions`
+            : "Delete"
+        }
+        tone="danger"
+        busy={deleteMutation.isPending}
+        onConfirm={() => deleteMutation.mutate(domain.id)}
+      />
+    </div>
+  );
+}
+
+function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string }) {
+  const qc = useQueryClient();
+  const [inputsText, setInputsText] = useState<string>(
+    JSON.stringify({ userMessage: "Validate order 600030447", orderId: "600030447" }, null, 2),
+  );
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [result, setResult] = useState<TestRunResult | null>(null);
+
+  const runMutation = useMutation({
+    mutationFn: (inputs: Record<string, unknown>) => api.ruleDomains.test(domainId, inputs),
+    onSuccess: (r: any) => {
+      setResult(r);
+      qc.invalidateQueries({ queryKey: ["rule-domain-executions", domainId] });
+      toast.success(r?.success ? "Test passed" : "Test failed — see details");
+    },
+    onError: (e: any) => {
+      toast.error(e?.message || "Test run failed");
+      setResult({ success: false, error: e?.message ?? "Request failed" });
+    },
+  });
+
+  const { data: trace = [] } = useQuery<TraceEntry[]>({
+    queryKey: ["rule-execution-trace", domainId, result?.executionId],
+    queryFn: () => api.ruleDomains.executionTrace(domainId, result!.executionId!),
+    enabled: !!result?.executionId,
+  });
+
+  const traceDecorations: BpmnExecutionDecoration = useMemo(() => {
+    const stateByElementId: Record<string, BpmnElementRuntimeState> = {};
+    for (const t of trace) {
+      if (!t.activityId) continue;
+      const prev = stateByElementId[t.activityId];
+      if (prev === "failed") continue;
+      if (t.status === "failed" || t.errored) stateByElementId[t.activityId] = "failed";
+      else if (t.status === "running") stateByElementId[t.activityId] = "running";
+      else if (t.status === "completed") stateByElementId[t.activityId] = "completed";
+    }
+    return { stateByElementId, badgeByElementId: {} };
+  }, [trace]);
+
+  const runTest = () => {
+    setParseError(null);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(inputsText);
+    } catch (e: any) {
+      setParseError(`Invalid JSON: ${e?.message ?? e}`);
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      setParseError("Inputs must be a JSON object.");
+      return;
+    }
+    setResult(null);
+    runMutation.mutate(parsed);
+  };
+
+  const erroredStep = trace.find((t) => t.errored || t.status === "failed");
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-900">
+        <div className="font-semibold mb-1">Test this rule domain without going through chat</div>
+        <p>
+          Provide the input variables the BPMN expects. The orchestrator normally sets{" "}
+          <code className="bg-blue-100 px-1 rounded">userMessage</code> and{" "}
+          <code className="bg-blue-100 px-1 rounded">orderId</code> from the user message; you can supply
+          any others your BPMN references. Each run is persisted to the execution history with a{" "}
+          <code className="bg-blue-100 px-1 rounded">test-…</code> session id.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Inputs (JSON)
+            </label>
+            <Button
+              size="sm"
+              onClick={runTest}
+              disabled={runMutation.isPending}
+              className="gap-1.5 bg-[#E31837] hover:bg-[#c41530]"
+            >
+              <Play className="h-3.5 w-3.5" />
+              {runMutation.isPending ? "Running…" : "Run test"}
+            </Button>
+          </div>
+          <textarea
+            value={inputsText}
+            onChange={(e) => setInputsText(e.target.value)}
+            spellCheck={false}
+            className="w-full h-72 rounded border bg-gray-50 p-3 font-mono text-xs"
+          />
+          {parseError && (
+            <div className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+              {parseError}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide block mb-1.5">
+            Outputs
+          </label>
+          <div className="border rounded bg-gray-50 p-3 min-h-72 text-xs">
+            {result ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
+                      result.success
+                        ? "bg-green-100 text-green-800"
+                        : "bg-red-100 text-red-800"
+                    }`}
+                  >
+                    {result.success ? "SUCCESS" : "FAILURE"}
+                  </span>
+                  {typeof result.latencyMs === "number" && (
+                    <span className="text-gray-500">{result.latencyMs} ms</span>
+                  )}
+                </div>
+                {result.error && (
+                  <pre className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded p-2 whitespace-pre-wrap break-words">
+                    {result.error}
+                  </pre>
+                )}
+                {result.outputs && (
+                  <pre className="text-[11px] bg-white border rounded p-2 overflow-x-auto max-h-56">
+                    {JSON.stringify(result.outputs, null, 2)}
+                  </pre>
+                )}
+              </div>
+            ) : (
+              <div className="text-gray-400">Run a test to see outputs here.</div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {result && (
+        <>
+          {erroredStep && (
+            <div className="bg-red-50 border border-red-200 rounded p-2.5 text-xs text-red-800">
+              Stopped at{" "}
+              <code className="bg-red-100 px-1 rounded">
+                {erroredStep.activityName ?? erroredStep.activityId}
+              </code>
+              {erroredStep.deleteReason && <> — {erroredStep.deleteReason}</>}
+            </div>
+          )}
+          <BpmnDiagram xml={bpmnXml} className="h-[55vh]" executionDecorations={traceDecorations} />
+          {trace.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-xs text-gray-600 hover:text-gray-900">
+                Activity trace ({trace.length} entries)
+              </summary>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-600">
+                      <th className="text-left px-2 py-1">Activity</th>
+                      <th className="text-left px-2 py-1">Type</th>
+                      <th className="text-left px-2 py-1">Status</th>
+                      <th className="text-right px-2 py-1">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trace.map((t, idx) => (
+                      <tr key={`${t.activityId}-${idx}`} className="border-t">
+                        <td className="px-2 py-1">
+                          <div className="font-medium text-gray-800">{t.activityName ?? t.activityId}</div>
+                          <div className="font-mono text-[10px] text-gray-400">{t.activityId}</div>
+                        </td>
+                        <td className="px-2 py-1 text-gray-600">{t.activityType ?? ""}</td>
+                        <td className="px-2 py-1">
+                          <span className={statusColor(t.status)}>{t.status}</span>
+                        </td>
+                        <td className="px-2 py-1 text-right text-gray-600">
+                          {t.durationMs != null ? `${t.durationMs}ms` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </>
       )}
     </div>
   );
