@@ -5,7 +5,6 @@ import com.pods.agent.config.RuleDomainProperties;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -62,13 +61,11 @@ public class SkillManifestDeriver {
         ModelRef compilerRef = new ModelRef(
                 props.getCompilerModel().getProviderId(),
                 props.getCompilerModel().getModelId());
-        ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
-        ChatClient client = spec.client();
 
         String system = systemPrompt();
         String user = userPrompt(skillName, skillMarkdown, trace);
 
-        String response = callWithRetry(client, spec, system, user, skillName);
+        String response = callWithRetry(compilerRef, system, user, skillName);
         if (response == null) return SkillRuleManifest.EMPTY;
 
         return parseManifest(response, trace);
@@ -76,18 +73,16 @@ public class SkillManifestDeriver {
 
     /**
      * Run the blocking LLM call on a Reactor scheduler. The async-trace
-     * compiler runs on Spring's {@code @Async} pool (e.g. {@code task-1}),
-     * which isn't Reactor-aware. The Azure SDK's Netty HTTP client expects
-     * its Mono subscription to occur on a Reactor-compatible thread; calling
-     * {@code .call().content()} directly from {@code task-1} fails with
-     * "channel not registered to an event loop". Dispatching through
-     * {@code Schedulers.boundedElastic()} routes the call onto a thread the
-     * underlying Reactor Netty stack handles correctly.
+     * compiler runs on Spring's {@code @Async} pool (e.g. {@code task-1}).
+     * Some providers build HTTP clients that bind Netty resources to the
+     * constructing thread. Resolve + execute on the same bounded-elastic
+     * worker to avoid "channel not registered to an event loop" failures.
      */
-    private String callWithRetry(ChatClient client, ModelProviderRouter.Spec spec,
-                                 String system, String user, String skillName) {
+    private String callWithRetry(ModelRef compilerRef, String system, String user, String skillName) {
         try {
             return Mono.fromCallable(() -> {
+                        ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
+                        var client = spec.client();
                         var req = client.prompt().system(system).user(user);
                         if (spec.options() != null) req = req.options(spec.options());
                         return req.call().content();

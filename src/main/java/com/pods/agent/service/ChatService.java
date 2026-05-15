@@ -29,14 +29,16 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Base64;
 import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.nio.file.Path;
 import java.util.UUID;
@@ -337,34 +339,36 @@ public class ChatService {
         if (state == null || state.getModel() == null || userMessage == null || userMessage.isBlank()) return null;
         long timeoutMs = Math.max(4_000L, runtimeTuningProperties.getTitleGenerationTimeoutMs());
         try {
-            return CompletableFuture.supplyAsync(() -> {
-                        try {
-                            var spec = modelProviderRouter.resolve(state.getModel());
-                            String prompt = "Create a concise chat title (max 6 words) for this user message. "
-                                    + "Return only plain title text with no punctuation wrapping.\n\nMessage:\n" + userMessage;
-                            String raw = spec.client()
-                                    .prompt()
-                                    .system("You generate short conversation titles.")
-                                    .user(prompt)
-                                    .call()
-                                    .content();
-                            if (raw == null) return null;
-                            String clean = raw.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
-                            clean = clean.replaceAll("^\"|\"$", "");
-                            if (clean.isBlank()) return null;
-                            if (clean.length() > 80) clean = clean.substring(0, 80).trim();
-                            return clean;
-                        } catch (Exception e) {
-                            log.debug("[ChatService] AI title generation model call failed: {} - {}",
-                                    e.getClass().getSimpleName(),
-                                    e.getMessage());
-                            return null;
-                        }
+            return Mono.fromCallable(() -> {
+                        var spec = modelProviderRouter.resolve(state.getModel());
+                        String prompt = "Create a concise chat title (max 6 words) for this user message. "
+                                + "Return only plain title text with no punctuation wrapping.\n\nMessage:\n" + userMessage;
+                        String raw = spec.client()
+                                .prompt()
+                                .system("You generate short conversation titles.")
+                                .user(prompt)
+                                .call()
+                                .content();
+                        if (raw == null) return null;
+                        String clean = raw.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
+                        clean = clean.replaceAll("^\"|\"$", "");
+                        if (clean.isBlank()) return null;
+                        if (clean.length() > 80) clean = clean.substring(0, 80).trim();
+                        return clean;
                     })
-                    .get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            log.debug("[ChatService] AI title generation timed out after {} ms; using fallback title.", timeoutMs);
-            return null;
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .timeout(Duration.ofMillis(timeoutMs))
+                    .onErrorResume(TimeoutException.class, ex -> {
+                        log.debug("[ChatService] AI title generation timed out after {} ms; using fallback title.", timeoutMs);
+                        return Mono.empty();
+                    })
+                    .onErrorResume(ex -> {
+                        log.debug("[ChatService] AI title generation model call failed: {} - {}",
+                                ex.getClass().getSimpleName(),
+                                ex.getMessage());
+                        return Mono.empty();
+                    })
+                    .block();
         } catch (Exception e) {
             log.debug("[ChatService] AI title generation fallback: {} - {}",
                     e.getClass().getSimpleName(),
