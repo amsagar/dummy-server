@@ -18,6 +18,11 @@ import tools.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Runs a compiled rule domain's BPMN end-to-end and records the result.
@@ -40,6 +45,20 @@ public class BpmnRuntime {
     private final RuleExecutionRepository executionRepo;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Bounded pool for fan-out execution of multiple rules in one turn. Sized
+     * small (8 threads) because rules are typically I/O-bound on tool calls
+     * and the per-rule BPMN is short. Naming threads helps debugging.
+     */
+    private final ExecutorService fanoutExecutor = Executors.newFixedThreadPool(8, new ThreadFactory() {
+        private final AtomicInteger n = new AtomicInteger();
+        @Override public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "rule-domain-runtime-" + n.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        }
+    });
+
     public BpmnRuntime(RuntimeService runtimeService,
                        RepositoryService repositoryService,
                        HistoryService historyService,
@@ -50,6 +69,23 @@ public class BpmnRuntime {
         this.historyService = historyService;
         this.executionRepo = executionRepo;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Async fan-out wrapper around {@link #execute}. Each rule in a domain-group
+     * fan-out gets its own thread; the orchestrator waits on a join of all
+     * futures. The underlying Flowable execution is still synchronous on the
+     * worker thread (delegates run inline) — we just hide the wait behind a
+     * future so the caller can run N rules in parallel.
+     */
+    public CompletableFuture<ExecutionOutcome> executeAsync(RuleDomain domain,
+                                                            Map<String, Object> inputs,
+                                                            String sessionId,
+                                                            String turnId,
+                                                            boolean fromCacheHit) {
+        return CompletableFuture.supplyAsync(
+                () -> execute(domain, inputs, sessionId, turnId, fromCacheHit),
+                fanoutExecutor);
     }
 
     /**

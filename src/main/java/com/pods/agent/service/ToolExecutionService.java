@@ -69,6 +69,9 @@ public class ToolExecutionService {
     private final DecisionTableService decisionTableService;
     private final CatalogSearchService catalogSearchService;
     private final Map<String, CircuitState> circuits = new ConcurrentHashMap<>();
+    /** Optional turn-scoped cache for {@link #executeCached}. Setter injection
+     *  so existing test constructors don't need updating. */
+    private TurnToolCache turnToolCache;
 
     public ToolExecutionService(ObjectMapper objectMapper) {
         this(objectMapper, null, null, null, null, null, null);
@@ -91,6 +94,11 @@ public class ToolExecutionService {
         this.catalogSearchService = catalogSearchService;
     }
 
+    @Autowired(required = false)
+    public void setTurnToolCache(TurnToolCache turnToolCache) {
+        this.turnToolCache = turnToolCache;
+    }
+
     public ToolExecutionService(ObjectMapper objectMapper,
                                 McpClientService mcpClientService,
                                 McpRuntimeAdapter mcpRuntimeAdapter,
@@ -99,6 +107,76 @@ public class ToolExecutionService {
                                 DecisionTableService decisionTableService) {
         this(objectMapper, mcpClientService, mcpRuntimeAdapter, memoryTools, httpToolAuthService, decisionTableService, null);
     }
+
+    /**
+     * Turn-scoped, single-flight tool execution. Within one chat turn,
+     * concurrent callers requesting the same {@code (tool, canonicalArgs)}
+     * share a single in-flight {@link ExecutionResult}. The first caller
+     * runs the real HTTP/SDK call, every later caller waits on its future.
+     *
+     * <p>Falls back to the plain {@link #execute(AgentTool, String)} when:
+     * <ul>
+     *   <li>{@code turnId} is null/blank (e.g. invoked outside a chat turn),</li>
+     *   <li>the {@link TurnToolCache} bean isn't wired (test contexts), or</li>
+     *   <li>{@code TurnToolCache} decides the tool isn't cacheable (mutations,
+     *       operator-disabled).</li>
+     * </ul>
+     *
+     * <p>Failure semantics: on exception or non-success result, the cache
+     * entry is evicted so siblings retry independently rather than inherit
+     * the failure.
+     */
+    public ExecutionResult executeCached(AgentTool tool, String userText, String turnId) {
+        return executeCachedWithMeta(tool, userText, turnId).result();
+    }
+
+    /** Like {@link #executeCached} but returns whether the call was served
+     *  from the cache (so a caller can surface a {@code rule_domain.tool.cached}
+     *  event to the UI). */
+    public CachedExecutionResult executeCachedWithMeta(AgentTool tool, String userText, String turnId) {
+        if (turnToolCache == null || turnId == null || turnId.isBlank() || tool == null) {
+            return new CachedExecutionResult(execute(tool, userText), false);
+        }
+        String canonicalArgs = TurnToolCache.canonicalize(userText);
+        TurnToolCache.AcquireResult acq = turnToolCache.acquireOrWait(turnId, tool, canonicalArgs);
+        if (!acq.enabled()) {
+            return new CachedExecutionResult(execute(tool, userText), false);
+        }
+        if (acq.primary()) {
+            try {
+                ExecutionResult result = execute(tool, userText);
+                if (result != null && result.success()) {
+                    turnToolCache.complete(turnId, acq.key(), result);
+                    return new CachedExecutionResult(result, false);
+                }
+                // Don't cache failures. Evict so siblings can retry on their own.
+                turnToolCache.evict(turnId, acq.key(),
+                        new RuntimeException(result == null ? "null result" : result.error()));
+                return new CachedExecutionResult(result, false);
+            } catch (RuntimeException ex) {
+                turnToolCache.evict(turnId, acq.key(), ex);
+                throw ex;
+            }
+        }
+        // Waiter: block on the primary's future. If it completes
+        // exceptionally (primary failed → evict signalled), fall back to a
+        // direct call rather than propagating the primary's exception.
+        try {
+            return new CachedExecutionResult(acq.future().get(), true);
+        } catch (java.util.concurrent.CancellationException cancelled) {
+            return new CachedExecutionResult(
+                    new ExecutionResult(false, null, "Cancelled: " + tool.getName()), false);
+        } catch (Exception ex) {
+            log.debug("[ToolExecutionService] cache waiter for {} fell through to direct execute: {}",
+                    tool.getName(), ex.getMessage());
+            return new CachedExecutionResult(execute(tool, userText), false);
+        }
+    }
+
+    /** Wrapper around {@link ExecutionResult} that also reports whether the
+     *  caller was served from the {@link TurnToolCache} rather than executing
+     *  the underlying call themselves. */
+    public record CachedExecutionResult(ExecutionResult result, boolean cacheHit) {}
 
     public ExecutionResult execute(AgentTool tool, String userText) {
         if (tool == null || !tool.isEnabled()) {

@@ -10,8 +10,11 @@ import com.pods.agent.repository.AgentProfileRepository;
 import com.pods.agent.repository.RuntimeEventRepository;
 import com.pods.agent.ruledomain.ResponseSummarizer;
 import com.pods.agent.ruledomain.RuleDomainOrchestrator;
+import com.pods.agent.ruledomain.SkillRouter;
 import com.pods.agent.ruledomain.SseRuleDomainEventBus;
+import com.pods.agent.ruledomain.compiler.AsyncTraceCompiler;
 import com.pods.agent.ruledomain.model.ExecutionOutcome;
+import com.pods.agent.service.TurnToolCache;
 import com.pods.agent.service.MemoryService;
 import com.pods.agent.service.instruction.InstructionLoaderService;
 import com.pods.agent.service.SkillRegistryService;
@@ -60,6 +63,9 @@ public class AgentOrchestrator {
     private final ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator;
     private final ObjectProvider<ResponseSummarizer> responseSummarizer;
     private final ObjectProvider<SseRuleDomainEventBus> ruleDomainEventBus;
+    private final ObjectProvider<TurnToolCache> turnToolCache;
+    private final ObjectProvider<AsyncTraceCompiler> asyncTraceCompiler;
+    private final ObjectProvider<SkillRouter> skillRouter;
     private final String baseSystemPrompt;
     private final String memoryToolsPrompt;
 
@@ -73,7 +79,10 @@ public class AgentOrchestrator {
                              AgentProfileRepository agentProfileRepository,
                              ObjectProvider<RuleDomainOrchestrator> ruleDomainOrchestrator,
                              ObjectProvider<ResponseSummarizer> responseSummarizer,
-                             ObjectProvider<SseRuleDomainEventBus> ruleDomainEventBus) {
+                             ObjectProvider<SseRuleDomainEventBus> ruleDomainEventBus,
+                             ObjectProvider<TurnToolCache> turnToolCache,
+                             ObjectProvider<AsyncTraceCompiler> asyncTraceCompiler,
+                             ObjectProvider<SkillRouter> skillRouter) {
         this.modelProviderRouter = modelProviderRouter;
         this.skillRegistryService = skillRegistryService;
         this.instructionLoaderService = instructionLoaderService;
@@ -85,6 +94,9 @@ public class AgentOrchestrator {
         this.ruleDomainOrchestrator = ruleDomainOrchestrator;
         this.responseSummarizer = responseSummarizer;
         this.ruleDomainEventBus = ruleDomainEventBus;
+        this.turnToolCache = turnToolCache;
+        this.asyncTraceCompiler = asyncTraceCompiler;
+        this.skillRouter = skillRouter;
         this.baseSystemPrompt = loadBaseSystemPrompt();
         this.memoryToolsPrompt = loadPromptResource("prompts/AUTO_MEMORY_TOOLS_SYSTEM_PROMPT.md");
     }
@@ -125,6 +137,7 @@ public class AgentOrchestrator {
         RuleDomainOrchestrator rdo = ruleDomainOrchestrator == null ? null : ruleDomainOrchestrator.getIfAvailable();
         ResponseSummarizer summarizer = responseSummarizer == null ? null : responseSummarizer.getIfAvailable();
         SseRuleDomainEventBus rdBus = ruleDomainEventBus == null ? null : ruleDomainEventBus.getIfAvailable();
+        TurnToolCache toolCache = turnToolCache == null ? null : turnToolCache.getIfAvailable();
         // State threaded to the LLM-loop block below so it can append the
         // fallback advisory to the assistant response.
         boolean fellBackFromRuleDomain = false;
@@ -168,6 +181,12 @@ public class AgentOrchestrator {
                         ex.getMessage());
             } finally {
                 if (rdBus != null) rdBus.unbind(turnId);
+                // Cache clearing also happens in the outer finally below, but
+                // the rule-domain success path early-returns and never reaches
+                // it. Clear here too — clearTurn is idempotent.
+                if (toolCache != null && turnId != null) {
+                    toolCache.clearTurn(turnId);
+                }
             }
         }
 
@@ -246,6 +265,13 @@ public class AgentOrchestrator {
                 }
             }
 
+            // Schedule a trace-based compile in the background. The user
+            // already has their answer; this runs async and produces compiled
+            // rule BPMNs from the recorded tool trace. Idempotent — no-op
+            // when the skill has no rule manifest, or when every rule is
+            // already trace-compiled. See AsyncTraceCompiler.
+            scheduleTraceCompile(session, userText, turnId, finalContent);
+
             return finalContent.isEmpty() ? "Done." : finalContent;
         } catch (java.util.concurrent.CancellationException e) {
             log.info("[AgentOrchestrator] Turn cancelled by user: session={}", session.getSessionId());
@@ -254,6 +280,39 @@ public class AgentOrchestrator {
         } catch (Exception e) {
             log.error("[AgentOrchestrator] streamTurn failed: {}", e.getMessage(), e);
             throw e;
+        } finally {
+            // Drop this turn's tool-cache bucket. Idempotent — safe to call
+            // even when the rule-domain path early-returned. Cancels any
+            // outstanding in-flight CompletableFutures (e.g. when a turn
+            // is cancelled mid-call).
+            if (toolCache != null && turnId != null) {
+                toolCache.clearTurn(turnId);
+            }
+        }
+    }
+
+    /**
+     * Kick off the async trace-based compile. No-op when:
+     * <ul>
+     *   <li>the LLM-loop didn't produce useful content (failed / cancelled), or</li>
+     *   <li>the skill router can't pick a skill for this message, or</li>
+     *   <li>that skill has no {@code rules:} frontmatter (legacy single-BPMN flow), or</li>
+     *   <li>any of the trace-compile beans isn't wired in.</li>
+     * </ul>
+     */
+    private void scheduleTraceCompile(AgentSession session, String userText, String turnId, String finalContent) {
+        if (finalContent == null || finalContent.isBlank()) return;
+        if (turnId == null || turnId.isBlank()) return;
+        SkillRouter router = skillRouter == null ? null : skillRouter.getIfAvailable();
+        AsyncTraceCompiler compiler = asyncTraceCompiler == null ? null : asyncTraceCompiler.getIfAvailable();
+        if (router == null || compiler == null) return;
+        try {
+            router.route(userText).ifPresent(routed -> {
+                if (routed.manifest() == null || routed.manifest().isEmpty()) return;
+                compiler.scheduleCompile(routed, session.getSessionId(), turnId);
+            });
+        } catch (Exception ex) {
+            log.debug("[AgentOrchestrator] scheduleTraceCompile failed (suppressed): {}", ex.getMessage());
         }
     }
 

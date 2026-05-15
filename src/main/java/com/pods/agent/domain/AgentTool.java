@@ -46,4 +46,12 @@ public class AgentTool {
     private boolean baseInjected;
     private long createdAt;
     private long updatedAt;
+    /**
+     * Whether {@link com.pods.agent.service.TurnToolCache} may deduplicate
+     * calls to this tool within a single chat turn. {@code null} means
+     * "default for the method" (GET/POST → cacheable, PUT/PATCH/DELETE → not).
+     * Operator can explicitly disable caching for read-shaped tools with
+     * side effects by setting this to {@code Boolean.FALSE}.
+     */
+    private Boolean cacheable;
 }

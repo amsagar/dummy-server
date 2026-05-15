@@ -50,10 +50,16 @@ const SystemEventCard: FC<Props> = ({
     const isFailure =
       m.eventType === "rule_domain.failed" ||
       m.eventType === "rule_domain.compile.failed" ||
+      m.eventType === "rule_domain.merge_conflict" ||
       (m.eventType === "rule_domain.execute.done" && m.eventPayload?.success === false) ||
       (m.eventType === "rule_domain.tool.result" && m.eventPayload?.success === false) ||
-      (m.eventType === "rule_domain.decision.result" && m.eventPayload?.success === false);
-    const isRetry = m.eventType === "rule_domain.tool.retry";
+      (m.eventType === "rule_domain.decision.result" && m.eventPayload?.success === false) ||
+      (m.eventType === "rule_domain.rule.done" && m.eventPayload?.success === false);
+    const isWarning =
+      m.eventType === "rule_domain.tool.retry" ||
+      m.eventType === "rule_domain.circuit_open" ||
+      m.eventType === "rule_domain.coverage_miss";
+    const isCached = m.eventType === "rule_domain.tool.cached";
     const isStart =
       m.eventType.endsWith(".start") ||
       m.eventType.endsWith(".started") ||
@@ -61,14 +67,17 @@ const SystemEventCard: FC<Props> = ({
       m.eventType === "rule_domain.compile.llm_call" ||
       m.eventType === "rule_domain.compile.validating" ||
       m.eventType === "rule_domain.compile.embedding" ||
+      m.eventType === "rule_domain.compile.trace_started" ||
       m.eventType === "rule_domain.tool.call" ||
       m.eventType === "rule_domain.decision.call" ||
       m.eventType === "rule_domain.feel.eval";
-    const icon = isFailure ? "✗" : isRetry ? "↻" : isStart ? "▸" : "✓";
+    const icon = isFailure ? "✗" : isWarning ? "↻" : isCached ? "↺" : isStart ? "▸" : "✓";
     const phaseColor = isFailure
       ? "text-red-600"
-      : isRetry
+      : isWarning
       ? "text-amber-600"
+      : isCached
+      ? "text-violet-600"
       : isStart
       ? "text-blue-600"
       : "text-emerald-600";

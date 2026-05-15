@@ -72,7 +72,21 @@ public class ChatController {
             "rule_domain.decision.result",
             "rule_domain.feel.eval",
             "rule_domain.executed",
-            "rule_domain.failed"
+            "rule_domain.failed",
+            // Phase 1.6+: per-rule lifecycle events (load-bearing observability
+            // contract — without these, debugging a domain fan-out where 3 rules
+            // ran but only 2 produced output becomes archaeology).
+            "rule_domain.rule.start",
+            "rule_domain.rule.done",
+            // Phase 1.3: tool result served from sibling's in-flight call.
+            "rule_domain.tool.cached",
+            // Phase 2: async trace-based compile lifecycle.
+            "rule_domain.compile.trace_started",
+            "rule_domain.compile.trace_finished",
+            // Phase 3: coverage signals.
+            "rule_domain.coverage_miss",
+            "rule_domain.coverage_extended",
+            "rule_domain.merge_conflict"
     );
 
     private final ChatService chatService;

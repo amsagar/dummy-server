@@ -200,6 +200,28 @@ export default function ChatPage() {
         return ev.failedTool
           ? `Compiled flow failed at ${ev.failedTool} — falling back to live agent`
           : 'Compiled flow failed — falling back to live agent';
+      // Phase 1.6+: per-rule lifecycle (parallel tracks in a fan-out).
+      case 'rule_domain.rule.start':
+        return `▸ Rule: ${ev.ruleName || ev.ruleId || '?'}${ev.fromFanout ? ' (from fanout)' : ''}`;
+      case 'rule_domain.rule.done':
+        return ev.success
+          ? `✓ Rule: ${ev.ruleName || '?'} (${ev.latencyMs || 0}ms)`
+          : `✗ Rule: ${ev.ruleName || '?'} failed: ${(ev.error || '').slice(0, 80)}`;
+      // Phase 1.3: tool result served from a sibling's in-flight call.
+      case 'rule_domain.tool.cached':
+        return `↺ ${ev.toolName || 'tool'} (cached)`;
+      // Phase 2: async trace-based compile lifecycle.
+      case 'rule_domain.compile.trace_started':
+        return `Compiling ${ev.ruleCount || '?'} rule(s) from execution trace…`;
+      case 'rule_domain.compile.trace_finished':
+        return `Trace compile finished (${ev.compiledCount || 0} rule(s) saved)`;
+      // Phase 3: coverage signals.
+      case 'rule_domain.coverage_miss':
+        return `Coverage miss: rule ${ev.ruleName || '?'} skipped — falling back to live agent (${ev.missingForCondition || ''})`;
+      case 'rule_domain.coverage_extended':
+        return `Coverage widened for ${ev.ruleName || '?'}${ev.toolsWidened ? ' [+tools]' : ''}${ev.inputsWidened ? ' [+inputs]' : ''}`;
+      case 'rule_domain.merge_conflict':
+        return `⚠ Merge conflict on ${ev.ruleName || '?'} — review in Settings → Rule Domains`;
       default: return ev.type;
     }
   };
@@ -989,6 +1011,18 @@ export default function ChatPage() {
           case 'rule_domain.feel.eval':
           case 'rule_domain.executed':
           case 'rule_domain.failed':
+          // Phase 1.6+: per-rule lifecycle from the composer-mode orchestrator.
+          case 'rule_domain.rule.start':
+          case 'rule_domain.rule.done':
+          // Phase 1.3: cache hit signal from the turn-scoped tool cache.
+          case 'rule_domain.tool.cached':
+          // Phase 2: background trace compile lifecycle.
+          case 'rule_domain.compile.trace_started':
+          case 'rule_domain.compile.trace_finished':
+          // Phase 3: coverage events.
+          case 'rule_domain.coverage_miss':
+          case 'rule_domain.coverage_extended':
+          case 'rule_domain.merge_conflict':
             appendSystemMessage(ev.type, ruleDomainShortLabel(ev), undefined, ev);
             break;
 

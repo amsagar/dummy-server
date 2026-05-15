@@ -23,6 +23,10 @@ import static org.mockito.Mockito.when;
 class AgentOrchestratorPromptTest {
 
     private AgentOrchestrator newOrchestrator(SkillRegistryService skillRegistryService, RuntimeTuningProperties props) {
+        // Optional collaborators (rule-domain pipeline + turn-tool cache) are
+        // ObjectProvider<?> on the production constructor. Tests don't exercise
+        // those paths, so pass null — AgentOrchestrator guards every read with
+        // a null check on the provider.
         return new AgentOrchestrator(
                 mock(ModelProviderRouter.class),
                 skillRegistryService,
@@ -31,7 +35,13 @@ class AgentOrchestratorPromptTest {
                 props,
                 mock(RuntimeEventRepository.class),
                 new tools.jackson.databind.ObjectMapper(),
-                mock(AgentProfileRepository.class)
+                mock(AgentProfileRepository.class),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
         );
     }
 

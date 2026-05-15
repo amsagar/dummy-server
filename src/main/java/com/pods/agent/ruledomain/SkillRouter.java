@@ -2,6 +2,7 @@ package com.pods.agent.ruledomain;
 
 import com.pods.agent.config.RuleDomainProperties;
 import com.pods.agent.domain.Skill;
+import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import com.pods.agent.service.SkillRegistryService;
 import com.pods.agent.service.SkillRegistryService.SkillSnapshot;
 import lombok.extern.slf4j.Slf4j;
@@ -61,11 +62,23 @@ public class SkillRouter {
             if (hit) {
                 String markdown = snapshot.files() == null ? "" :
                         snapshot.files().values().stream().findFirst().orElse("");
-                return Optional.of(new RoutedSkill(skill, markdown));
+                SkillRuleManifest manifest = SkillRegistryService.parseRuleManifest(markdown);
+                return Optional.of(new RoutedSkill(skill, markdown, manifest));
             }
         }
         return Optional.empty();
     }
 
-    public record RoutedSkill(Skill skill, String markdown) {}
+    /**
+     * Bundle returned to the orchestrator on a successful skill match. Carries
+     * the raw skill markdown (passed to the compiler when no rule manifest is
+     * present) plus the parsed manifest (used by Phase 2 trace-based compile
+     * to know which rules to extract).
+     */
+    public record RoutedSkill(Skill skill, String markdown, SkillRuleManifest manifest) {
+        /** Back-compat overload — older callers used (skill, markdown). */
+        public RoutedSkill(Skill skill, String markdown) {
+            this(skill, markdown, SkillRuleManifest.EMPTY);
+        }
+    }
 }

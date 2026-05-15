@@ -46,12 +46,21 @@ const SystemEventGroup: FC<Props> = ({
     const sawExecuted = rdMessages.some((m) => m.eventType === "rule_domain.executed");
     const sawFailed = rdMessages.some((m) => m.eventType === "rule_domain.failed" || m.eventType === "rule_domain.compile.failed");
     const sawRetry = rdMessages.some((m) => m.eventType === "rule_domain.tool.retry");
+    const ruleStarts = rdMessages.filter((m) => m.eventType === "rule_domain.rule.start").length;
+    const cachedTools = rdMessages.filter((m) => m.eventType === "rule_domain.tool.cached").length;
+    const coverageMisses = rdMessages.filter((m) => m.eventType === "rule_domain.coverage_miss").length;
+    const traceCompileDone = rdMessages.some((m) => m.eventType === "rule_domain.compile.trace_finished");
+
     if (sawCacheHit && !sawCompile) phases.push("cache hit");
     if (sawCompile) phases.push("compiled");
+    if (ruleStarts > 1) phases.push(`${ruleStarts} rules ║`);
+    if (cachedTools > 0) phases.push(`${cachedTools} cached tool call${cachedTools > 1 ? "s" : ""}`);
+    if (coverageMisses > 0) phases.push(`${coverageMisses} coverage miss${coverageMisses > 1 ? "es" : ""}`);
     if (sawRetry) phases.push("retried");
     if (sawExecuted) phases.push("ran");
     if (sawFailed) phases.push("failed → fallback");
-    rdSummary = `Compiled flow (${phases.join(" → ") || rdMessages.length + " step(s)"})`;
+    if (traceCompileDone) phases.push("trace recompile scheduled");
+    rdSummary = `Compiled flow (${phases.join(" · ") || rdMessages.length + " step(s)"})`;
   }
 
   const parts: string[] = [];

@@ -35,7 +35,20 @@ public class RuleDomainRepository {
             .lastError(rs.getString("last_error"))
             .createdAt(rs.getLong("created_at"))
             .updatedAt(rs.getLong("updated_at"))
+            .domainGroupId(rs.getString("domain_group_id"))
+            .domainGroupName(rs.getString("domain_group_name"))
+            .ruleName(rs.getString("rule_name"))
+            .matchScope(nullSafeOr(rs.getString("match_scope"), RuleDomain.SCOPE_RULE))
+            .coverageState(nullSafeOr(rs.getString("coverage_state"), RuleDomain.COVERAGE_COMPLETE))
+            .coverageManifest(rs.getString("coverage_manifest"))
+            .traceSource(rs.getString("trace_source"))
+            .compiledFromTurn(rs.getString("compiled_from_turn"))
+            .resultKey(rs.getString("result_key"))
             .build();
+
+    private static String nullSafeOr(String v, String fallback) {
+        return v == null || v.isBlank() ? fallback : v;
+    }
 
     public RuleDomain save(RuleDomain d, float[] embedding) {
         if (d.getId() == null) d.setId(UUID.randomUUID().toString());
@@ -58,17 +71,32 @@ public class RuleDomainRepository {
                 .addValue("last_error", d.getLastError())
                 .addValue("created_at", d.getCreatedAt())
                 .addValue("updated_at", d.getUpdatedAt())
-                .addValue("embedding", embedding == null ? null : new PGvector(embedding));
+                .addValue("embedding", embedding == null ? null : new PGvector(embedding))
+                .addValue("domain_group_id", d.getDomainGroupId())
+                .addValue("domain_group_name", d.getDomainGroupName())
+                .addValue("rule_name", d.getRuleName())
+                .addValue("match_scope", d.getMatchScope() == null ? RuleDomain.SCOPE_RULE : d.getMatchScope())
+                .addValue("coverage_state", d.getCoverageState() == null ? RuleDomain.COVERAGE_COMPLETE : d.getCoverageState())
+                .addValue("coverage_manifest", d.getCoverageManifest())
+                .addValue("trace_source", d.getTraceSource())
+                .addValue("compiled_from_turn", d.getCompiledFromTurn())
+                .addValue("result_key", d.getResultKey());
 
         jdbc.update("""
                 INSERT INTO agent.rule_domains
                   (id, skill_id, skill_name, intent_label, source_hash, tool_signature,
                    bpmn_xml, flowable_proc_key, status, version, compile_attempts,
-                   last_error, created_at, updated_at, intent_embedding)
+                   last_error, created_at, updated_at, intent_embedding,
+                   domain_group_id, domain_group_name, rule_name, match_scope,
+                   coverage_state, coverage_manifest, trace_source, compiled_from_turn,
+                   result_key)
                 VALUES
                   (:id, :skill_id, :skill_name, :intent_label, :source_hash, :tool_signature,
                    :bpmn_xml, :flowable_proc_key, :status, :version, :compile_attempts,
-                   :last_error, :created_at, :updated_at, :embedding)
+                   :last_error, :created_at, :updated_at, :embedding,
+                   :domain_group_id, :domain_group_name, :rule_name, :match_scope,
+                   :coverage_state, CAST(:coverage_manifest AS JSONB), :trace_source,
+                   :compiled_from_turn, :result_key)
                 ON CONFLICT (skill_id, intent_label, version) DO UPDATE SET
                   bpmn_xml = EXCLUDED.bpmn_xml,
                   flowable_proc_key = EXCLUDED.flowable_proc_key,
@@ -78,7 +106,16 @@ public class RuleDomainRepository {
                   compile_attempts = EXCLUDED.compile_attempts,
                   last_error = EXCLUDED.last_error,
                   updated_at = EXCLUDED.updated_at,
-                  intent_embedding = EXCLUDED.intent_embedding
+                  intent_embedding = EXCLUDED.intent_embedding,
+                  domain_group_id = EXCLUDED.domain_group_id,
+                  domain_group_name = EXCLUDED.domain_group_name,
+                  rule_name = EXCLUDED.rule_name,
+                  match_scope = EXCLUDED.match_scope,
+                  coverage_state = EXCLUDED.coverage_state,
+                  coverage_manifest = EXCLUDED.coverage_manifest,
+                  trace_source = EXCLUDED.trace_source,
+                  compiled_from_turn = EXCLUDED.compiled_from_turn,
+                  result_key = EXCLUDED.result_key
                 """, params);
         return d;
     }
@@ -158,6 +195,73 @@ public class RuleDomainRepository {
                 .addValue("il", intentLabel),
                 Integer.class);
         return v == null ? 0 : v;
+    }
+
+    // ── Phase 1: domain-group + match-scope queries ───────────────────────
+
+    /** All rules in a domain group, ordered by rule_name. */
+    public List<RuleDomain> findByDomainGroupId(String groupId) {
+        if (groupId == null || groupId.isBlank()) return List.of();
+        return jdbc.query("""
+                SELECT * FROM agent.rule_domains
+                WHERE domain_group_id = :gid
+                ORDER BY rule_name NULLS LAST, version DESC
+                """, new MapSqlParameterSource("gid", groupId), ROW);
+    }
+
+    /** Active rules in a group — what the orchestrator runs in a fan-out. */
+    public List<RuleDomain> findActiveRulesInGroup(String groupId) {
+        if (groupId == null || groupId.isBlank()) return List.of();
+        return jdbc.query("""
+                SELECT DISTINCT ON (rule_name) *
+                FROM agent.rule_domains
+                WHERE domain_group_id = :gid
+                  AND match_scope = 'RULE'
+                  AND status IN ('ACTIVE', 'DRAFT')
+                ORDER BY rule_name, version DESC
+                """, new MapSqlParameterSource("gid", groupId), ROW);
+    }
+
+    /** Look up rule rows by group name (admin UI). */
+    public List<RuleDomain> findByGroupName(String groupName) {
+        if (groupName == null || groupName.isBlank()) return List.of();
+        return jdbc.query("""
+                SELECT * FROM agent.rule_domains
+                WHERE LOWER(domain_group_name) = LOWER(:gn)
+                ORDER BY rule_name NULLS LAST, version DESC
+                """, new MapSqlParameterSource("gn", groupName), ROW);
+    }
+
+    /**
+     * Best match scoped to a {@code match_scope}. Used by the two-tier intent
+     * matcher: pass {@code RULE} for the narrow pass, {@code DOMAIN_FANOUT}
+     * for the umbrella pass.
+     */
+    public Optional<Match> findBestMatchByScope(String skillId,
+                                                String matchScope,
+                                                float[] embedding,
+                                                double threshold) {
+        if (embedding == null) return Optional.empty();
+        var params = new MapSqlParameterSource()
+                .addValue("sid", skillId)
+                .addValue("scope", matchScope)
+                .addValue("v", new PGvector(embedding));
+
+        var rows = jdbc.query("""
+                SELECT *, 1.0 - (intent_embedding <=> :v) AS similarity
+                FROM agent.rule_domains
+                WHERE skill_id = :sid
+                  AND match_scope = :scope
+                  AND status IN ('ACTIVE', 'DRAFT')
+                  AND intent_embedding IS NOT NULL
+                ORDER BY intent_embedding <=> :v
+                LIMIT 1
+                """, params, (rs, i) -> {
+            RuleDomain d = ROW.mapRow(rs, i);
+            double sim = rs.getDouble("similarity");
+            return new Match(d, sim);
+        });
+        return rows.stream().filter(m -> m.similarity() >= threshold).findFirst();
     }
 
     /**

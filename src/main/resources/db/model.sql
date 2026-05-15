@@ -114,6 +114,11 @@ ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS token_expires_at BIGINT;
 ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS base_injected BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_agent_tools_base_injected ON agent.agent_tools (base_injected) WHERE base_injected = TRUE;
 
+-- Per-turn cache eligibility (TurnToolCache). NULL → default-for-method
+-- (GET/POST cacheable, PUT/PATCH/DELETE not). Operator can override to
+-- FALSE to disable caching for a read-shaped tool with side effects.
+ALTER TABLE agent.agent_tools ADD COLUMN IF NOT EXISTS cacheable BOOLEAN;
+
 CREATE TABLE IF NOT EXISTS agent.tool_auth_profiles (
                                                         id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     domain_id     TEXT NOT NULL REFERENCES agent.agent_domains (id) ON DELETE CASCADE,
@@ -452,6 +457,32 @@ CREATE INDEX IF NOT EXISTS idx_rule_domains_status
 CREATE INDEX IF NOT EXISTS idx_rule_domains_embedding_hnsw
     ON agent.rule_domains
     USING hnsw (intent_embedding halfvec_cosine_ops);
+
+-- ── Phase 0 additions for domain→rules split + trace-based compile ──
+-- Existing monolithic rows continue to behave identically with all of these
+-- left NULL / at their defaults. New compiles populate them to opt into the
+-- domain-group model.
+ALTER TABLE agent.rule_domains
+    ADD COLUMN IF NOT EXISTS domain_group_id      TEXT,
+    ADD COLUMN IF NOT EXISTS domain_group_name    TEXT,
+    ADD COLUMN IF NOT EXISTS rule_name            TEXT,
+    ADD COLUMN IF NOT EXISTS match_scope          TEXT NOT NULL DEFAULT 'RULE',
+    ADD COLUMN IF NOT EXISTS coverage_state       TEXT NOT NULL DEFAULT 'COMPLETE',
+    ADD COLUMN IF NOT EXISTS coverage_manifest    JSONB,
+    ADD COLUMN IF NOT EXISTS trace_source         TEXT,
+    ADD COLUMN IF NOT EXISTS compiled_from_turn   TEXT,
+    ADD COLUMN IF NOT EXISTS result_key           TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_group
+    ON agent.rule_domains (domain_group_id)
+    WHERE domain_group_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_group_name
+    ON agent.rule_domains (LOWER(domain_group_name))
+    WHERE domain_group_name IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_rule_domains_match_scope
+    ON agent.rule_domains (match_scope, status);
 
 -- ────────────────────────────────────────────────────────────────────────
 -- If you upgrade the rule-domain embedding model to one with a different

@@ -194,7 +194,7 @@ public class BpmnCompiler {
     /** Attempt a real Flowable deployment; rollback by deleting on success here, since this
      *  is only a validation step. Real deployment happens later via BpmnRuntime.ensureDeployed.
      *  Returns null on success or the parse error message on failure. */
-    private String tryDeploy(String xml, String skillName, String intentLabel) {
+    public String tryDeploy(String xml, String skillName, String intentLabel) {
         if (xml == null || xml.isBlank()) return "compiler returned empty output";
         String resourceName = "validate-" + slug(skillName) + "-" + slug(intentLabel) + ".bpmn20.xml";
         try {
@@ -218,7 +218,7 @@ public class BpmnCompiler {
         return cur.getClass().getSimpleName() + ": " + cur.getMessage();
     }
 
-    private static String sanitize(String llmOutput) {
+    public static String sanitize(String llmOutput) {
         if (llmOutput == null) return "";
         String s = llmOutput.trim();
         Matcher open = CODE_FENCE_OPEN.matcher(s);
@@ -327,7 +327,7 @@ public class BpmnCompiler {
     }
 
 
-    private static String extractProcessId(String xml) {
+    public static String extractProcessId(String xml) {
         Matcher m = PROC_ID.matcher(xml);
         return m.find() ? m.group(1) : null;
     }
@@ -337,7 +337,7 @@ public class BpmnCompiler {
         return s.toLowerCase().replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
     }
 
-    private float[] embed(String text) {
+    public float[] embed(String text) {
         try {
             String pid = props.getEmbeddingModel().getProviderId();
             String mid = props.getEmbeddingModel().getModelId();

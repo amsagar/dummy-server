@@ -178,7 +178,20 @@ public class ToolCallDelegate implements JavaDelegate {
                 log.info("[ToolCallDelegate] retrying {} after timeout (attempt {}/{})",
                         toolName, attempt + 1, maxAttempts);
             }
-            result = toolExecutor.execute(tool, payload);
+            // Route through the turn-scoped cache. Within a single turn,
+            // parallel rules requesting the same (tool, canonical-args) share
+            // one in-flight call. When turnId is null or the cache is
+            // disabled (test contexts / mutation tools), executeCached
+            // transparently falls back to a direct execute.
+            ToolExecutionService.CachedExecutionResult cached =
+                    toolExecutor.executeCachedWithMeta(tool, payload, turnId);
+            result = cached.result();
+            if (cached.cacheHit()) {
+                bus.emit("rule_domain.tool.cached", Map.of(
+                        "turnId", turnId == null ? "" : turnId,
+                        "nodeId", nodeId == null ? "" : nodeId,
+                        "toolName", toolName));
+            }
             if (result.success() || !isTimeoutError(result.error())) break;
         }
         return result;

@@ -177,6 +177,7 @@ public class AgentToolRepository {
                 .tokenExpiresAt(optLong(rs, "token_expires_at"))
                 .enabled(rs.getBoolean("enabled"))
                 .baseInjected(Boolean.TRUE.equals(optBoolean(rs, "base_injected")))
+                .cacheable(optBoolean(rs, "cacheable"))
                 .createdAt(rs.getLong("created_at"))
                 .updatedAt(rs.getLong("updated_at"))
                 .build();

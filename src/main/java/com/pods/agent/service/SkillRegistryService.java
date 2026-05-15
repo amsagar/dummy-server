@@ -3,11 +3,13 @@ package com.pods.agent.service;
 import com.pods.agent.domain.Skill;
 import com.pods.agent.domain.SkillFile;
 import com.pods.agent.repository.SkillRepository;
+import com.pods.agent.ruledomain.model.SkillRuleManifest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -176,11 +178,81 @@ public class SkillRegistryService {
         for (String line : block.split("\n")) {
             int colon = line.indexOf(':');
             if (colon < 1) continue;
+            // Stop at first nested-block marker — flat parser only handles
+            // scalars at the top level; nested keys ("rules:", "tools:") are
+            // handled separately by parseRuleManifest().
             String key = line.substring(0, colon).trim();
             String value = line.substring(colon + 1).trim().replaceAll("^[\"']|[\"']$", "");
+            // Skip lines whose value isn't a simple scalar (no value, or a
+            // list marker, or a continuation). These belong to a nested
+            // sub-tree the caller handles via parseRuleManifest.
+            if (value.isEmpty() || value.equals("|") || value.equals(">")) continue;
             if (!key.isEmpty()) result.put(key, value);
         }
         return result;
+    }
+
+    /**
+     * Parse the {@code rules:} and {@code domain_intent_examples:} blocks of a
+     * skill's YAML frontmatter. Skills without those blocks return
+     * {@link SkillRuleManifest#EMPTY} — the orchestrator then falls back to the
+     * legacy single-monolithic-BPMN compile.
+     *
+     * <p>Uses {@code snakeyaml} (already a Spring Boot dependency) rather than
+     * the flat line-based parser in {@link #parseYamlFrontmatter} because the
+     * structure is nested (lists of objects with nested fields).
+     */
+    public static SkillRuleManifest parseRuleManifest(String skillMarkdown) {
+        if (skillMarkdown == null || !skillMarkdown.startsWith("---")) return SkillRuleManifest.EMPTY;
+        int end = skillMarkdown.indexOf("\n---", 3);
+        if (end < 0) return SkillRuleManifest.EMPTY;
+        String frontmatter = skillMarkdown.substring(3, end).strip();
+        if (frontmatter.isEmpty()) return SkillRuleManifest.EMPTY;
+
+        Yaml yaml = new Yaml();
+        Object root;
+        try {
+            root = yaml.load(frontmatter);
+        } catch (Exception ex) {
+            log.warn("[SkillRegistry] YAML frontmatter parse failed: {}", ex.getMessage());
+            return SkillRuleManifest.EMPTY;
+        }
+        if (!(root instanceof Map<?, ?> map)) return SkillRuleManifest.EMPTY;
+
+        Object rulesNode = map.get("rules");
+        if (!(rulesNode instanceof List<?> rulesList) || rulesList.isEmpty()) {
+            return SkillRuleManifest.EMPTY;
+        }
+
+        List<SkillRuleManifest.Rule> rules = new ArrayList<>();
+        for (Object item : rulesList) {
+            if (!(item instanceof Map<?, ?> rm)) continue;
+            String name = asString(rm.get("name"));
+            if (name == null || name.isBlank()) continue;
+            List<String> intentExamples = asStringList(rm.get("intent_examples"));
+            String resultKey = asString(rm.get("result_key"));
+            List<String> tools = asStringList(rm.get("tools"));
+            String section = asString(rm.get("skill_section"));
+            rules.add(new SkillRuleManifest.Rule(name, intentExamples, resultKey, tools, section));
+        }
+
+        List<String> domainIntentExamples = asStringList(map.get("domain_intent_examples"));
+        return new SkillRuleManifest(rules, domainIntentExamples);
+    }
+
+    private static String asString(Object o) {
+        return o == null ? null : o.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> asStringList(Object o) {
+        if (o == null) return List.of();
+        if (o instanceof List<?> list) {
+            List<String> out = new ArrayList<>(list.size());
+            for (Object v : list) if (v != null) out.add(v.toString());
+            return out;
+        }
+        return List.of(o.toString());
     }
 
     public record SkillSnapshot(Skill skill, Map<String, String> files) {}
