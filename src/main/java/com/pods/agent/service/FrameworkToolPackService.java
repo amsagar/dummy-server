@@ -215,8 +215,11 @@ public class FrameworkToolPackService {
                 seed("lsp", "Run language server operation", "integration", "integration", true, false, Map.of("operation", "string"), false),
                 seed("batch", "Execute batch operations", "workflow", "workflow", true, false,
                         Map.of("tasks", Map.of("type", "array", "items", Map.of("type", "object"))), false),
-                seed("parallel_task", "Run tasks in parallel", "workflow", "workflow", true, false,
-                        Map.of("tasks", Map.of("type", "array", "items", Map.of("type", "object"))), false),
+                // parallel_task removed — the LLM kept hallucinating it as a
+                // toolName inside trace-compiled BPMNs (it's a workflow
+                // primitive, not a real registered tool). Disabling here lets
+                // disableStaleFrameworkDefaults() auto-disable existing rows
+                // on next startup.
                 seed("agent_send", "Send agent-to-agent message", "integration", "integration", true, false, Map.of("to", "string", "message", "string"), false),
                 seed("agent_receive", "Receive agent message", "integration", "integration", true, false, Map.of(), false),
                 seed("pipeline", "Run pipeline steps", "workflow", "workflow", true, false,

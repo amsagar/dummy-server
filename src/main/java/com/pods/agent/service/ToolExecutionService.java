@@ -697,7 +697,7 @@ public class ToolExecutionService {
                 return new ExecutionResult(false, null, "skillsearch failed: " + e.getMessage());
             }
         }
-        if (Set.of("plan_exit", "task", "parallel_task", "batch", "pipeline", "todowrite").contains(name)) {
+        if (Set.of("plan_exit", "task", "batch", "pipeline", "todowrite").contains(name)) {
             return new ExecutionResult(true, "{\"status\":\"ok\",\"tool\":\"" + name + "\"}", null);
         }
         if (Set.of("agent_send", "agent_receive", "skill", "lsp").contains(name)) {

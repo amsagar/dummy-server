@@ -203,7 +203,8 @@ public class AgenticTraceCompiler {
             String err = TraceBasedBpmnCompiler.validateDelegateFieldNames(cleaned);
             if (err == null) err = TraceBasedBpmnCompiler.validateInputDiscipline(cleaned);
             if (err == null) err = TraceBasedBpmnCompiler.validateLiteralGrounding(cleaned, slice);
-            if (err == null) err = validateRuleToolScope(cleaned, rule);
+            if (err == null) err = validateRuleToolScope(cleaned, rule, slice);
+            if (err == null) err = validateArgTemplateKeys(cleaned, slice);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -247,35 +248,186 @@ public class AgenticTraceCompiler {
 
     /**
      * Reject any {@code <flowable:field name="toolName">VALUE</flowable:string>}
-     * where VALUE isn't in this rule's manifest {@code tools} list. Stops
-     * the LLM from over-reaching and implementing other rules' work in
-     * this rule's BPMN.
+     * where VALUE isn't observed in this rule's recorded trace AND isn't
+     * in the manifest's {@code tools} list. Catches two failure modes:
+     *
+     * <ol>
+     *   <li>Cross-rule bleed — LLM implements other rules' work (caught
+     *       by the manifest check).</li>
+     *   <li>Tool hallucination — LLM invents a tool that exists in
+     *       neither the manifest nor the trace (caught by the trace check,
+     *       belt and suspenders since the manifest itself is LLM-derived
+     *       and can be wrong).</li>
+     * </ol>
      */
-    private static String validateRuleToolScope(String bpmnXml, SkillRuleManifest.Rule rule) {
+    private static String validateRuleToolScope(String bpmnXml,
+                                                SkillRuleManifest.Rule rule,
+                                                ExecutionTrace slice) {
         if (bpmnXml == null) return null;
-        if (rule.tools() == null || rule.tools().isEmpty()) return null; // no scope constraint
-        java.util.Set<String> allowed = new java.util.HashSet<>(rule.tools());
+
+        // Build authoritative tool set: trace ∪ manifest. Trace is the
+        // empirical ground truth; manifest is the declarative ground
+        // truth. Either is sufficient justification.
+        java.util.Set<String> allowed = new java.util.LinkedHashSet<>();
+        if (rule.tools() != null) allowed.addAll(rule.tools());
+        java.util.Set<String> traceTools = new java.util.LinkedHashSet<>();
+        if (slice != null) {
+            for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+                if (step.name() != null) traceTools.add(step.name());
+            }
+            allowed.addAll(traceTools);
+        }
+        if (allowed.isEmpty()) return null; // nothing to enforce against
+
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
                 "<flowable:field\\s+name\\s*=\\s*\"toolName\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
                 java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
         java.util.Set<String> outOfScope = new java.util.LinkedHashSet<>();
-        java.util.Set<String> declared = new java.util.LinkedHashSet<>();
         while (m.find()) {
             String name = m.group(1).trim();
-            declared.add(name);
             if (!allowed.contains(name)) outOfScope.add(name);
         }
         if (outOfScope.isEmpty()) return null;
+
         StringBuilder msg = new StringBuilder(
-                "Compiled BPMN invokes tools not in this rule's manifest scope. "
-                + "You are compiling rule `" + rule.name() + "`, which may use ONLY: ")
-                .append(rule.tools()).append(".\n");
-        msg.append("Out-of-scope tool(s) in the BPMN:");
+                "Compiled BPMN invokes tools that are neither in this rule's manifest scope "
+                + "nor in the recorded trace. Likely causes: (a) you implemented other rules' "
+                + "work in this rule, or (b) you hallucinated a tool name.\n"
+                + "Rule: ").append(rule.name()).append("\n");
+        msg.append("Tools observed in trace: ").append(traceTools).append("\n");
+        if (rule.tools() != null) {
+            msg.append("Tools declared in manifest: ").append(rule.tools()).append("\n");
+        }
+        msg.append("Offending toolName value(s) in the BPMN:");
         for (String t : outOfScope) msg.append("\n  - ").append(t);
-        msg.append("\nRemove the serviceTask(s) that invoke those tools. ")
-                .append("Other rules of this skill handle that work in their own BPMNs. ")
-                .append("Implement ONLY this rule's slice.");
+        msg.append("\nFix: remove those <serviceTask> elements. Implement ONLY the tool calls "
+                + "that appear in your trace/ folder.");
         return msg.toString();
+    }
+
+    /**
+     * For every {@code toolCallDelegate} <serviceTask>, parse its
+     * {@code argTemplate} JSON and reject any KEY that isn't in the
+     * trace's recorded input for that tool name. Catches the
+     * {@code {"orderId":"orderId"}} vs {@code {"ORD_ID":"orderId"}}
+     * failure mode — the LLM inferred a wrong API parameter name.
+     *
+     * <p>Direction is one-way: BPMN keys ⊆ trace keys. We don't enforce
+     * the reverse because the trace might have included optional args
+     * the BPMN can legitimately omit.
+     */
+    private static String validateArgTemplateKeys(String bpmnXml, ExecutionTrace slice) {
+        if (bpmnXml == null || slice == null) return null;
+
+        // For each toolName in the trace, snapshot the set of input keys.
+        // If a tool is called multiple times in the trace, we union keys
+        // across all calls — the LLM may legitimately reuse fewer keys.
+        java.util.Map<String, java.util.Set<String>> traceKeysByTool = new java.util.LinkedHashMap<>();
+        for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+            if (step.name() == null || step.input() == null || !step.input().isObject()) continue;
+            java.util.Set<String> keys = traceKeysByTool.computeIfAbsent(step.name(), k -> new java.util.LinkedHashSet<>());
+            for (String k : step.input().propertyNames()) keys.add(k);
+        }
+        if (traceKeysByTool.isEmpty()) return null;
+
+        // Walk every <serviceTask> that's a toolCallDelegate, pair its
+        // toolName with its argTemplate, and diff the keys.
+        java.util.regex.Pattern taskRe = java.util.regex.Pattern.compile(
+                "<serviceTask\\b[^>]*flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*toolCallDelegate\\s*\\}\\s*\"[\\s\\S]*?</serviceTask>",
+                java.util.regex.Pattern.DOTALL);
+        java.util.regex.Pattern fieldRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(toolName|argTemplate)\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL);
+
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        java.util.regex.Matcher tm = taskRe.matcher(bpmnXml);
+        while (tm.find()) {
+            String taskBlock = tm.group();
+            String toolName = null;
+            String argTemplate = null;
+            java.util.regex.Matcher fm = fieldRe.matcher(taskBlock);
+            while (fm.find()) {
+                String which = fm.group(1);
+                String value = fm.group(2).trim();
+                if ("toolName".equals(which)) toolName = value;
+                else if ("argTemplate".equals(which)) argTemplate = value;
+            }
+            if (toolName == null || argTemplate == null) continue;
+            java.util.Set<String> traceKeys = traceKeysByTool.get(toolName);
+            if (traceKeys == null) continue; // unknown tool — handled by validateRuleToolScope
+
+            java.util.Set<String> bpmnKeys = extractJsonTopLevelKeys(argTemplate);
+            if (bpmnKeys.isEmpty()) continue;
+
+            java.util.Set<String> bad = new java.util.LinkedHashSet<>();
+            for (String k : bpmnKeys) {
+                if (!traceKeys.contains(k)) bad.add(k);
+            }
+            if (!bad.isEmpty()) {
+                problems.add(toolName + ": argTemplate keys " + bad
+                        + " are not in the recorded trace input. "
+                        + "Recorded keys for this tool: " + traceKeys);
+            }
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN uses argTemplate keys that don't match the tool's actual API. "
+                + "Look at the recorded trace input for each tool and copy its keys exactly:");
+        for (String p : problems) msg.append("\n  - ").append(p);
+        msg.append("\nFix: change the BPMN's argTemplate to use the recorded key names (e.g. "
+                + "`ORD_ID` not `orderId`).");
+        return msg.toString();
+    }
+
+    /** Extract the top-level JSON object keys from a string that may
+     *  contain a JSON object with FEEL-quoted values. We don't do a full
+     *  JSON parse because the values aren't strict JSON (FEEL escapes,
+     *  multiline, etc.) — a regex over the top-level `"key":` form is
+     *  good enough and tolerates the BPMN-embedded layout. */
+    private static java.util.Set<String> extractJsonTopLevelKeys(String body) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        // Match `"key" :` — quoted identifier followed by optional whitespace
+        // and a colon. Stops on the next `}` or end of string. We only
+        // capture keys at depth 1 by ignoring quoted-string contents and
+        // tracking brace depth.
+        int depth = 0;
+        boolean inString = false;
+        boolean escape = false;
+        StringBuilder current = new StringBuilder();
+        boolean readingKey = false;
+        for (int i = 0; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (escape) { escape = false; if (inString && readingKey) current.append(c); continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (inString) {
+                if (c == '"') {
+                    inString = false;
+                    if (readingKey && depth == 1) {
+                        // The string we just closed is a key candidate;
+                        // confirm by scanning ahead for `:`.
+                        int j = i + 1;
+                        while (j < body.length() && Character.isWhitespace(body.charAt(j))) j++;
+                        if (j < body.length() && body.charAt(j) == ':') {
+                            out.add(current.toString());
+                        }
+                    }
+                    current.setLength(0);
+                    readingKey = false;
+                } else if (readingKey) {
+                    current.append(c);
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+                readingKey = (depth == 1);
+                continue;
+            }
+            if (c == '{' || c == '[') depth++;
+            else if (c == '}' || c == ']') depth--;
+        }
+        return out;
     }
 
     // ── Prompts ──────────────────────────────────────────────────────────

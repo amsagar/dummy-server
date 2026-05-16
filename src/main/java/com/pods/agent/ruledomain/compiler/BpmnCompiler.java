@@ -315,7 +315,7 @@ public class BpmnCompiler {
                                                     org.flowable.bpmn.model.FlowElementsContainer scope) {
         List<ServiceTask> toolTasks = new ArrayList<>();
         for (FlowElement fe : scope.getFlowElements()) {
-            if (fe instanceof ServiceTask st && isToolCallDelegate(st)) {
+            if (fe instanceof ServiceTask st && isInjectableDelegate(st)) {
                 if (st.getBoundaryEvents() != null && !st.getBoundaryEvents().isEmpty()) {
                     boolean alreadyHandled = st.getBoundaryEvents().stream().anyMatch(b ->
                             b.getEventDefinitions() != null && b.getEventDefinitions().stream()
@@ -337,8 +337,11 @@ public class BpmnCompiler {
             be.setAttachedToRef(st);
             be.setCancelActivity(true);
 
+            // No errorRef set → catches ANY BpmnError thrown by the
+            // delegate, not just TOOL_EXECUTION_FAILED. Covers FEEL eval
+            // failures (feelExtractDelegate), decision table failures
+            // (decisionTableDelegate), bad-variable errors, etc.
             ErrorEventDefinition eed = new ErrorEventDefinition();
-            eed.setErrorCode("TOOL_EXECUTION_FAILED");
             be.addEventDefinition(eed);
 
             // Boundary events live in the same scope as the attached task.
@@ -378,9 +381,15 @@ public class BpmnCompiler {
         return changed;
     }
 
-    private static boolean isToolCallDelegate(ServiceTask st) {
+    /** Match any of the three delegate beans we inject error boundaries
+     *  around. Every BpmnError thrown by any of these must be caught or
+     *  the run dies with "no matching parent execution". */
+    private static boolean isInjectableDelegate(ServiceTask st) {
         String impl = st.getImplementation();
-        return impl != null && impl.contains("toolCallDelegate");
+        if (impl == null) return false;
+        return impl.contains("toolCallDelegate")
+                || impl.contains("feelExtractDelegate")
+                || impl.contains("decisionTableDelegate");
     }
 
     /**
