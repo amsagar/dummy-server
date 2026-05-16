@@ -116,7 +116,7 @@ public class TraceBasedBpmnCompiler {
         // trace-compiler prompt drifted from this contract once and
         // produced unusable rules; don't repeat that.
         String system = promptBuilder.buildSystem() + "\n\n" + traceAddendum();
-        String user = buildTraceUserPrompt(skillName, manifestRule, slice);
+        String user = buildTraceUserPrompt(skillName, skillMarkdown, manifestRule, slice);
 
         bus.emit("rule_domain.compile.llm_call", Map.of(
                 "model", compilerRef.modelID(),
@@ -139,7 +139,17 @@ public class TraceBasedBpmnCompiler {
         // BPMN where ${zip} and ${orderType} should have been derived
         // from ${order.*}.
         String structuralError = validateInputDiscipline(xml);
+        // Trace-literal pre-check: any quoted literal in argTemplate /
+        // inputsTemplate / feelExpr that also appears as a value in an
+        // earlier recorded tool response is almost certainly a compiler
+        // mistake — the BPMN won't generalize beyond this one order. Fail
+        // here with a clear message instead of letting the rule deploy
+        // and run with hardcoded values that happen to work for the
+        // training order and break for everything else.
+        String literalError = structuralError != null ? null
+                : validateLiteralGrounding(xml, slice);
         String error = structuralError != null ? structuralError
+                : literalError != null ? literalError
                 : bpmnCompiler.tryDeploy(xml, skillName, intentLabel);
 
         long now = System.currentTimeMillis();
@@ -394,6 +404,124 @@ public class TraceBasedBpmnCompiler {
         return msg.toString();
     }
 
+    // Literals that may legitimately appear in either trace responses or
+    // BPMN argTemplates without being suspicious. These are protocol-level
+    // constants the SKILL contract is allowed to hardcode (e.g. country
+    // codes, channel identifiers). Extend cautiously — every entry here
+    // weakens the check.
+    private static final java.util.Set<String> ALLOWED_TRACE_LITERALS = java.util.Set.of(
+            "US", "USA", "CA", "MX",
+            "true", "false", "null",
+            "OK", "Salesforce", "SFDC", "Web", "WEB", "API"
+    );
+    private static final int MIN_INTERESTING_LITERAL_LENGTH = 2;
+
+    /**
+     * Reject any quoted FEEL literal in an argTemplate / inputsTemplate /
+     * feelExpr that also appears as a value somewhere in this rule's
+     * recorded tool responses. Such literals are almost always compiler
+     * mistakes — the BPMN happens to work for the training order because
+     * the literal matches, but will fail for any other order.
+     *
+     * <p>Returns {@code null} when grounded, or a human-readable error
+     * listing every offending literal + the trace path where the same
+     * value was observed.
+     */
+    String validateLiteralGrounding(String bpmnXml, ExecutionTrace slice) {
+        if (bpmnXml == null || slice == null) return null;
+
+        // 1. Build the set of values present in any recorded response.
+        //    Map value-string → first-observed JSON pointer for the
+        //    diagnostic message.
+        java.util.Map<String, String> traceValues = new java.util.LinkedHashMap<>();
+        for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+            if (step.output() == null) continue;
+            collectStringValues(step.output(), "$." + safeStep(step.name()), traceValues);
+        }
+        if (traceValues.isEmpty()) return null;
+
+        // 2. Walk every argTemplate / inputsTemplate / feelExpr value in
+        //    the BPMN. Extract every quoted FEEL string literal `"foo"`
+        //    inside those values. Flag if it matches a trace value.
+        java.util.Map<String, String> offenders = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher fieldRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(argTemplate|inputsTemplate|feelExpr|postTransform)\"[^>]*>"
+                + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (fieldRe.find()) {
+            String body = fieldRe.group(2).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
+            // FEEL literals are double-quoted; inside JSON-of-FEEL the
+            // outer JSON quotes are escaped (\"value\"). Strip the JSON
+            // escapes first so we recover the raw FEEL.
+            String unescaped = body.replace("\\\"", "\"");
+            java.util.regex.Matcher feelLitRe = java.util.regex.Pattern.compile(
+                    "\"\\\\\"([^\\\\\"]+)\\\\\"\"|\"([^\"]{" + MIN_INTERESTING_LITERAL_LENGTH + ",})\"").matcher(unescaped);
+            while (feelLitRe.find()) {
+                String lit = feelLitRe.group(1) != null ? feelLitRe.group(1) : feelLitRe.group(2);
+                if (lit == null || lit.isBlank()) continue;
+                String trimmed = lit.trim();
+                if (trimmed.length() < MIN_INTERESTING_LITERAL_LENGTH) continue;
+                if (ALLOWED_TRACE_LITERALS.contains(trimmed)) continue;
+                // Skip obvious key names ("foo": "bar" — the "foo" half is
+                // a key, not a value). We can't distinguish keys from
+                // values structurally here, but trace values are
+                // typically multi-token strings or specific identifiers,
+                // so we look at trace match: if the literal isn't in
+                // traceValues, no harm anyway.
+                if (traceValues.containsKey(trimmed) && !offenders.containsKey(trimmed)) {
+                    offenders.put(trimmed, traceValues.get(trimmed));
+                }
+            }
+        }
+        if (offenders.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN hardcodes literal value(s) that the recorded trace "
+                + "shows can be derived from a prior tool's response. The rule won't "
+                + "generalize beyond the training order:");
+        for (var e : offenders.entrySet()) {
+            msg.append("\n  - \"").append(e.getKey()).append("\" (observed in trace at ")
+                    .append(e.getValue()).append(")");
+        }
+        msg.append("\nFix: replace each literal with a FEEL path into the response variable ")
+                .append("(e.g. `order.Lines[1].DeliveryAddress.PostalCode` instead of `\"64157\"`).");
+        return msg.toString();
+    }
+
+    /** Recursively walk a JsonNode and collect every string value (with
+     *  its JSON-pointer-like path) into the {@code into} map. Used by
+     *  {@link #validateLiteralGrounding} as the set of values the BPMN
+     *  must not hardcode. */
+    private static void collectStringValues(
+            tools.jackson.databind.JsonNode node,
+            String path,
+            java.util.Map<String, String> into) {
+        if (node == null || node.isNull()) return;
+        if (node.isTextual()) {
+            String s = node.asString();
+            if (s != null && s.length() >= MIN_INTERESTING_LITERAL_LENGTH
+                    && !ALLOWED_TRACE_LITERALS.contains(s.trim())) {
+                into.putIfAbsent(s.trim(), path);
+            }
+            return;
+        }
+        if (node.isObject()) {
+            for (String name : node.propertyNames()) {
+                collectStringValues(node.get(name), path + "." + name, into);
+            }
+            return;
+        }
+        if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                collectStringValues(node.get(i), path + "[" + i + "]", into);
+            }
+        }
+    }
+
+    private static String safeStep(String s) {
+        return s == null ? "?" : s.replaceAll("[^A-Za-z0-9_]", "_");
+    }
+
     private static String suggestForBean(String bean, String wrongName) {
         if ("toolCallDelegate".equals(bean)) {
             if ("inputBindings".equals(wrongName) || "inputs".equals(wrongName)) {
@@ -437,7 +565,24 @@ public class TraceBasedBpmnCompiler {
 
                 1. Reference field paths EXACTLY as they appear in the response samples
                    below. Do not invent fields. If you can't find a path in a sample,
-                   don't use it.
+                   don't use it. For FEEL filter predicates like `Lines[X = "Y"]`, you
+                   may only use field names `X` that appear at the corresponding level
+                   in the recorded response. If you need to filter by a field you can't
+                   see in the sample, refuse — the BPMN won't generalize.
+                1b. *** TRACE-LITERAL DISCIPLINE — STRICT, ENFORCED ***
+                    For every quoted string literal you would put in an `argTemplate`,
+                    `inputsTemplate`, or `feelExpr` value: if that exact literal
+                    appears as a value ANYWHERE in the recorded response of an earlier
+                    tool (or as a value in the user prompt), you MUST instead encode
+                    a FEEL path that reads it back from the response variable. Never
+                    hardcode `"64157"`, `"COMMERCIAL"`, `"IDEL"`, `"Long Distance"`,
+                    or any other value the trace shows you can derive. The
+                    post-compile validator inspects every literal and rejects rules
+                    that hardcode trace-observed values.
+                    A literal IS allowed only when (a) it's a true constant of the
+                    SKILL contract (e.g. `"US"` in `countryCode`), or (b) it does
+                    NOT appear anywhere in any earlier recorded response. When in
+                    doubt: write a FEEL path.
                 2. *** INPUT VARIABLE DISCIPLINE — STRICT ***
                    The ONLY user-provided identifiers you may reference as bare names
                    in an `argTemplate` value are:
@@ -480,6 +625,7 @@ public class TraceBasedBpmnCompiler {
     }
 
     private String buildTraceUserPrompt(String skillName,
+                                        String skillMarkdown,
                                         SkillRuleManifest.Rule rule,
                                         ExecutionTrace slice) {
         StringBuilder sb = new StringBuilder();
@@ -489,9 +635,22 @@ public class TraceBasedBpmnCompiler {
             sb.append("## Sample intents the user might phrase:\n");
             for (String ex : rule.intentExamples()) sb.append("  - ").append(ex).append("\n");
         }
+
+        // The skill markdown is the canonical contract — it tells the LLM
+        // which fields exist on the order, which ItemCodes count as legs,
+        // how to map ItemCode → ServiceCode, etc. Without this, the trace
+        // alone is too thin for the LLM to write generalized FEEL filters.
+        if (skillMarkdown != null && !skillMarkdown.isBlank()) {
+            sb.append("\n## Skill specification (the canonical contract — your BPMN must follow this)\n\n");
+            sb.append(truncate(skillMarkdown, 6000)).append("\n\n");
+        }
+
         sb.append("\n## Execution trace for this rule\n");
         sb.append("This is what happened in the LLM-loop run. Convert it into a BPMN that\n");
-        sb.append("does the same thing for any future request matching the intent above.\n\n");
+        sb.append("does the same thing for any future request matching the intent above.\n");
+        sb.append("CRITICAL: every value in the recorded request payloads below that ALSO\n");
+        sb.append("appears as a field value in the prior tool's response MUST be encoded\n");
+        sb.append("as a FEEL path into that response variable — never copy the literal.\n\n");
 
         int i = 1;
         for (ExecutionTrace.TraceStep s : slice.steps()) {
