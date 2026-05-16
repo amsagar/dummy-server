@@ -9,6 +9,7 @@ import type { BpmnElementRuntimeState, BpmnExecutionDecoration } from "@/compone
 import { Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { extractBpmnVariables, partitionVariables, type BpmnVarRef } from "@/lib/bpmnVariables";
 
 interface RuleDomainDetail {
   id: string;
@@ -323,6 +324,21 @@ export default function RuleDomainEditorPage() {
 
 function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string }) {
   const qc = useQueryClient();
+  const allVars = useMemo(() => extractBpmnVariables(bpmnXml), [bpmnXml]);
+  const { inputs: inputVars } = useMemo(() => partitionVariables(allVars), [allVars]);
+
+  const [mode, setMode] = useState<"form" | "json">(inputVars.length > 0 ? "form" : "json");
+  // Form state — one string per discovered input variable. The user types
+  // raw text; we attempt JSON.parse per-field at submit time so they can
+  // enter scalars or JSON objects/arrays interchangeably.
+  const [formValues, setFormValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(inputVars.map((v) => [v.name, defaultForVar(v)])),
+  );
+  // Reset form when the rule (and therefore its variables) changes.
+  useEffect(() => {
+    setFormValues(Object.fromEntries(inputVars.map((v) => [v.name, defaultForVar(v)])));
+  }, [inputVars]);
+
   const [inputsText, setInputsText] = useState<string>(
     JSON.stringify({ userMessage: "Validate order 600030447", orderId: "600030447" }, null, 2),
   );
@@ -364,15 +380,24 @@ function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string })
   const runTest = () => {
     setParseError(null);
     let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(inputsText);
-    } catch (e: any) {
-      setParseError(`Invalid JSON: ${e?.message ?? e}`);
-      return;
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      setParseError("Inputs must be a JSON object.");
-      return;
+    if (mode === "form") {
+      parsed = {};
+      for (const k of Object.keys(formValues)) {
+        const raw = formValues[k];
+        if (raw === "") continue; // skip empty fields — BPMN may have a default
+        parsed[k] = coerce(raw);
+      }
+    } else {
+      try {
+        parsed = JSON.parse(inputsText);
+      } catch (e: any) {
+        setParseError(`Invalid JSON: ${e?.message ?? e}`);
+        return;
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setParseError("Inputs must be a JSON object.");
+        return;
+      }
     }
     setResult(null);
     runMutation.mutate(parsed);
@@ -395,10 +420,38 @@ function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string })
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-              Inputs (JSON)
-            </label>
+          <div className="flex items-center justify-between mb-1.5 gap-2">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                Inputs
+              </label>
+              <div className="inline-flex rounded border bg-white">
+                <button
+                  type="button"
+                  className={`text-[11px] px-2 py-0.5 ${
+                    mode === "form" ? "bg-gray-100 font-semibold" : "text-gray-600"
+                  }`}
+                  onClick={() => setMode("form")}
+                  disabled={inputVars.length === 0}
+                  title={
+                    inputVars.length === 0
+                      ? "No variables detected in this BPMN — use JSON mode"
+                      : "Form view"
+                  }
+                >
+                  Form
+                </button>
+                <button
+                  type="button"
+                  className={`text-[11px] px-2 py-0.5 border-l ${
+                    mode === "json" ? "bg-gray-100 font-semibold" : "text-gray-600"
+                  }`}
+                  onClick={() => setMode("json")}
+                >
+                  JSON
+                </button>
+              </div>
+            </div>
             <Button
               size="sm"
               onClick={runTest}
@@ -409,12 +462,34 @@ function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string })
               {runMutation.isPending ? "Running…" : "Run test"}
             </Button>
           </div>
-          <textarea
-            value={inputsText}
-            onChange={(e) => setInputsText(e.target.value)}
-            spellCheck={false}
-            className="w-full h-72 rounded border bg-gray-50 p-3 font-mono text-xs"
-          />
+
+          {mode === "form" ? (
+            <div className="border rounded bg-gray-50 p-3 h-72 overflow-y-auto space-y-3">
+              {inputVars.length === 0 && (
+                <div className="text-xs text-gray-500">
+                  No input variables were detected in this BPMN. Switch to JSON mode if you want
+                  to provide variables manually.
+                </div>
+              )}
+              {inputVars.map((v) => (
+                <div key={v.name}>
+                  {renderFormField({
+                    variable: v,
+                    value: formValues[v.name] ?? "",
+                    onChange: (val: string) =>
+                      setFormValues((prev) => ({ ...prev, [v.name]: val })),
+                  })}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <textarea
+              value={inputsText}
+              onChange={(e) => setInputsText(e.target.value)}
+              spellCheck={false}
+              className="w-full h-72 rounded border bg-gray-50 p-3 font-mono text-xs"
+            />
+          )}
           {parseError && (
             <div className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
               {parseError}
@@ -695,4 +770,85 @@ function prettify(json: string): string {
   } catch {
     return json;
   }
+}
+
+// ── Test panel: per-variable form field ────────────────────────────────────
+
+function renderFormField({
+  variable,
+  value,
+  onChange,
+}: {
+  variable: BpmnVarRef;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const isMultiline = looksMultiline(variable.usages);
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-0.5">
+        <label className="text-xs font-mono text-gray-800">{variable.name}</label>
+        {variable.usages.length > 0 && (
+          <span
+            className="text-[10px] text-gray-500 font-mono truncate ml-2 max-w-[60%]"
+            title={variable.usages.join("\n")}
+          >
+            used as: {variable.usages[0]}
+          </span>
+        )}
+      </div>
+      {isMultiline ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          rows={3}
+          className="w-full rounded border bg-white p-2 text-xs font-mono"
+          placeholder="Scalar, JSON object, or JSON array"
+        />
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          className="w-full rounded border bg-white p-2 text-xs font-mono"
+          placeholder="Scalar, or JSON for objects/arrays"
+        />
+      )}
+    </div>
+  );
+}
+
+// Pick a reasonable starting value for a freshly-discovered variable.
+function defaultForVar(v: BpmnVarRef): string {
+  const n = v.name.toLowerCase();
+  if (n === "ordreid" || n === "orderid" || n === "ord_id" || n === "id") return "600030447";
+  if (n === "usermessage") return "Validate this order";
+  return "";
+}
+
+function looksMultiline(usages: string[]): boolean {
+  // If the variable is accessed with `.field` or `[i]`, the user probably
+  // wants to paste a JSON blob, not a single scalar.
+  return usages.some((u) => /[.\[]/.test(u));
+}
+
+// Try JSON.parse first; fall through to the raw string so the user can
+// type plain values (e.g. `600030447`, `true`) without quoting them.
+function coerce(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (trimmed === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
 }

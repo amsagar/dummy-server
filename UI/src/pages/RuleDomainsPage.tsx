@@ -14,7 +14,9 @@ import {
   Play,
   CheckCircle2,
 } from "lucide-react";
+// Play already imported above; reused by the per-rule Test button.
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { QuickTestRuleDialog } from "@/components/QuickTestRuleDialog";
 
 interface RuleDomainRow {
   id: string;
@@ -68,6 +70,7 @@ export default function RuleDomainsPage() {
   const [searchActive, setSearchActive] = useState("");
   const [pendingDelete, setPendingDelete] = useState<RuleDomainRow | null>(null);
   const [pendingSkillDelete, setPendingSkillDelete] = useState<SkillGroup | null>(null);
+  const [quickTestRule, setQuickTestRule] = useState<RuleDomainRow | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -278,6 +281,7 @@ export default function RuleDomainsPage() {
                 onToggle: () => toggleExpand(g.skillId),
                 onNavigateRule: (ruleId) => navigate(`/rule-domains/${encodeURIComponent(ruleId)}`),
                 onTestSkill: () => testSkillMutation.mutate(g.skillId),
+                onTestRule: (rule) => setQuickTestRule(rule),
                 onActivateAll: () => activateAllMutation.mutate(g.skillId),
                 onDeleteSkill: () => setPendingSkillDelete(g),
                 onActivateRule: (id) => activateMutation.mutate(id),
@@ -322,6 +326,16 @@ export default function RuleDomainsPage() {
         onConfirm={() => {
           if (pendingDelete) deleteMutation.mutate(pendingDelete.id);
         }}
+      />
+
+      <QuickTestRuleDialog
+        ruleId={quickTestRule?.id ?? null}
+        ruleLabel={
+          quickTestRule
+            ? `${quickTestRule.skillName} · ${quickTestRule.ruleName ?? quickTestRule.intentLabel}`
+            : ""
+        }
+        onClose={() => setQuickTestRule(null)}
       />
 
       {/* Skill-level delete (all rules) */}
@@ -369,6 +383,7 @@ interface RuleGroupRowsProps {
   onToggle: () => void;
   onNavigateRule: (id: string) => void;
   onTestSkill: () => void;
+  onTestRule: (rule: RuleDomainRow) => void;
   onActivateAll: () => void;
   onDeleteSkill: () => void;
   onActivateRule: (id: string) => void;
@@ -385,6 +400,7 @@ function renderGroupRows({
   onToggle,
   onNavigateRule,
   onTestSkill,
+  onTestRule,
   onActivateAll,
   onDeleteSkill,
   onActivateRule,
@@ -517,8 +533,18 @@ function renderGroupRows({
             <Button
               size="sm"
               variant="outline"
+              className="gap-1"
+              onClick={() => onTestRule(r)}
+              title="Test just this rule — fills in a form from the BPMN variables"
+            >
+              <Play className="h-3.5 w-3.5" />
+              Test
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => onNavigateRule(r.id)}
-              title="Open editor / run a test on just this rule"
+              title="Open editor"
             >
               Open
             </Button>
