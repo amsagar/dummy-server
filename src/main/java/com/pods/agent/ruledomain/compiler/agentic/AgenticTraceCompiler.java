@@ -136,12 +136,25 @@ public class AgenticTraceCompiler {
         // sees its own prior BPMN + the validator feedback when revising.
         List<Message> history = new ArrayList<>();
         history.add(new UserMessage(
-                "Compile the BPMN for this rule. Your workspace is at: " + compileRoot + "\n\n"
-                + "Start by calling `compile_read_file` on `index.md`, then `instructions.md`, "
-                + "then `skill.md`. Use `compile_list_files` and `compile_grep` to explore the "
-                + "`trace/` directory. The recorded `Get_OrderID` output is your authoritative "
-                + "schema — every value in subsequent tool inputs must be derived from it via FEEL "
-                + "paths, never hardcoded.\n\n"
+                "Compile the BPMN for rule `" + rule.name() + "` (one rule of skill `"
+                + skillName + "`). Your workspace is at: " + compileRoot + "\n\n"
+                + "REQUIRED reading order:\n"
+                + "  1. `compile_read_file` `index.md` — overview.\n"
+                + "  2. `compile_read_file` `manifest.json` — YOUR RULE SCOPE. The `tools` "
+                + "array lists every tool you may invoke. Do not exceed it.\n"
+                + "  3. `compile_list_files` `trace/**` — see this rule's recorded steps.\n"
+                + "  4. `compile_read_file` the FIRST trace output (typically "
+                + "`trace/01-<tool>.output.json`) — your authoritative schema.\n"
+                + "  5. `compile_read_file` each subsequent `trace/NN-<tool>.input.json` — "
+                + "for every value passed, locate the matching value in a prior `.output.json` "
+                + "and use a FEEL path. Never hardcode.\n"
+                + "  6. `compile_read_file` `instructions.md` and `skill.md` for the contract "
+                + "and any business rules the trace alone doesn't explain.\n\n"
+                + "Constraints:\n"
+                + "  - Implement ONLY this rule's slice. The skill describes a longer "
+                + "workflow with other rules; do not include their tool calls.\n"
+                + "  - The number of `${toolCallDelegate}` serviceTasks should match the "
+                + "number of tool steps in this rule's trace.\n\n"
                 + "When you have the BPMN ready, call `compile_write_bpmn` with the complete XML."));
 
         String systemPrompt = promptBuilder.buildSystem() + "\n\n" + agenticAddendum();
@@ -190,6 +203,7 @@ public class AgenticTraceCompiler {
             String err = TraceBasedBpmnCompiler.validateDelegateFieldNames(cleaned);
             if (err == null) err = TraceBasedBpmnCompiler.validateInputDiscipline(cleaned);
             if (err == null) err = TraceBasedBpmnCompiler.validateLiteralGrounding(cleaned, slice);
+            if (err == null) err = validateRuleToolScope(cleaned, rule);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -231,56 +245,119 @@ public class AgenticTraceCompiler {
         return s == null ? "no-turn" : s.replaceAll("[^A-Za-z0-9._-]", "_");
     }
 
+    /**
+     * Reject any {@code <flowable:field name="toolName">VALUE</flowable:string>}
+     * where VALUE isn't in this rule's manifest {@code tools} list. Stops
+     * the LLM from over-reaching and implementing other rules' work in
+     * this rule's BPMN.
+     */
+    private static String validateRuleToolScope(String bpmnXml, SkillRuleManifest.Rule rule) {
+        if (bpmnXml == null) return null;
+        if (rule.tools() == null || rule.tools().isEmpty()) return null; // no scope constraint
+        java.util.Set<String> allowed = new java.util.HashSet<>(rule.tools());
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"toolName\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        java.util.Set<String> outOfScope = new java.util.LinkedHashSet<>();
+        java.util.Set<String> declared = new java.util.LinkedHashSet<>();
+        while (m.find()) {
+            String name = m.group(1).trim();
+            declared.add(name);
+            if (!allowed.contains(name)) outOfScope.add(name);
+        }
+        if (outOfScope.isEmpty()) return null;
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN invokes tools not in this rule's manifest scope. "
+                + "You are compiling rule `" + rule.name() + "`, which may use ONLY: ")
+                .append(rule.tools()).append(".\n");
+        msg.append("Out-of-scope tool(s) in the BPMN:");
+        for (String t : outOfScope) msg.append("\n  - ").append(t);
+        msg.append("\nRemove the serviceTask(s) that invoke those tools. ")
+                .append("Other rules of this skill handle that work in their own BPMNs. ")
+                .append("Implement ONLY this rule's slice.");
+        return msg.toString();
+    }
+
     // ── Prompts ──────────────────────────────────────────────────────────
 
     private static String agenticAddendum() {
         return """
                 ## Agentic compile mode
 
-                You are running as an agent with filesystem tools. Instead of receiving the
-                trace in your prompt, the trace and skill are written to files in a workspace
-                you can inspect at will.
+                You are running as an agent with filesystem tools. The trace, skill, and
+                manifest for ONE rule of a multi-rule skill are written to files; you
+                inspect them at will and submit your BPMN via a tool call.
 
-                Workflow:
-                  1. `compile_read_file` `index.md` — overview of what's in the workspace.
-                  2. `compile_read_file` `instructions.md` — the canonical compile contract
-                     (delegate field names, FEEL syntax, error handling). Authoritative.
-                  3. `compile_read_file` `skill.md` — the full skill spec. Tells you which
-                     fields exist on the order, which ItemCodes count as legs, how ItemCode
-                     maps to ServiceCode, etc.
-                  4. `compile_list_files` `trace/**` — see every recorded tool step.
-                  5. For each step, `compile_read_file` `trace/NN-ToolName.input.json` and
-                     `.output.json`. These are FULL payloads — every field path you need is
-                     in here.
-                  6. For specific lookups, `compile_grep` with a regex across files.
-                  7. When you have the BPMN ready, call `compile_write_bpmn` with the complete
-                     XML.
+                ### *** RULE SCOPE — STRICTEST CONSTRAINT, ENFORCED ***
 
-                Validation rules (you will be re-prompted with the error if any fails, up to
-                5 attempts):
+                You are compiling ONE rule. The skill describes a longer workflow with
+                MULTIPLE rules; you implement ONLY this rule's slice. Concretely:
 
-                  - All `<flowable:field name>` values must match the delegate's contract
-                    exactly: `toolName`/`argTemplate`/`outputBinding`/`postTransform` for
-                    toolCallDelegate; `tableName`/`inputsTemplate`/`outputBinding` for
-                    decisionTableDelegate; `feelExpr`/`outputBinding` for feelExtractDelegate.
-                    Aliases like `inputBindings`, `expression`, `inputs` will be rejected.
+                  - `manifest.json` is your authoritative scope. The `tools` array lists
+                    EVERY tool this rule may invoke. Do NOT call any tool not in that list.
+                    The post-compile validator rejects rules that invoke out-of-scope tools.
+                  - The `trace/` folder contains ONLY this rule's recorded tool steps. If
+                    a tool isn't in `trace/`, it's not part of this rule, even if `skill.md`
+                    mentions it.
+                  - Your BPMN's <serviceTask> elements should mirror the trace steps. A rule
+                    that has 2 tool steps in its trace should produce a BPMN with 2 tool
+                    serviceTasks (plus feelExtract / decisionTable / assemble tasks as
+                    needed). If your BPMN has 5 toolCallDelegate serviceTasks when the
+                    trace shows 2, you're over-reaching — delete the extras.
 
-                  - Any bare `${X}` reference is restricted to the user-provided identifiers:
-                    `userMessage`, `orderId`, `customerId`, `sessionId`. All other values
-                    must be FEEL paths into a variable written by an earlier outputBinding.
+                ### Required workflow (do these in order):
 
-                  - Any quoted literal in argTemplate / inputsTemplate / feelExpr that also
-                    appears as a value in any recorded tool response will be rejected. Use a
-                    FEEL path instead. (Allowlist: protocol-level constants like `"US"`,
-                    `"OK"`, `"Salesforce"`.)
+                  1. `compile_read_file` `index.md` — overview.
+                  2. `compile_read_file` `instructions.md` — the canonical compile contract.
+                  3. `compile_read_file` `manifest.json` — your rule scope (which tools, which
+                     result key). MEMORIZE the `tools` list.
+                  4. `compile_list_files` `trace/**` — see every recorded step for this rule.
+                  5. `compile_read_file` `trace/01-<tool>.output.json` — the order shape /
+                     first tool's response. Authoritative for field paths. Failing to read
+                     this leads to wrong paths like `leg.Origination` instead of
+                     `leg.Addresses[AddressType="Origination"][1]`.
+                  6. `compile_read_file` every subsequent `trace/NN-<tool>.input.json` —
+                     for each value passed, find the matching value in the previous
+                     `.output.json` and use a FEEL path.
+                  7. `compile_read_file` `skill.md` — for any business rule the trace alone
+                     doesn't explain (ItemCode → ServiceCode mapping, leg filter set, etc.).
+                     **Implement only THIS rule's portion of the workflow.**
+                  8. `compile_write_bpmn` — the BPMN XML.
 
-                  - Do NOT emit boundary events or error end events for tool failures — the
-                    post-processor adds them. Just use a single plain `<endEvent>` per scope.
+                ### Validation rules (precise feedback on each failure, up to 5 attempts):
 
-                Style:
-                  - Read what you need; don't dump every file. The big `trace/01-Get_OrderID.output.json`
-                    is the schema you ground every later step against — read it carefully.
-                  - When revising after a validator error, change the structure, don't just
+                  - **Delegate field names.** `toolName`/`argTemplate`/`outputBinding`/
+                    `postTransform` for toolCallDelegate; `tableName`/`inputsTemplate`/
+                    `outputBinding` for decisionTableDelegate; `feelExpr`/`outputBinding`
+                    for feelExtractDelegate. Aliases (`inputBindings`, `expression`, `inputs`)
+                    are rejected.
+                  - **Bare `${X}` allowlist.** Only `userMessage`, `orderId`, `customerId`,
+                    `sessionId`. Anything else must be a FEEL path into a prior outputBinding
+                    variable.
+                  - **No hardcoded trace literals.** Any quoted literal in argTemplate /
+                    inputsTemplate / feelExpr that also appears as a value in any recorded
+                    tool response is rejected — derive via a FEEL path. (Allowed
+                    protocol constants: `"US"`, `"OK"`, `"Salesforce"`, etc.)
+                  - **Tool scope.** Every `<flowable:field name="toolName">` value must be
+                    in `manifest.json`'s `tools` array.
+                  - **No boundary / error end events.** The post-processor injects them.
+                    Single plain `<endEvent>` per scope.
+
+                ### multi-instance aggregation — important convention
+
+                `<flowable:variableAggregation target="X"><variable source="y"/></flowable:variableAggregation>`
+                aggregates AS LIST-OF-OBJECTS keyed by the source variable name. That is,
+                if each iteration writes `y = {a: 1}`, then `X = [{y:{a:1}}, {y:{a:1}}, ...]`,
+                NOT `X = [{a:1}, {a:1}]`. To get a flat list of values in the assemble step,
+                unwrap with FEEL: `for r in X return r.y`. The validator can't catch a
+                missing unwrap, so the obligation is on you.
+
+                ### Style
+
+                  - Read what you need; don't list-files then read every file blindly.
+                  - The first trace output (typically `trace/01-Get_OrderID.output.json`)
+                    IS your schema source. Read it CAREFULLY before designing FEEL filters.
+                  - When revising after a validator error, change the structure — don't
                     re-submit the same XML.
                 """;
     }
