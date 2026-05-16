@@ -8,7 +8,7 @@ import com.anthropic.models.messages.ThinkingConfigAdaptive;
 import com.anthropic.models.messages.ThinkingConfigParam;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.azure.core.credential.AzureKeyCredential;
-import com.azure.core.util.HttpClientOptions;
+import com.azure.core.http.okhttp.OkHttpAsyncHttpClientBuilder;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.repository.ModelRepository;
 import com.pods.agent.service.EncryptionService;
@@ -187,17 +187,20 @@ public class ModelProviderRouter {
             }
 
             String normalizedEndpoint = normalizeAzureEndpoint(endpoint);
-            // Reasoning models (gpt-5, o-series) routinely take >60s per turn
-            // when ingesting tool results and planning the next step. The
-            // Azure SDK's default response timeout is 60s, so we override it
-            // explicitly via HttpClientOptions; the SDK propagates these to
-            // the auto-configured Netty HTTP client.
-            HttpClientOptions httpClientOptions = new HttpClientOptions()
-                    .setResponseTimeout(Duration.ofMillis(runtimeTuningProperties.getAzureResponseTimeoutMs()));
+            // Use OkHttp transport explicitly. The Azure SDK's default Netty
+            // transport throws "channel not registered to an event loop" when
+            // called from non-Netty-native threads (Reactor boundedElastic,
+            // transient FJ workers). OkHttp has no event-loop semantics and
+            // matches the transport already used for Anthropic in this router.
+            // Reasoning models (gpt-5, o-series) routinely take >60s per turn,
+            // so the response timeout is overridden from the SDK default of 60s.
+            com.azure.core.http.HttpClient azureHttpClient = new OkHttpAsyncHttpClientBuilder()
+                    .responseTimeout(Duration.ofMillis(runtimeTuningProperties.getAzureResponseTimeoutMs()))
+                    .build();
             OpenAIClientBuilder clientBuilder = new OpenAIClientBuilder()
                     .endpoint(normalizedEndpoint)
                     .credential(new AzureKeyCredential(apiKey))
-                    .clientOptions(httpClientOptions);
+                    .httpClient(azureHttpClient);
             // Claude and other partner models may require newer Azure API versions.
             trySetAzurePreviewServiceVersion(clientBuilder);
 

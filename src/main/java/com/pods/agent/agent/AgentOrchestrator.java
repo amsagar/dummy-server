@@ -305,13 +305,9 @@ public class AgentOrchestrator {
         AsyncTraceCompiler compiler = asyncTraceCompiler == null ? null : asyncTraceCompiler.getIfAvailable();
         if (router == null || compiler == null) return;
         String sessionId = session.getSessionId();
-        // Dispatch onto ForkJoinPool.commonPool(). The trace compile
-        // ultimately makes an LLM call (manifest derive + per-rule
-        // BPMN compile) through Spring AI's Azure SDK Netty client,
-        // which fails with "channel not registered to an event loop"
-        // when invoked from Spring's @Async pool or Reactor's
-        // boundedElastic. FJ commonPool is the one pool whose threads
-        // the SDK's Netty client binds correctly to on this setup.
+        // Run trace compile off the request thread so the SSE stream
+        // closes immediately; manifest derive + per-rule BPMN compile
+        // can take seconds.
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
                 router.route(userText).ifPresent(routed ->

@@ -69,14 +69,6 @@ public class SkillManifestDeriver {
         return parseManifest(response, trace);
     }
 
-    /**
-     * Caller is responsible for invoking this from a ForkJoinPool.commonPool()
-     * thread (see {@code AgentOrchestrator.scheduleTraceCompile}). Spring AI's
-     * Azure SDK Netty client fails with "channel not registered to an event
-     * loop" when invoked from Spring's {@code @Async} pool or from a Reactor
-     * {@code boundedElastic} worker; the FJ commonPool is the one thread
-     * context where the SDK's Netty client binds correctly.
-     */
     private String callWithRetry(ModelRef compilerRef, String system, String user, String skillName) {
         try {
             ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
