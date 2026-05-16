@@ -4,7 +4,12 @@ import { api } from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { Play, X } from "lucide-react";
 import { toast } from "sonner";
-import { extractBpmnVariables, partitionVariables, type BpmnVarRef } from "@/lib/bpmnVariables";
+import {
+  extractBpmnVariables,
+  defaultForVar,
+  looksMultiline,
+  coerce,
+} from "@/lib/bpmnVariables";
 
 interface Props {
   ruleId: string | null;
@@ -40,8 +45,7 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
     enabled: open,
   });
 
-  const allVars = useMemo(() => extractBpmnVariables(detail?.bpmnXml), [detail]);
-  const { inputs: inputVars } = useMemo(() => partitionVariables(allVars), [allVars]);
+  const inputVars = useMemo(() => extractBpmnVariables(detail?.bpmnXml), [detail]);
 
   const [values, setValues] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -191,30 +195,5 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
   );
 }
 
-function defaultForVar(v: BpmnVarRef): string {
-  const n = v.name.toLowerCase();
-  if (n === "ordreid" || n === "orderid" || n === "ord_id" || n === "id") return "600030447";
-  if (n === "usermessage") return "Validate this order";
-  return "";
-}
-
-function looksMultiline(usages: string[]): boolean {
-  return usages.some((u) => /[.\[]/.test(u));
-}
-
-function coerce(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return "";
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (trimmed === "null") return null;
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return raw;
-    }
-  }
-  return raw;
-}
+// defaultForVar / looksMultiline / coerce live in @/lib/bpmnVariables now
+// — same logic shared with QuickTestSkillDialog and the editor's TestPanel.

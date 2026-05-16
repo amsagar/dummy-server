@@ -9,7 +9,13 @@ import type { BpmnElementRuntimeState, BpmnExecutionDecoration } from "@/compone
 import { Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { extractBpmnVariables, partitionVariables, type BpmnVarRef } from "@/lib/bpmnVariables";
+import {
+  extractBpmnVariables,
+  defaultForVar,
+  looksMultiline,
+  coerce,
+  type BpmnVarRef,
+} from "@/lib/bpmnVariables";
 
 interface RuleDomainDetail {
   id: string;
@@ -324,8 +330,7 @@ export default function RuleDomainEditorPage() {
 
 function TestPanel({ domainId, bpmnXml }: { domainId: string; bpmnXml: string }) {
   const qc = useQueryClient();
-  const allVars = useMemo(() => extractBpmnVariables(bpmnXml), [bpmnXml]);
-  const { inputs: inputVars } = useMemo(() => partitionVariables(allVars), [allVars]);
+  const inputVars = useMemo(() => extractBpmnVariables(bpmnXml), [bpmnXml]);
 
   const [mode, setMode] = useState<"form" | "json">(inputVars.length > 0 ? "form" : "json");
   // Form state — one string per discovered input variable. The user types
@@ -820,35 +825,4 @@ function renderFormField({
   );
 }
 
-// Pick a reasonable starting value for a freshly-discovered variable.
-function defaultForVar(v: BpmnVarRef): string {
-  const n = v.name.toLowerCase();
-  if (n === "ordreid" || n === "orderid" || n === "ord_id" || n === "id") return "600030447";
-  if (n === "usermessage") return "Validate this order";
-  return "";
-}
-
-function looksMultiline(usages: string[]): boolean {
-  // If the variable is accessed with `.field` or `[i]`, the user probably
-  // wants to paste a JSON blob, not a single scalar.
-  return usages.some((u) => /[.\[]/.test(u));
-}
-
-// Try JSON.parse first; fall through to the raw string so the user can
-// type plain values (e.g. `600030447`, `true`) without quoting them.
-function coerce(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return "";
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (trimmed === "null") return null;
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return raw;
-    }
-  }
-  return raw;
-}
+// defaultForVar / looksMultiline / coerce live in @/lib/bpmnVariables now.

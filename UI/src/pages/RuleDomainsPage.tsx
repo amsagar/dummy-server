@@ -17,6 +17,7 @@ import {
 // Play already imported above; reused by the per-rule Test button.
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { QuickTestRuleDialog } from "@/components/QuickTestRuleDialog";
+import { QuickTestSkillDialog } from "@/components/QuickTestSkillDialog";
 
 interface RuleDomainRow {
   id: string;
@@ -71,6 +72,7 @@ export default function RuleDomainsPage() {
   const [pendingDelete, setPendingDelete] = useState<RuleDomainRow | null>(null);
   const [pendingSkillDelete, setPendingSkillDelete] = useState<SkillGroup | null>(null);
   const [quickTestRule, setQuickTestRule] = useState<RuleDomainRow | null>(null);
+  const [quickTestSkill, setQuickTestSkill] = useState<SkillGroup | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -187,15 +189,8 @@ export default function RuleDomainsPage() {
     onError: (e: any) => toast.error(e?.message || "Failed to delete skill"),
   });
 
-  const testSkillMutation = useMutation({
-    mutationFn: (skillId: string) => api.ruleDomains.testAllForSkill(skillId, {}),
-    onSuccess: (resp: any) => {
-      const n = Number(resp?.ruleCount ?? 0);
-      const ok = (resp?.results ?? []).filter((r: any) => r.success).length;
-      toast.success(`Tested ${n} rule${n === 1 ? "" : "s"} — ${ok} ok / ${n - ok} failed`);
-    },
-    onError: (e: any) => toast.error(e?.message || "Failed to test skill"),
-  });
+  // testSkillMutation removed — QuickTestSkillDialog owns the call now and
+  // collects input variables (union across rules) before firing.
 
   const toggleExpand = (skillId: string) =>
     setExpanded((s) => {
@@ -280,7 +275,7 @@ export default function RuleDomainsPage() {
                 isOpen: expanded.has(g.skillId),
                 onToggle: () => toggleExpand(g.skillId),
                 onNavigateRule: (ruleId) => navigate(`/rule-domains/${encodeURIComponent(ruleId)}`),
-                onTestSkill: () => testSkillMutation.mutate(g.skillId),
+                onTestSkill: () => setQuickTestSkill(g),
                 onTestRule: (rule) => setQuickTestRule(rule),
                 onActivateAll: () => activateAllMutation.mutate(g.skillId),
                 onDeleteSkill: () => setPendingSkillDelete(g),
@@ -289,7 +284,7 @@ export default function RuleDomainsPage() {
                 onDeleteRule: (rule) => setPendingDelete(rule),
                 busyActivateAll: activateAllMutation.isPending,
                 busyDeleteSkill: deleteSkillMutation.isPending,
-                busyTestSkill: testSkillMutation.isPending,
+                busyTestSkill: false,
               }),
             )}
           </TableBody>
@@ -336,6 +331,13 @@ export default function RuleDomainsPage() {
             : ""
         }
         onClose={() => setQuickTestRule(null)}
+      />
+
+      <QuickTestSkillDialog
+        skillId={quickTestSkill?.skillId ?? null}
+        skillName={quickTestSkill?.skillName ?? ""}
+        rules={quickTestSkill?.rules ?? []}
+        onClose={() => setQuickTestSkill(null)}
       />
 
       {/* Skill-level delete (all rules) */}
