@@ -51,6 +51,25 @@ from a variable), use `"\"value\""` only when the value is part of the SKILL
 contract (e.g. a service-type code like `"NEW"` defined in the skill
 markdown), never when the value is something a future user might change.
 
+## argTemplate keys are the tool's HTTP parameter names — copy them exactly
+
+For every tool you call, the **keys** in `argTemplate` are the parameter names
+the tool's HTTP API expects. Look at the tool's `Request schema` / `Sample
+request` in the catalog below and copy the parameter names **character-for-character**.
+Do NOT camelCase, snake_case, lower-case, or otherwise normalise them —
+mis-spelled keys silently produce empty payloads or `400 Bad Request` at the
+upstream service.
+
+| WRONG | RIGHT | Why |
+|---|---|---|
+| `{"orderId":"orderId"}` for `Get_OrderID` | `{"ORD_ID":"orderId"}` | The tool's path/query parameter is `ORD_ID` (uppercase, with underscore). |
+| `{"OrderID":"orderId"}` | `{"ORD_ID":"orderId"}` | Same — `OrderID` is *not* `ORD_ID`. |
+| `{"zipCode":"..."}` for a `zip` parameter | `{"zip":"..."}` | The tool's request schema says `zip`. |
+
+If you can see the recorded trace input for a tool (in the agentic compile
+flow this is in `trace/NN-<tool>.input.json`), its keys are authoritative —
+prefer them over guessing from the tool name or description.
+
 ## Hard rules
 
 1. **Output XML only.** Do not wrap in markdown fences. Do not preface with

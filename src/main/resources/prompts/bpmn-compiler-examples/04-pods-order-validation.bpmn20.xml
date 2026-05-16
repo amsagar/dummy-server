@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-authored reference BPMN for the pods-order-validation skill. Lives in
+  src/main/resources/rule-domain-samples/ — NOT auto-deployed. Used by
+  integration tests and as a few-shot example for the LLM compiler.
+
+  Key constructs demonstrated:
+    • Three tool-call ServiceTasks via toolCallDelegate
+    • One BusinessRuleTask via decisionTableDelegate
+    • Multiple FEEL-extract ServiceTasks via feelExtractDelegate
+    • Multi-instance SubProcess (parallel) with elementVariable + variableAggregation
+    • ExclusiveGateway driven by a precomputed boolean (no JUEL functions)
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             targetNamespace="http://pods.com/rule-domains"
+             typeLanguage="http://www.w3.org/2001/XMLSchema"
+             expressionLanguage="http://www.w3.org/1999/XPath">
+
+  <process id="rd_pods_order_validation_v1" name="PODS Order Validation" isExecutable="true">
+
+    <startEvent id="start"/>
+
+    <!-- ─────────── Step 1: Get_OrderID ─────────── -->
+    <serviceTask id="t_getOrder" name="Get_OrderID"
+                 flowable:delegateExpression="${toolCallDelegate}">
+      <extensionElements>
+        <flowable:field name="toolName">     <flowable:string>Get_OrderID</flowable:string></flowable:field>
+        <flowable:field name="argTemplate">  <flowable:string>{"ORD_ID":"orderId"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>order</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <!-- ─────────── Step 2: extract legLines ─────────── -->
+    <serviceTask id="t_extractLegs" name="Extract legLines"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>order.Lines[list contains(["IDEL","RETSC","LDT","REDEL","FPU","MOV","SID","SFP","SCDEL","CSRED","CSFPU"], ItemCode)]</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>legLines</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <!-- ─────────── Step 3a: build actualSequence ─────────── -->
+    <serviceTask id="t_buildSeq" name="Build actualSequence"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>for l in sort(legLines, function(a,b) a.Sequence &lt; b.Sequence) return (if l.ServiceCode != null and l.ServiceCode != "" then l.ServiceCode else {IDEL:"NEW",RETSC:"WRT",LDT:"WTW",REDEL:"RDL",FPU:"FPU",MOV:"MOV",SID:"SID",SFP:"SFP",SCDEL:"SCDEL",CSRED:"CSRED",CSFPU:"CSFPU"}[l.ItemCode])</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>actualSequence</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <!-- ─────────── Step 3b: Leg Sequences decision table ─────────── -->
+    <serviceTask id="t_legSeq" name="Leg Sequences decision table"
+                 flowable:delegateExpression="${decisionTableDelegate}">
+      <extensionElements>
+        <flowable:field name="tableName"><flowable:string>Leg Sequences</flowable:string></flowable:field>
+        <flowable:field name="inputsTemplate"><flowable:string>{"actualSequence":"actualSequence"}</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>legSeqResult</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <!-- ─────────── Step 4: Serviceability per leg (parallel MI subprocess) ─────────── -->
+    <subProcess id="sp_serviceability" name="Serviceability per leg">
+      <multiInstanceLoopCharacteristics isSequential="false"
+                                        flowable:collection="${legLines}"
+                                        flowable:elementVariable="leg">
+        <extensionElements>
+          <flowable:variableAggregation target="serviceabilityResults">
+            <flowable:variable source="_legResult"/>
+          </flowable:variableAggregation>
+        </extensionElements>
+      </multiInstanceLoopCharacteristics>
+
+      <startEvent id="leg_start"/>
+
+      <!-- Precompute boolean for the gateway, since Flowable gateway conditions are JUEL -->
+      <serviceTask id="t_checkAddrs" name="Check addresses"
+                   flowable:delegateExpression="${feelExtractDelegate}">
+        <extensionElements>
+          <flowable:field name="feelExpr">
+            <flowable:string>count(leg.Addresses[AddressType = "Origination"]) = 0 or count(leg.Addresses[AddressType = "Destination"]) = 0</flowable:string>
+          </flowable:field>
+          <flowable:field name="outputBinding"><flowable:string>_missingAddresses</flowable:string></flowable:field>
+        </extensionElements>
+      </serviceTask>
+
+      <exclusiveGateway id="gw_addrCheck" name="Addresses present?"/>
+
+      <serviceTask id="t_skip" name="Record skipped"
+                   flowable:delegateExpression="${feelExtractDelegate}">
+        <extensionElements>
+          <flowable:field name="feelExpr">
+            <flowable:string>{lineId: leg.LineId, itemCode: leg.ItemCode, status: "skipped", reason: "missing addresses", isServiceable: false, exceptionType: null}</flowable:string>
+          </flowable:field>
+          <flowable:field name="outputBinding"><flowable:string>_legResult</flowable:string></flowable:field>
+        </extensionElements>
+      </serviceTask>
+
+      <serviceTask id="t_serviceability" name="Serviceability"
+                   flowable:delegateExpression="${toolCallDelegate}">
+        <extensionElements>
+          <flowable:field name="toolName"><flowable:string>Serviceability</flowable:string></flowable:field>
+          <flowable:field name="argTemplate"><flowable:string>{
+            "originZip": "leg.Addresses[AddressType = \"Origination\"][1].PostalCode",
+            "destinationZip": "leg.Addresses[AddressType = \"Destination\"][1].PostalCode",
+            "originCountryCode": "leg.Addresses[AddressType = \"Origination\"][1].CountryCode",
+            "destinationCountryCode": "leg.Addresses[AddressType = \"Destination\"][1].CountryCode",
+            "custTrackingId": "string(order.OrderIdentity)"
+          }</flowable:string></flowable:field>
+          <flowable:field name="outputBinding"><flowable:string>_legResult</flowable:string></flowable:field>
+          <flowable:field name="postTransform"><flowable:string>{
+            "lineId": "leg.LineId",
+            "itemCode": "leg.ItemCode",
+            "originZip": "leg.Addresses[AddressType = \"Origination\"][1].PostalCode",
+            "destinationZip": "leg.Addresses[AddressType = \"Destination\"][1].PostalCode",
+            "isServiceable": "not(contains(_resp.CallInfo.StatusCode, \"OutOfMarket\"))",
+            "exceptionType": "if contains(_resp.CallInfo.StatusCode, \"OutOfMarket\") then _resp.CallInfo.StatusCode else null"
+          }</flowable:string></flowable:field>
+        </extensionElements>
+      </serviceTask>
+
+      <endEvent id="leg_end"/>
+
+      <sequenceFlow sourceRef="leg_start"   targetRef="t_checkAddrs"/>
+      <sequenceFlow sourceRef="t_checkAddrs" targetRef="gw_addrCheck"/>
+
+      <sequenceFlow id="f_skip" sourceRef="gw_addrCheck" targetRef="t_skip">
+        <conditionExpression xsi:type="tFormalExpression">${_missingAddresses}</conditionExpression>
+      </sequenceFlow>
+      <sequenceFlow id="f_call" sourceRef="gw_addrCheck" targetRef="t_serviceability">
+        <conditionExpression xsi:type="tFormalExpression">${!_missingAddresses}</conditionExpression>
+      </sequenceFlow>
+
+      <sequenceFlow sourceRef="t_skip"           targetRef="leg_end"/>
+      <sequenceFlow sourceRef="t_serviceability" targetRef="leg_end"/>
+    </subProcess>
+
+    <!-- ─────────── Step 5a: filter containerToCheck ─────────── -->
+    <serviceTask id="t_filterContainer" name="Filter containerToCheck"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr">
+          <flowable:string>order.Lines[ItemCode = "IDEL" and DeliveryDate = null and (ContainerId = null or ScheduledDate = null)]</flowable:string>
+        </flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>containerToCheck</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <!-- ─────────── Step 5b: Container Availability per IDEL line ─────────── -->
+    <subProcess id="sp_container" name="Container Availability per IDEL line">
+      <multiInstanceLoopCharacteristics isSequential="false"
+                                        flowable:collection="${containerToCheck}"
+                                        flowable:elementVariable="line">
+        <extensionElements>
+          <flowable:variableAggregation target="containerResults">
+            <flowable:variable source="_lineResult"/>
+          </flowable:variableAggregation>
+        </extensionElements>
+      </multiInstanceLoopCharacteristics>
+
+      <startEvent id="cnt_start"/>
+
+      <serviceTask id="t_container" name="ContainerAvailability"
+                   flowable:delegateExpression="${toolCallDelegate}">
+        <extensionElements>
+          <flowable:field name="toolName"><flowable:string>ContainerAvailability</flowable:string></flowable:field>
+          <flowable:field name="argTemplate"><flowable:string>{
+            "zip": "line.Addresses[AddressType = \"Origination\"][1].PostalCode",
+            "countryCode": "line.Addresses[AddressType = \"Origination\"][1].CountryCode",
+            "siteIdentity": "line.AssignedSiteId",
+            "containerSize": "line.ContainerSize",
+            "referenceDate": "if line.ScheduledDate != null then line.ScheduledDate else string(today())",
+            "custTrackingId": "string(order.OrderIdentity)"
+          }</flowable:string></flowable:field>
+          <flowable:field name="outputBinding"><flowable:string>_lineResult</flowable:string></flowable:field>
+          <flowable:field name="postTransform"><flowable:string>{
+            "lineId": "line.LineId",
+            "itemCode": "\"IDEL\"",
+            "checked": "true",
+            "availableDates": "_resp.GeneralAvailabilityDates[IsAvailableCS = true and (ReasonCode = null or ReasonCode = \"\")]"
+          }</flowable:string></flowable:field>
+        </extensionElements>
+      </serviceTask>
+
+      <endEvent id="cnt_end"/>
+
+      <sequenceFlow sourceRef="cnt_start"   targetRef="t_container"/>
+      <sequenceFlow sourceRef="t_container" targetRef="cnt_end"/>
+    </subProcess>
+
+    <!-- ─────────── Step 6: assemble final result ─────────── -->
+    <serviceTask id="t_assemble" name="Assemble result"
+                 flowable:delegateExpression="${feelExtractDelegate}">
+      <extensionElements>
+        <flowable:field name="feelExpr"><flowable:string>{
+          orderId: order.OrderIdentity,
+          legSequence: {
+            journeyType: order.JourneyType,
+            sequence: actualSequence,
+            valid: legSeqResult.matched,
+            message: if legSeqResult.matched then "ok" else "No matching row in Leg Sequences decision table for this sequence"
+          },
+          serviceability: if serviceabilityResults = null then [] else serviceabilityResults,
+          containerAvailability: if containerResults = null then [] else containerResults
+        }</flowable:string></flowable:field>
+        <flowable:field name="outputBinding"><flowable:string>result</flowable:string></flowable:field>
+      </extensionElements>
+    </serviceTask>
+
+    <endEvent id="end"/>
+
+    <sequenceFlow sourceRef="start"             targetRef="t_getOrder"/>
+    <sequenceFlow sourceRef="t_getOrder"        targetRef="t_extractLegs"/>
+    <sequenceFlow sourceRef="t_extractLegs"     targetRef="t_buildSeq"/>
+    <sequenceFlow sourceRef="t_buildSeq"        targetRef="t_legSeq"/>
+    <sequenceFlow sourceRef="t_legSeq"          targetRef="sp_serviceability"/>
+    <sequenceFlow sourceRef="sp_serviceability" targetRef="t_filterContainer"/>
+    <sequenceFlow sourceRef="t_filterContainer" targetRef="sp_container"/>
+    <sequenceFlow sourceRef="sp_container"      targetRef="t_assemble"/>
+    <sequenceFlow sourceRef="t_assemble"        targetRef="end"/>
+
+  </process>
+</definitions>

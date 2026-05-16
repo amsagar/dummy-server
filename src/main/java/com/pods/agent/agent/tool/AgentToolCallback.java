@@ -13,7 +13,9 @@ import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.DefaultToolDefinition;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.util.ArrayList;
 import java.util.TreeMap;
@@ -156,9 +158,9 @@ public class AgentToolCallback implements ToolCallback {
                             + " you need before invoking `" + tool.getName() + "`.";
             String blocked = "skill_first_required: " + hint;
             sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-            saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+            saveRuntimeEvent("tool.call", buildToolCallEventPayload(callId, tool.getName(), payload));
             sender.sendToolResult(sessionId, callId, tool.getName(), blocked, "blocked");
-            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"blocked\",\"output\":" + json(blocked) + "}");
+            saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "blocked", blocked));
             log.info("[AgentToolCallback] hard-blocking skill-first gate for tool={} sessionId={} turnId={} suggested={}",
                     tool.getName(), sessionId, turnId, suggested);
             return blocked;
@@ -171,9 +173,9 @@ public class AgentToolCallback implements ToolCallback {
         if ("deny".equalsIgnoreCase(decision.decision())) {
             String denied = "Denied by policy: " + decision.reason();
             sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-            saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+            saveRuntimeEvent("tool.call", buildToolCallEventPayload(callId, tool.getName(), payload));
             sender.sendToolResult(sessionId, callId, tool.getName(), denied, "denied");
-            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"denied\",\"output\":" + json(denied) + "}");
+            saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "denied", denied));
             return denied;
         }
         if ("ask".equalsIgnoreCase(decision.decision())) {
@@ -187,23 +189,23 @@ public class AgentToolCallback implements ToolCallback {
                 if (reply == null || "rejected".equalsIgnoreCase(reply.action())) {
                     String msg = reply == null ? "Approval timed out." : "Action rejected by user.";
                     sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-                    saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+                    saveRuntimeEvent("tool.call", buildToolCallEventPayload(callId, tool.getName(), payload));
                     sender.sendToolResult(sessionId, callId, tool.getName(), msg, "denied");
-                    saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"denied\",\"output\":" + json(msg) + "}");
+                    saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "denied", msg));
                     return msg;
                 }
             } catch (TimeoutException e) {
                 String msg = "Approval timed out.";
                 sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-                saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+                saveRuntimeEvent("tool.call", buildToolCallEventPayload(callId, tool.getName(), payload));
                 sender.sendToolResult(sessionId, callId, tool.getName(), msg, "denied");
-                saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"denied\",\"output\":" + json(msg) + "}");
+                saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "denied", msg));
                 return msg;
             }
         }
 
         sender.sendToolCall(sessionId, callId, tool.getName(), payload);
-        saveRuntimeEvent("tool.call", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"input\":" + json(payload) + "}");
+        saveRuntimeEvent("tool.call", buildToolCallEventPayload(callId, tool.getName(), payload));
         logToolCallDiagnostics(callId, payload);
 
         if (skillExecutionGate != null && toolCallSignature != null) {
@@ -212,7 +214,7 @@ public class AgentToolCallback implements ToolCallback {
                 log.info("[AgentToolCallback] deduped tool={} sessionId={} turnId={}",
                         tool.getName(), sessionId, turnId);
                 sender.sendToolResult(sessionId, callId, tool.getName(), cached, "success");
-                saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"success\",\"output\":" + json(cached) + "}");
+                saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "success", cached));
                 return cached;
             }
         }
@@ -229,7 +231,7 @@ public class AgentToolCallback implements ToolCallback {
         } catch (Exception e) {
             String err = "Tool execution exception: " + e.getMessage();
             sender.sendToolResult(sessionId, callId, tool.getName(), err, "error");
-            saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":\"error\",\"output\":" + json(err) + "}");
+            saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), "error", err));
             return err;
         }
         log.info("[AgentToolCallback] tool={} execution success={} error={} bodySnippet={}",
@@ -252,11 +254,11 @@ public class AgentToolCallback implements ToolCallback {
             output = handleWorkflowQuestionPrompt(output);
         }
 
-        String emittedOutput = maybeSpillToolOutput(output, callId, execution.success() ? "success" : "error");
-        sender.sendToolResult(sessionId, callId, tool.getName(), emittedOutput,
-                execution.success() ? "success" : "error");
-        saveRuntimeEvent("tool.done", "{\"callId\":" + json(callId) + ",\"toolName\":" + json(tool.getName()) + ",\"status\":" + json(execution.success() ? "success" : "error") + ",\"output\":" + json(emittedOutput) + "}");
-        logToolResultDiagnostics(callId, payload, emittedOutput, execution.success() ? "success" : "error");
+        String finalStatus = execution.success() ? "success" : "error";
+        String emittedOutput = maybeSpillToolOutput(output, callId, finalStatus);
+        sender.sendToolResult(sessionId, callId, tool.getName(), emittedOutput, finalStatus);
+        saveRuntimeEvent("tool.done", buildToolDoneEventPayload(callId, tool.getName(), finalStatus, emittedOutput));
+        logToolResultDiagnostics(callId, payload, emittedOutput, finalStatus);
         if (skillExecutionGate != null && toolCallSignature != null) {
             skillExecutionGate.cacheToolResult(toolCallSignature, emittedOutput);
         }
@@ -482,6 +484,66 @@ public class AgentToolCallback implements ToolCallback {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
         return "\"" + escaped + "\"";
+    }
+
+    /**
+     * Build a {@code tool.call} runtime-event payload as a real JSON object whose
+     * {@code input} field is itself the parsed JSON of the model-supplied payload
+     * (object/array) when possible, with a {@code TextNode} fallback for
+     * non-JSON inputs. Downstream consumers — {@code ExecutionLogService},
+     * {@code ExecutionTraceReader}, and the rule-domain compiler validators that
+     * key off {@code step.input().isObject()} — depend on this shape.
+     */
+    private String buildToolCallEventPayload(String callId, String toolName, String rawInput) {
+        try {
+            ObjectNode evt = objectMapper.createObjectNode();
+            evt.put("callId", callId);
+            evt.put("toolName", toolName);
+            evt.set("input", parseAsJsonOrText(rawInput));
+            return objectMapper.writeValueAsString(evt);
+        } catch (Exception e) {
+            return "{\"callId\":" + json(callId)
+                    + ",\"toolName\":" + json(toolName)
+                    + ",\"input\":" + json(rawInput) + "}";
+        }
+    }
+
+    /** Same shape as {@link #buildToolCallEventPayload} but for {@code tool.done}. */
+    private String buildToolDoneEventPayload(String callId, String toolName, String status, String rawOutput) {
+        try {
+            ObjectNode evt = objectMapper.createObjectNode();
+            evt.put("callId", callId);
+            evt.put("toolName", toolName);
+            evt.put("status", status);
+            evt.set("output", parseAsJsonOrText(rawOutput));
+            return objectMapper.writeValueAsString(evt);
+        } catch (Exception e) {
+            return "{\"callId\":" + json(callId)
+                    + ",\"toolName\":" + json(toolName)
+                    + ",\"status\":" + json(status)
+                    + ",\"output\":" + json(rawOutput) + "}";
+        }
+    }
+
+    /**
+     * Parse {@code raw} as JSON when it looks like an object or array; otherwise
+     * return a {@code TextNode}. Never throws — the caller wants a node, not an
+     * exception. Whitespace-only / null inputs become a {@code NullNode} so the
+     * field is preserved but explicitly empty.
+     */
+    private JsonNode parseAsJsonOrText(String raw) {
+        if (raw == null) return objectMapper.nullNode();
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty()) return objectMapper.nullNode();
+        char first = trimmed.charAt(0);
+        if (first == '{' || first == '[') {
+            try {
+                return objectMapper.readTree(trimmed);
+            } catch (Exception ignored) {
+                // fall through to TextNode
+            }
+        }
+        return objectMapper.getNodeFactory().textNode(raw);
     }
 
     private static final String EMPTY_OBJECT_SCHEMA = "{\"type\":\"object\",\"properties\":{}}";

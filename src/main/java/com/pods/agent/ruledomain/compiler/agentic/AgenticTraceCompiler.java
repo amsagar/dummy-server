@@ -16,6 +16,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -204,7 +205,8 @@ public class AgenticTraceCompiler {
             if (err == null) err = TraceBasedBpmnCompiler.validateInputDiscipline(cleaned);
             if (err == null) err = TraceBasedBpmnCompiler.validateLiteralGrounding(cleaned, slice);
             if (err == null) err = validateRuleToolScope(cleaned, rule, slice);
-            if (err == null) err = validateArgTemplateKeys(cleaned, slice);
+            if (err == null) err = validateNoMetaToolsInToolCall(cleaned);
+            if (err == null) err = validateArgTemplateKeys(cleaned, slice, objectMapper);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -316,7 +318,9 @@ public class AgenticTraceCompiler {
      * the reverse because the trace might have included optional args
      * the BPMN can legitimately omit.
      */
-    private static String validateArgTemplateKeys(String bpmnXml, ExecutionTrace slice) {
+    // Package-private so the validator unit test can pin its behavior directly
+    // rather than driving the full multi-turn LLM loop.
+    static String validateArgTemplateKeys(String bpmnXml, ExecutionTrace slice, ObjectMapper mapper) {
         if (bpmnXml == null || slice == null) return null;
 
         // For each toolName in the trace, snapshot the set of input keys.
@@ -324,9 +328,11 @@ public class AgenticTraceCompiler {
         // across all calls — the LLM may legitimately reuse fewer keys.
         java.util.Map<String, java.util.Set<String>> traceKeysByTool = new java.util.LinkedHashMap<>();
         for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
-            if (step.name() == null || step.input() == null || !step.input().isObject()) continue;
+            if (step.name() == null || step.input() == null) continue;
+            JsonNode inputObj = coerceInputToObject(step.input(), mapper);
+            if (inputObj == null) continue;
             java.util.Set<String> keys = traceKeysByTool.computeIfAbsent(step.name(), k -> new java.util.LinkedHashSet<>());
-            for (String k : step.input().propertyNames()) keys.add(k);
+            for (String k : inputObj.propertyNames()) keys.add(k);
         }
         if (traceKeysByTool.isEmpty()) return null;
 
@@ -378,6 +384,79 @@ public class AgenticTraceCompiler {
         msg.append("\nFix: change the BPMN's argTemplate to use the recorded key names (e.g. "
                 + "`ORD_ID` not `orderId`).");
         return msg.toString();
+    }
+
+    /** Tool names that are agent meta-tools / framework primitives, NOT real
+     *  domain tools the BPMN should invoke via toolCallDelegate. These exist
+     *  to orchestrate or fan out work inside the LLM tool-loop; in compiled
+     *  BPMN, fan-out belongs in a {@code <subProcess>} with
+     *  {@code multiInstanceLoopCharacteristics} that calls the real domain
+     *  tool. Rejecting them here turns a silent runtime no-op into an
+     *  actionable repair instruction the agentic loop can act on. */
+    private static final java.util.Set<String> RESERVED_META_TOOL_NAMES =
+            java.util.Set.of(
+                    "parallel_task", "batch", "pipeline", "task",
+                    "agent_send", "agent_receive", "plan_exit", "todowrite");
+
+    /**
+     * Reject any {@code toolCallDelegate} serviceTask whose {@code toolName}
+     * field references an agent meta-tool (parallel_task, batch, pipeline,
+     * task, agent_send, agent_receive). These framework primitives don't
+     * map to a real HTTP / integration tool and would silently produce
+     * empty results at runtime.
+     */
+    static String validateNoMetaToolsInToolCall(String bpmnXml) {
+        if (bpmnXml == null) return null;
+        java.util.regex.Pattern taskRe = java.util.regex.Pattern.compile(
+                "<serviceTask\\b[^>]*flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*toolCallDelegate\\s*\\}\\s*\"[\\s\\S]*?</serviceTask>",
+                java.util.regex.Pattern.DOTALL);
+        java.util.regex.Pattern toolNameRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"toolName\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL);
+        java.util.Set<String> offenders = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher tm = taskRe.matcher(bpmnXml);
+        while (tm.find()) {
+            java.util.regex.Matcher fm = toolNameRe.matcher(tm.group());
+            if (!fm.find()) continue;
+            String name = fm.group(1).trim();
+            if (RESERVED_META_TOOL_NAMES.contains(name)) offenders.add(name);
+        }
+        if (offenders.isEmpty()) return null;
+        return "Compiled BPMN uses agent meta-tool name(s) " + offenders
+                + " as the toolName on a ${toolCallDelegate} serviceTask. These are framework "
+                + "primitives (orchestration helpers from the LLM tool loop), not real domain "
+                + "tools — calling them via toolCallDelegate would silently produce empty "
+                + "results.\nFix: replace the toolName with the real domain tool you want to "
+                + "invoke (e.g. `Serviceability`, `ContainerAvailability`). To run that tool "
+                + "in parallel per item, wrap the toolCallDelegate serviceTask in a "
+                + "<subProcess> with <multiInstanceLoopCharacteristics isSequential=\"false\" "
+                + "flowable:collection=\"${listVar}\" flowable:elementVariable=\"item\"/>.";
+    }
+
+    /**
+     * Best-effort coerce a recorded trace step's {@code input} node into a JSON
+     * object. Returns the node as-is when already an object; tries to parse the
+     * text content when the node is a JSON-encoded string (the historical
+     * shape produced by {@code AgentToolCallback.saveRuntimeEvent} before the
+     * {@code ObjectNode} rewrite). Returns {@code null} when neither applies —
+     * matching the prior silent-skip behavior for non-JSON inputs.
+     */
+    private static JsonNode coerceInputToObject(JsonNode input, ObjectMapper mapper) {
+        if (input == null || input.isNull()) return null;
+        if (input.isObject()) return input;
+        if (input.isTextual() && mapper != null) {
+            String text = input.textValue();
+            if (text == null) return null;
+            String trimmed = text.trim();
+            if (trimmed.isEmpty() || trimmed.charAt(0) != '{') return null;
+            try {
+                JsonNode parsed = mapper.readTree(trimmed);
+                if (parsed != null && parsed.isObject()) return parsed;
+            } catch (Exception ignored) {
+                // not parseable — fall through to null
+            }
+        }
+        return null;
     }
 
     /** Extract the top-level JSON object keys from a string that may

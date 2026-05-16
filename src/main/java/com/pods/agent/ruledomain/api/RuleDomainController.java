@@ -1,5 +1,6 @@
 package com.pods.agent.ruledomain.api;
 
+import com.pods.agent.ruledomain.compiler.BpmnCompiler;
 import com.pods.agent.ruledomain.model.ExecutionOutcome;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.RuleExecution;
@@ -49,17 +50,20 @@ public class RuleDomainController {
     private final HistoryService historyService;
     private final RepositoryService repositoryService;
     private final BpmnRuntime bpmnRuntime;
+    private final BpmnCompiler bpmnCompiler;
 
     public RuleDomainController(RuleDomainRepository domainRepo,
                                 RuleExecutionRepository executionRepo,
                                 HistoryService historyService,
                                 RepositoryService repositoryService,
-                                BpmnRuntime bpmnRuntime) {
+                                BpmnRuntime bpmnRuntime,
+                                BpmnCompiler bpmnCompiler) {
         this.domainRepo = domainRepo;
         this.executionRepo = executionRepo;
         this.historyService = historyService;
         this.repositoryService = repositoryService;
         this.bpmnRuntime = bpmnRuntime;
+        this.bpmnCompiler = bpmnCompiler;
     }
 
     @GetMapping
@@ -190,6 +194,87 @@ public class RuleDomainController {
         response.put("latencyMs", outcome.latencyMs());
         response.put("flowableProcId", outcome.flowableProcId());
         response.put("executionId", executionId);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Replace the BPMN XML of an existing rule-domain row in place, then
+     * undeploy the prior Flowable definition so the next execution picks
+     * up the new XML. Used to surgically repair a compiled BPMN (e.g. fix
+     * a wrong argTemplate key) without forcing a full chat-driven recompile.
+     *
+     * <p>Body shape: {@code {"bpmnXml": "<?xml ...?>...</definitions>"}}.
+     *
+     * <p>The supplied XML is run through the same sanitize + boundary-injection
+     * + tryDeploy pipeline the compiler uses, so syntactic errors are
+     * rejected with the Flowable parse diagnostic before anything is
+     * persisted.
+     */
+    @PutMapping("/{id}/bpmn")
+    public ResponseEntity<Map<String, Object>> updateBpmn(@PathVariable String id,
+                                                          @RequestBody Map<String, Object> body) {
+        var maybe = domainRepo.findById(id);
+        if (maybe.isEmpty()) return ResponseEntity.notFound().build();
+        RuleDomain existing = maybe.get();
+
+        Object rawXml = body == null ? null : body.get("bpmnXml");
+        if (!(rawXml instanceof String xmlIn) || xmlIn.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bpmnXml is required"));
+        }
+
+        String cleaned = BpmnCompiler.sanitize(xmlIn);
+        cleaned = BpmnCompiler.injectErrorBoundaries(cleaned);
+
+        String deployError = bpmnCompiler.tryDeploy(cleaned, existing.getSkillName(), existing.getIntentLabel());
+        if (deployError != null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "BPMN failed validation",
+                    "detail", deployError));
+        }
+
+        String newProcKey = BpmnCompiler.extractProcessId(cleaned);
+        if (newProcKey == null || newProcKey.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "BPMN has no <process id=...>"));
+        }
+
+        // Persist the new XML on the same row (same id + version, so the
+        // upsert in RuleDomainRepository.save updates in place).
+        existing.setBpmnXml(cleaned);
+        existing.setFlowableProcKey(newProcKey);
+        existing.setLastError(null);
+        existing.setStatus(RuleDomain.STATUS_DRAFT);
+        existing.setCompileAttempts(existing.getCompileAttempts() + 1);
+        domainRepo.save(existing, null);
+
+        // Undeploy the prior Flowable definition (if any) so the next
+        // ensureDeployed() picks up the patched XML rather than the cached
+        // one. Multiple definitions may exist if the proc key changed.
+        java.util.Set<String> keysToUndeploy = new java.util.LinkedHashSet<>();
+        if (existing.getFlowableProcKey() != null) keysToUndeploy.add(existing.getFlowableProcKey());
+        keysToUndeploy.add(newProcKey);
+        int undeployed = 0;
+        for (String key : keysToUndeploy) {
+            try {
+                List<ProcessDefinition> defs = repositoryService.createProcessDefinitionQuery()
+                        .processDefinitionKey(key)
+                        .list();
+                for (ProcessDefinition def : defs) {
+                    repositoryService.deleteDeployment(def.getDeploymentId(), true);
+                    undeployed++;
+                }
+            } catch (Exception ex) {
+                log.warn("[RuleDomain] failed to undeploy Flowable proc {} on BPMN edit: {}",
+                        key, ex.getMessage());
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("id", existing.getId());
+        response.put("flowableProcKey", newProcKey);
+        response.put("status", existing.getStatus());
+        response.put("undeployedFlowableDefinitions", undeployed);
+        response.put("compileAttempts", existing.getCompileAttempts());
         return ResponseEntity.ok(response);
     }
 
