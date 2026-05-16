@@ -6,6 +6,7 @@ import com.pods.agent.domain.ModelRef;
 import com.pods.agent.ruledomain.RuleDomainEventBus;
 import com.pods.agent.ruledomain.compiler.BpmnCompiler;
 import com.pods.agent.ruledomain.compiler.CompilerPromptBuilder;
+import com.pods.agent.ruledomain.compiler.agentic.AgenticTraceCompiler;
 import com.pods.agent.ruledomain.invalidation.SkillSourceHasher;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
@@ -51,6 +52,7 @@ public class TraceBasedBpmnCompiler {
     private final RuleDomainProperties props;
     private final BpmnCompiler bpmnCompiler;
     private final CompilerPromptBuilder promptBuilder;
+    private final AgenticTraceCompiler agenticCompiler;
     private final RuleDomainRepository repo;
     private final SkillSourceHasher skillHasher;
     private final RuleDomainEventBus bus;
@@ -60,6 +62,7 @@ public class TraceBasedBpmnCompiler {
                                   RuleDomainProperties props,
                                   BpmnCompiler bpmnCompiler,
                                   CompilerPromptBuilder promptBuilder,
+                                  AgenticTraceCompiler agenticCompiler,
                                   RuleDomainRepository repo,
                                   SkillSourceHasher skillHasher,
                                   RuleDomainEventBus bus) {
@@ -67,6 +70,7 @@ public class TraceBasedBpmnCompiler {
         this.props = props;
         this.bpmnCompiler = bpmnCompiler;
         this.promptBuilder = promptBuilder;
+        this.agenticCompiler = agenticCompiler;
         this.repo = repo;
         this.skillHasher = skillHasher;
         this.bus = bus;
@@ -87,7 +91,8 @@ public class TraceBasedBpmnCompiler {
      * @param slice           the per-rule trace slice from {@link RuleSlicer}
      * @return the persisted {@link RuleDomain} (DRAFT or FAILED status)
      */
-    public RuleDomain compileFromTrace(String skillId,
+    public RuleDomain compileFromTrace(String sessionId,
+                                       String skillId,
                                        String skillName,
                                        String skillMarkdown,
                                        String domainGroupId,
@@ -103,54 +108,25 @@ public class TraceBasedBpmnCompiler {
                 "ruleName", ruleName,
                 "traceSource", RuleDomain.TRACE_LLM_TRACE));
 
-        ModelRef compilerRef = new ModelRef(
-                props.getCompilerModel().getProviderId(),
-                props.getCompilerModel().getModelId());
-        ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
-        ChatClient client = spec.client();
-
-        // Reuse the canonical prose-compiler system prompt + few-shot
-        // examples. That document is the source of truth for the
-        // delegate contract (argTemplate vs inputBindings, feelExpr vs
-        // expression, FEEL syntax vs ${} interpolation). A hand-rolled
-        // trace-compiler prompt drifted from this contract once and
-        // produced unusable rules; don't repeat that.
-        String system = promptBuilder.buildSystem() + "\n\n" + traceAddendum();
-        String user = buildTraceUserPrompt(skillName, skillMarkdown, manifestRule, slice);
-
-        bus.emit("rule_domain.compile.llm_call", Map.of(
-                "model", compilerRef.modelID(),
-                "provider", compilerRef.providerID(),
-                "ruleName", ruleName));
-
+        // Delegate the LLM + validation portion to the agentic compiler.
+        // It writes the trace + skill into a VFS workspace, gives the
+        // model filesystem tools, runs a multi-turn loop with
+        // validate-and-revise feedback, and returns a passing BPMN or
+        // exhausts its attempt budget. The persistence / embedding /
+        // version concerns stay here.
         long llmStart = System.currentTimeMillis();
-        String xml = invokeLlm(client, spec.options(), system, user);
+        AgenticTraceCompiler.CompileResult result = agenticCompiler.compile(
+                sessionId, slice.turnId(), skillName, skillMarkdown, manifestRule, slice);
         long llmMs = System.currentTimeMillis() - llmStart;
-        xml = BpmnCompiler.sanitize(xml);
-        xml = BpmnCompiler.injectErrorBoundaries(xml);
 
-        bus.emit("rule_domain.compile.validating", Map.of("llmMs", llmMs, "ruleName", ruleName));
+        bus.emit("rule_domain.compile.validating", Map.of(
+                "llmMs", llmMs,
+                "ruleName", ruleName,
+                "attempts", result.attempts(),
+                "ok", result.ok()));
 
-        // Structural pre-check: reject any bare ${X} reference where X
-        // isn't a user-provided identifier, an output of an earlier step,
-        // a delegate bean, or a FEEL function. This catches the
-        // "compiler left a literal as a bare input" failure mode that
-        // produces unusable rules like the old container-availability
-        // BPMN where ${zip} and ${orderType} should have been derived
-        // from ${order.*}.
-        String structuralError = validateInputDiscipline(xml);
-        // Trace-literal pre-check: any quoted literal in argTemplate /
-        // inputsTemplate / feelExpr that also appears as a value in an
-        // earlier recorded tool response is almost certainly a compiler
-        // mistake — the BPMN won't generalize beyond this one order. Fail
-        // here with a clear message instead of letting the rule deploy
-        // and run with hardcoded values that happen to work for the
-        // training order and break for everything else.
-        String literalError = structuralError != null ? null
-                : validateLiteralGrounding(xml, slice);
-        String error = structuralError != null ? structuralError
-                : literalError != null ? literalError
-                : bpmnCompiler.tryDeploy(xml, skillName, intentLabel);
+        String xml = result.xml();
+        String error = result.ok() ? null : (result.lastError() == null ? "agentic compile failed" : result.lastError());
 
         long now = System.currentTimeMillis();
         String resultKey = manifestRule.effectiveResultKey();
@@ -260,7 +236,7 @@ public class TraceBasedBpmnCompiler {
      * produced unusable container-availability / leg-sequence rules in
      * the first trace-compile attempt.
      */
-    static String validateInputDiscipline(String bpmnXml) {
+    public static String validateInputDiscipline(String bpmnXml) {
         if (bpmnXml == null) return null;
 
         // 0. Catch the recurring "wrong field name" failure first. Each
@@ -354,7 +330,7 @@ public class TraceBasedBpmnCompiler {
      * declared field must be in the allowed set. Returns {@code null} on
      * success, or a human-readable error otherwise.
      */
-    static String validateDelegateFieldNames(String bpmnXml) {
+    public static String validateDelegateFieldNames(String bpmnXml) {
         java.util.regex.Matcher taskRe = java.util.regex.Pattern.compile(
                 "<serviceTask\\b([^>]*)>([\\s\\S]*?)</serviceTask>",
                 java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
@@ -427,7 +403,7 @@ public class TraceBasedBpmnCompiler {
      * listing every offending literal + the trace path where the same
      * value was observed.
      */
-    String validateLiteralGrounding(String bpmnXml, ExecutionTrace slice) {
+    public static String validateLiteralGrounding(String bpmnXml, ExecutionTrace slice) {
         if (bpmnXml == null || slice == null) return null;
 
         // 1. Build the set of values present in any recorded response.
@@ -640,9 +616,11 @@ public class TraceBasedBpmnCompiler {
         // which fields exist on the order, which ItemCodes count as legs,
         // how to map ItemCode → ServiceCode, etc. Without this, the trace
         // alone is too thin for the LLM to write generalized FEEL filters.
+        // 60k chars is enough for any realistic skill spec; truncating any
+        // tighter risks cutting the table that defines ItemCode mappings.
         if (skillMarkdown != null && !skillMarkdown.isBlank()) {
             sb.append("\n## Skill specification (the canonical contract — your BPMN must follow this)\n\n");
-            sb.append(truncate(skillMarkdown, 6000)).append("\n\n");
+            sb.append(truncate(skillMarkdown, 60000)).append("\n\n");
         }
 
         sb.append("\n## Execution trace for this rule\n");
@@ -661,8 +639,16 @@ public class TraceBasedBpmnCompiler {
             }
             sb.append("### Step ").append(i++).append(": ").append(s.name())
                     .append(" (").append(s.elapsedMs()).append("ms)\n");
-            sb.append("Input:\n```json\n").append(safeJson(s.input(), 1500)).append("\n```\n");
-            sb.append("Output:\n```json\n").append(safeJson(s.output(), 2500)).append("\n```\n\n");
+            // Tool output is the ground truth the LLM uses to derive FEEL
+            // paths. Truncating it is catastrophic for trace-based
+            // compilation — every field path beyond the truncation point
+            // is invisible to the LLM, and the literal-grounding
+            // validator will (correctly) reject any BPMN that hardcodes
+            // values from there. Modern LLM context windows are ample;
+            // we give outputs 50k chars and inputs 10k. Genuinely huge
+            // responses get truncated with a clear marker.
+            sb.append("Input:\n```json\n").append(safeJson(s.input(), 10_000)).append("\n```\n");
+            sb.append("Output:\n```json\n").append(safeJson(s.output(), 50_000)).append("\n```\n\n");
         }
 
         sb.append("\n## Process variables available to your BPMN\n");

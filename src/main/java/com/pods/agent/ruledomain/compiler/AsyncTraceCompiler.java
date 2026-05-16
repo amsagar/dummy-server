@@ -167,6 +167,7 @@ public class AsyncTraceCompiler {
 
             try {
                 RuleDomain saved = traceCompiler.compileFromTrace(
+                        sessionId,
                         skill.getId(),
                         skill.getName(),
                         routed.markdown(),
