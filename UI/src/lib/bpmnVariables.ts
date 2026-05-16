@@ -69,37 +69,86 @@ export function extractBpmnVariables(bpmnXml: string | null | undefined): BpmnVa
   // 2. Collect DELEGATE bean names — Spring beans, never user inputs.
   const delegates = collectDelegateBeans(bpmnXml);
 
-  // 3. Walk every ${...} / #{...} expression and register the *leading*
-  //    identifier of each fragment. A fragment is the body split on `(`,
-  //    so `size(legLines)` produces fragments ["size", "legLines)"] from
-  //    which we register `legLines` (after stripping the function name).
+  // 3. Walk every ${...} / #{...} expression (legacy compiler dialect)
+  //    AND every FEEL-bearing field's value (canonical dialect). Register
+  //    the leading identifier of each fragment.
   const byName = new Map<string, BpmnVarRef>();
+
+  // 3a. Legacy: ${var} / ${var.path} / #{...} interpolation, anywhere.
   const exprRe = /[$#]\{([^}]+)\}/g;
   let m: RegExpExecArray | null;
   while ((m = exprRe.exec(bpmnXml)) !== null) {
     const body = m[1].trim();
-    // Strip every leading identifier from every comma-or-paren-separated
-    // fragment. This handles `${today()}`, `${size(legLines)}`,
-    // `${order.Lines[0].AssignedSiteId}` (single fragment, leading ident
-    // = `order`), `${a + b}` (split on operators below), etc.
     for (const fragment of splitFragments(body)) {
-      const lead = leadingIdentifier(fragment);
-      if (!lead) continue;
-      if (FEEL_FUNCTIONS.has(lead)) continue;
-      if (RESERVED.has(lead)) continue;
-      if (lead.startsWith("_")) continue;
-      if (outputs.has(lead)) continue;
-      if (delegates.has(lead)) continue;
-      let v = byName.get(lead);
-      if (!v) {
-        v = { name: lead, usages: [] };
-        byName.set(lead, v);
-      }
-      if (v.usages.length < 5 && !v.usages.includes(body)) v.usages.push(body);
+      registerLead(fragment, body, byName, outputs, delegates);
+    }
+  }
+
+  // 3b. Canonical: `argTemplate` / `inputsTemplate` are JSON-shaped, and
+  //     every string value is a FEEL expression. `feelExpr` is a FEEL
+  //     expression directly.
+  const feelFieldsRe = new RegExp(
+    "<flowable:field\\s+name\\s*=\\s*\"(argTemplate|inputsTemplate|feelExpr|postTransform)\"[^>]*>\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+    "g",
+  );
+  let fm: RegExpExecArray | null;
+  while ((fm = feelFieldsRe.exec(bpmnXml)) !== null) {
+    const fieldName = fm[1];
+    const rawBody = fm[2].replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+    if (fieldName === "feelExpr") {
+      // Entire body is FEEL.
+      walkFeel(rawBody, rawBody, byName, outputs, delegates);
+      continue;
+    }
+    // argTemplate / inputsTemplate / postTransform: JSON-with-FEEL-values.
+    // Pull every "key":"value" pair and walk value as FEEL.
+    const kvRe = /"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+    let kv: RegExpExecArray | null;
+    while ((kv = kvRe.exec(rawBody)) !== null) {
+      const feel = kv[2];
+      // Unescape JSON-string escapes to recover the raw FEEL.
+      const unescaped = feel.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      walkFeel(unescaped, unescaped, byName, outputs, delegates);
     }
   }
 
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function walkFeel(
+  body: string,
+  usage: string,
+  byName: Map<string, BpmnVarRef>,
+  outputs: Set<string>,
+  delegates: Set<string>,
+) {
+  for (const fragment of splitFragments(body)) {
+    registerLead(fragment, usage, byName, outputs, delegates);
+  }
+}
+
+function registerLead(
+  fragment: string,
+  usage: string,
+  byName: Map<string, BpmnVarRef>,
+  outputs: Set<string>,
+  delegates: Set<string>,
+) {
+  const lead = leadingIdentifier(fragment);
+  if (!lead) return;
+  if (FEEL_FUNCTIONS.has(lead)) return;
+  if (RESERVED.has(lead)) return;
+  if (lead.startsWith("_")) return;
+  if (outputs.has(lead)) return;
+  if (delegates.has(lead)) return;
+  // Skip pure JSON/FEEL literals — quoted strings, numbers.
+  if (/^["'\d]/.test(fragment)) return;
+  let v = byName.get(lead);
+  if (!v) {
+    v = { name: lead, usages: [] };
+    byName.set(lead, v);
+  }
+  if (v.usages.length < 5 && !v.usages.includes(usage)) v.usages.push(usage);
 }
 
 // ── Output-variable detection ────────────────────────────────────────────
@@ -249,16 +298,39 @@ export function classifyVariables(
   return { required, suspect };
 }
 
-// Find every ${var} referenced inside the inputBindings of the BPMN's
-// first service task. We don't bother parsing the DAG — the source order
-// of <serviceTask> elements matches topological order for the compiler's
-// straight-pipeline output.
+// Find every variable referenced inside the FIRST service task's input
+// fields. Two compiler dialects coexist:
+//  - Modern (canonical): `argTemplate` is a JSON object whose VALUES are
+//    bare FEEL expressions, e.g. `{"ORD_ID":"orderId"}`.
+//  - Legacy / drifted: `inputBindings` uses `${var}` interpolation, e.g.
+//    `{"ORD_ID":"${orderId}"}`. Older trace-compiled rows still look like
+//    this and we want their forms to work too.
 function firstServiceTaskInputs(bpmnXml: string): Set<string> {
   const out = new Set<string>();
   const taskRe = /<serviceTask\b[\s\S]*?<\/serviceTask>/;
   const taskMatch = bpmnXml.match(taskRe);
   if (!taskMatch) return out;
   const taskBlock = taskMatch[0];
+
+  // Try the canonical `argTemplate` field first.
+  const argRe =
+    /<flowable:field\s+name\s*=\s*"argTemplate"[^>]*>\s*<flowable:string>([\s\S]*?)<\/flowable:string>/;
+  const am = taskBlock.match(argRe);
+  if (am) {
+    const body = am[1].replace(/<!\[CDATA\[|\]\]>/g, "");
+    // argTemplate values are JSON strings holding FEEL expressions. Pull
+    // every string value and take its leading identifier.
+    const valueRe = /"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = valueRe.exec(body)) !== null) {
+      const feel = m[2];
+      const ident = feel.trim().match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (ident) out.add(ident[0]);
+    }
+    return out;
+  }
+
+  // Fall back to legacy `inputBindings` with ${...} interpolation.
   const bindingsRe =
     /<flowable:field\s+name\s*=\s*"inputBindings"[^>]*>\s*<flowable:string>([\s\S]*?)<\/flowable:string>/;
   const bm = taskBlock.match(bindingsRe);

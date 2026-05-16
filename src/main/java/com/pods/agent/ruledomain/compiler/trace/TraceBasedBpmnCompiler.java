@@ -5,6 +5,7 @@ import com.pods.agent.config.RuleDomainProperties;
 import com.pods.agent.domain.ModelRef;
 import com.pods.agent.ruledomain.RuleDomainEventBus;
 import com.pods.agent.ruledomain.compiler.BpmnCompiler;
+import com.pods.agent.ruledomain.compiler.CompilerPromptBuilder;
 import com.pods.agent.ruledomain.invalidation.SkillSourceHasher;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.SkillRuleManifest;
@@ -49,6 +50,7 @@ public class TraceBasedBpmnCompiler {
     private final ModelProviderRouter modelProviderRouter;
     private final RuleDomainProperties props;
     private final BpmnCompiler bpmnCompiler;
+    private final CompilerPromptBuilder promptBuilder;
     private final RuleDomainRepository repo;
     private final SkillSourceHasher skillHasher;
     private final RuleDomainEventBus bus;
@@ -57,12 +59,14 @@ public class TraceBasedBpmnCompiler {
     public TraceBasedBpmnCompiler(ModelProviderRouter modelProviderRouter,
                                   RuleDomainProperties props,
                                   BpmnCompiler bpmnCompiler,
+                                  CompilerPromptBuilder promptBuilder,
                                   RuleDomainRepository repo,
                                   SkillSourceHasher skillHasher,
                                   RuleDomainEventBus bus) {
         this.modelProviderRouter = modelProviderRouter;
         this.props = props;
         this.bpmnCompiler = bpmnCompiler;
+        this.promptBuilder = promptBuilder;
         this.repo = repo;
         this.skillHasher = skillHasher;
         this.bus = bus;
@@ -105,7 +109,13 @@ public class TraceBasedBpmnCompiler {
         ModelProviderRouter.Spec spec = modelProviderRouter.resolve(compilerRef, true);
         ChatClient client = spec.client();
 
-        String system = traceSystemPrompt();
+        // Reuse the canonical prose-compiler system prompt + few-shot
+        // examples. That document is the source of truth for the
+        // delegate contract (argTemplate vs inputBindings, feelExpr vs
+        // expression, FEEL syntax vs ${} interpolation). A hand-rolled
+        // trace-compiler prompt drifted from this contract once and
+        // produced unusable rules; don't repeat that.
+        String system = promptBuilder.buildSystem() + "\n\n" + traceAddendum();
         String user = buildTraceUserPrompt(skillName, manifestRule, slice);
 
         bus.emit("rule_domain.compile.llm_call", Map.of(
@@ -242,6 +252,15 @@ public class TraceBasedBpmnCompiler {
      */
     static String validateInputDiscipline(String bpmnXml) {
         if (bpmnXml == null) return null;
+
+        // 0. Catch the recurring "wrong field name" failure first. Each
+        //    delegate has a strict set of required field names; if the LLM
+        //    emits an alias (inputBindings, expression, inputs, ...) we
+        //    must reject before deploy, because Flowable will just throw
+        //    MISSING_VARIABLE at run time with no hint at what went wrong.
+        String fieldNameError = validateDelegateFieldNames(bpmnXml);
+        if (fieldNameError != null) return fieldNameError;
+
         java.util.Set<String> outputs = new java.util.HashSet<>();
         // outputBinding values — `<flowable:field name="outputBinding"><flowable:string>X</flowable:string></flowable:field>`
         java.util.regex.Matcher om = java.util.regex.Pattern.compile(
@@ -296,80 +315,161 @@ public class TraceBasedBpmnCompiler {
         return msg.toString();
     }
 
-    private static String traceSystemPrompt() {
-        return """
-                You are converting a recorded execution trace into a parameterized BPMN 2.0
-                process for the Flowable engine. The trace shows real tool calls made by a
-                successful LLM-loop run, with real inputs and real responses. Your job is to
-                produce a BPMN that re-executes the same flow with new parameters.
+    // For every service task wired via flowable:delegateExpression="${beanName}",
+    // these are the ONLY field names the runtime delegate will look up. The
+    // map is keyed by bean name. If the LLM emits any other field name (a
+    // common drift: `inputBindings`, `expression`, `inputs`), the deploy
+    // succeeds but every run dies with MISSING_VARIABLE because the delegate
+    // never finds the field it needs.
+    private static final java.util.Map<String, java.util.Set<String>> DELEGATE_FIELDS = java.util.Map.of(
+            "toolCallDelegate",
+            java.util.Set.of("toolName", "argTemplate", "outputBinding", "postTransform"),
+            "decisionTableDelegate",
+            java.util.Set.of("tableName", "inputsTemplate", "outputBinding"),
+            "feelExtractDelegate",
+            java.util.Set.of("feelExpr", "outputBinding"));
 
-                Rules:
-                1. Output raw BPMN XML only. No markdown fences, no commentary.
-                2. Use ${toolCallDelegate} for tool calls, ${decisionTableDelegate} for
-                   decision-table evaluations, ${feelExtractDelegate} for in-process
-                   transformations.
-                3. Service-task outputs MUST be written via a <flowable:field name="outputBinding">
-                   extension element naming the target process variable.
-                   NEVER use the resultVariableName="..." attribute — Flowable rejects it on
-                   tasks using flowable:delegateExpression and the deploy will fail.
-                4. Reference field paths EXACTLY as they appear in the response samples below.
-                   Do not invent fields. If you can't find a path in the sample, don't use it.
-                5. *** INPUT VARIABLE DISCIPLINE — STRICT ***
-                   The ONLY process variables you may reference as bare ${X} (without a
-                   `.field` or `[i]` access path) are these "user-provided identifiers":
+    private static final java.util.Map<String, java.util.Set<String>> DELEGATE_REQUIRED_FIELDS = java.util.Map.of(
+            "toolCallDelegate",
+            java.util.Set.of("toolName", "argTemplate", "outputBinding"),
+            "decisionTableDelegate",
+            java.util.Set.of("tableName", "inputsTemplate", "outputBinding"),
+            "feelExtractDelegate",
+            java.util.Set.of("feelExpr", "outputBinding"));
+
+    /**
+     * For each {@code <serviceTask flowable:delegateExpression="${beanName}">}
+     * verify the children {@code <flowable:field name="X">} satisfy the
+     * bean's contract: every required field must be present and every
+     * declared field must be in the allowed set. Returns {@code null} on
+     * success, or a human-readable error otherwise.
+     */
+    static String validateDelegateFieldNames(String bpmnXml) {
+        java.util.regex.Matcher taskRe = java.util.regex.Pattern.compile(
+                "<serviceTask\\b([^>]*)>([\\s\\S]*?)</serviceTask>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        while (taskRe.find()) {
+            String attrs = taskRe.group(1);
+            String body = taskRe.group(2);
+
+            java.util.regex.Matcher delegateRe = java.util.regex.Pattern.compile(
+                    "flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\\s*\"")
+                    .matcher(attrs);
+            if (!delegateRe.find()) continue;
+            String bean = delegateRe.group(1);
+            java.util.Set<String> allowed = DELEGATE_FIELDS.get(bean);
+            java.util.Set<String> required = DELEGATE_REQUIRED_FIELDS.get(bean);
+            if (allowed == null) continue; // user-defined delegate; trust it
+
+            java.util.regex.Matcher idRe = java.util.regex.Pattern.compile(
+                    "id\\s*=\\s*\"([^\"]+)\"").matcher(attrs);
+            String taskId = idRe.find() ? idRe.group(1) : "?";
+
+            java.util.Set<String> declaredFields = new java.util.LinkedHashSet<>();
+            java.util.regex.Matcher fieldRe = java.util.regex.Pattern.compile(
+                    "<flowable:field\\s+name\\s*=\\s*\"([^\"]+)\"").matcher(body);
+            while (fieldRe.find()) declaredFields.add(fieldRe.group(1));
+
+            for (String f : declaredFields) {
+                if (!allowed.contains(f)) {
+                    problems.add(taskId + " (" + bean + "): unknown field `" + f
+                            + "` — allowed: " + allowed + ". "
+                            + suggestForBean(bean, f));
+                }
+            }
+            for (String r : required) {
+                if (!declaredFields.contains(r)) {
+                    problems.add(taskId + " (" + bean + "): missing required field `" + r + "`.");
+                }
+            }
+        }
+        if (problems.isEmpty()) return null;
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN uses wrong <flowable:field name=...> values that the "
+                + "runtime delegates won't recognize (this is the most common cause of "
+                + "MISSING_VARIABLE at run time):");
+        for (String p : problems) msg.append("\n  - ").append(p);
+        return msg.toString();
+    }
+
+    private static String suggestForBean(String bean, String wrongName) {
+        if ("toolCallDelegate".equals(bean)) {
+            if ("inputBindings".equals(wrongName) || "inputs".equals(wrongName)) {
+                return "Did you mean `argTemplate`? (FEEL expressions as values, not ${} interpolation.)";
+            }
+        }
+        if ("feelExtractDelegate".equals(bean)) {
+            if ("expression".equals(wrongName) || "expressions".equals(wrongName)) {
+                return "Did you mean `feelExpr`?";
+            }
+        }
+        if ("decisionTableDelegate".equals(bean)) {
+            if ("inputBindings".equals(wrongName) || "inputs".equals(wrongName)) {
+                return "Did you mean `inputsTemplate`?";
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Trace-mode addendum on top of the canonical compiler system prompt.
+     * The base prompt already nails the delegate contract (argTemplate,
+     * feelExpr, inputsTemplate, FEEL syntax, etc.); this addendum just
+     * reorients the LLM for trace-based compilation, where the input is
+     * a recorded execution rather than a skill spec.
+     */
+    private static String traceAddendum() {
+        return """
+                ## Trace-mode addendum
+
+                You are converting a recorded execution trace into a parameterized BPMN.
+                The trace shows real tool calls made by a successful LLM-loop run, with
+                real inputs and real responses. Your job is to produce a BPMN that
+                re-executes the same flow with new parameters.
+
+                All the rules above (argTemplate / feelExpr / inputsTemplate / FEEL value
+                syntax / outputBinding / final `result` variable / process-id convention)
+                still apply. The trace just changes how you *discover* the right shape.
+
+                Trace-specific guidance:
+
+                1. Reference field paths EXACTLY as they appear in the response samples
+                   below. Do not invent fields. If you can't find a path in a sample,
+                   don't use it.
+                2. *** INPUT VARIABLE DISCIPLINE — STRICT ***
+                   The ONLY user-provided identifiers you may reference as bare names
+                   in an `argTemplate` value are:
                        userMessage, orderId, customerId, sessionId
-                   Every other value you need MUST be expressed as `${name.path}` where
-                   `name` is a variable already written by an earlier service task's
-                   outputBinding in the SAME process. For example: prefer
-                   `${order.Lines[0].DeliveryAddress.PostalCode}` over `${zip}`.
+                   Every other value MUST be a FEEL path into a variable already written
+                   by an earlier outputBinding in the same process. For example, prefer
+                   `"order.Lines[1].DeliveryAddress.PostalCode"` over a bare `"zip"`.
                    If a value cannot be derived from any prior tool's response, you must
-                   either:
-                     (a) introduce a `feelExtractDelegate` service task earlier that
-                         computes it from existing variables, OR
-                     (b) use a literal constant from the trace verbatim (do NOT invent a
-                         new input variable for it).
-                   Bare ${X} references to anything outside the allowlist above will be
-                   rejected by the post-compile validator and the rule will fail.
-                6. Replace observed literal values with process variables FROM EARLIER
-                   STEPS — not new inputs:
-                     - Long numeric ids that match the user message → ${orderId}.
-                     - Date/time literals → today() or now() (FEEL functions).
+                   either (a) introduce an earlier `${feelExtractDelegate}` task that
+                   computes it from existing variables, or (b) use a literal verbatim
+                   from the trace — never invent a new input.
+                3. Replace observed literal values with FEEL references from earlier
+                   steps, not new inputs:
+                     - Long numeric ids that match the user message → `orderId`.
+                     - Date/time literals → `today()` or `now()`.
                      - Any other value present in a prior tool's response → derive it
                        via a path expression on that response's outputBinding name.
-                     - String literals that don't appear anywhere else → keep verbatim.
-                7. When the trace shows N structurally-identical calls (same tool, varying only
-                   in per-item fields), fold into a multi-instance subprocess over the
-                   driving list. The driving list MUST be built from an earlier outputBinding
-                   variable (e.g. via a feelExtractDelegate FEEL expression) — never as a
-                   bare input.
-                8. Do NOT emit <bpmn:boundaryEvent> for tool failures — they're auto-injected.
-                9. Emit a final t_assemble step that builds a single "result" variable shaped
-                   per the rule's purpose. The orchestrator merges per-rule results into the
-                   composite outcome by the rule's result_key.
+                     - String literals that don't appear anywhere → keep verbatim,
+                       FEEL-quoted: `"\\"NEW\\""`.
+                4. When the trace shows N structurally-identical calls (same tool,
+                   varying per-item fields), fold into a multi-instance subprocess.
+                   The driving collection MUST be built from an earlier outputBinding
+                   variable, not from a bare input.
+                5. Do NOT emit `<boundaryEvent>` elements for tool failures — they are
+                   auto-injected by the compiler post-processor.
 
-                Example service task with correct output binding:
-                  <serviceTask id="t_get_order" name="Get Order"
-                               flowable:delegateExpression="${toolCallDelegate}">
-                    <extensionElements>
-                      <flowable:field name="toolName">
-                        <flowable:string>Get_OrderID</flowable:string>
-                      </flowable:field>
-                      <flowable:field name="inputBindings">
-                        <flowable:string>{"ORD_ID":"${orderId}"}</flowable:string>
-                      </flowable:field>
-                      <flowable:field name="outputBinding">
-                        <flowable:string>order</flowable:string>
-                      </flowable:field>
-                    </extensionElements>
-                  </serviceTask>
-
-                Required XML preamble:
-                <?xml version="1.0" encoding="UTF-8"?>
-                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
-                             xmlns:flowable="http://flowable.org/bpmn"
-                             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                             targetNamespace="http://pods.com/rule-domains"
-                             typeLanguage="http://www.w3.org/2001/XMLSchema">
+                Field-name reminder (from the contract above):
+                  - toolCallDelegate         → toolName, argTemplate, outputBinding[, postTransform]
+                  - decisionTableDelegate    → tableName, inputsTemplate, outputBinding
+                  - feelExtractDelegate      → feelExpr, outputBinding
+                Any other field-name (e.g. `inputBindings`, `expression`, `inputs`) will
+                be rejected by the runtime with `MISSING_VARIABLE` and the rule will fail.
                 """;
     }
 
@@ -401,13 +501,14 @@ public class TraceBasedBpmnCompiler {
         }
 
         sb.append("\n## Process variables available to your BPMN\n");
-        sb.append("Allowed bare ${X} references (these are the user-provided identifiers):\n");
+        sb.append("These are the only user-provided identifiers (use as bare FEEL refs in argTemplate values):\n");
         sb.append("  - userMessage (raw user text)\n");
         sb.append("  - orderId (best-effort numeric extract from user message)\n");
         sb.append("  - customerId, sessionId (if applicable)\n");
-        sb.append("\nAll OTHER values must be derived via path expressions like\n");
-        sb.append("`${order.Lines[0].DeliveryAddress.PostalCode}` from variables written by\n");
-        sb.append("an earlier step's outputBinding. Do NOT invent new bare inputs.\n\n");
+        sb.append("\nAll OTHER values must be FEEL paths into a variable written by an\n");
+        sb.append("earlier step's outputBinding (e.g. `order.Lines[1].DeliveryAddress.PostalCode`).\n");
+        sb.append("Do NOT introduce new bare-name inputs. Do NOT use ${...} interpolation\n");
+        sb.append("inside argTemplate/inputsTemplate/feelExpr — those fields are FEEL, not JUEL.\n\n");
 
         sb.append("## Result\n");
         sb.append("Emit a t_assemble step at the end that builds a `result` variable. ");
