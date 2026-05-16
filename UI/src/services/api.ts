@@ -215,6 +215,22 @@ export const api = {
     delete: (id: string) => fetch(`${BASE_URL}/rule-domains/${encodeURIComponent(id)}`, {
       method: 'DELETE', headers: getHeaders(),
     }).then(handleResponse),
+    activateAllForSkill: (skillId: string) => fetch(
+      `${BASE_URL}/rule-domains/skill/${encodeURIComponent(skillId)}/activate-all`,
+      { method: 'POST', headers: getHeaders() }
+    ).then(handleResponse),
+    deleteAllForSkill: (skillId: string) => fetch(
+      `${BASE_URL}/rule-domains/skill/${encodeURIComponent(skillId)}`,
+      { method: 'DELETE', headers: getHeaders() }
+    ).then(handleResponse),
+    testAllForSkill: (skillId: string, inputs: Record<string, unknown>) => fetch(
+      `${BASE_URL}/rule-domains/skill/${encodeURIComponent(skillId)}/test`,
+      {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ inputs }),
+      }
+    ).then(handleResponse),
   },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),

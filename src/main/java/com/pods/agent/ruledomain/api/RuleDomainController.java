@@ -279,6 +279,136 @@ public class RuleDomainController {
         m.put("compileAttempts", d.getCompileAttempts());
         m.put("createdAt", d.getCreatedAt());
         m.put("updatedAt", d.getUpdatedAt());
+        // Domain-group / rule fields — surface so the admin UI can group
+        // rules by skill and act on the group as a whole.
+        m.put("domainGroupId", d.getDomainGroupId());
+        m.put("domainGroupName", d.getDomainGroupName());
+        m.put("ruleName", d.getRuleName());
+        m.put("matchScope", d.getMatchScope());
+        m.put("coverageState", d.getCoverageState());
+        m.put("traceSource", d.getTraceSource());
+        m.put("resultKey", d.getResultKey());
         return m;
+    }
+
+    // ── Bulk operations on a domain group (all rules of one skill) ──
+
+    /**
+     * Activate every DRAFT/DEPRECATED rule belonging to the same skill as
+     * the supplied row. Used by the admin UI's "Activate all rules" action
+     * on the skill-level row.
+     */
+    @PostMapping("/skill/{skillId}/activate-all")
+    public Map<String, Object> activateAllForSkill(@PathVariable String skillId) {
+        List<RuleDomain> all = domainRepo.listBySkill(skillId);
+        int activated = 0;
+        int deactivated = 0;
+        for (RuleDomain d : all) {
+            if (RuleDomain.STATUS_DRAFT.equals(d.getStatus())
+                    || RuleDomain.STATUS_DEPRECATED.equals(d.getStatus())) {
+                deactivated += domainRepo.deactivateSiblings(d.getId());
+                domainRepo.updateStatus(d.getId(), RuleDomain.STATUS_ACTIVE, null);
+                activated++;
+            }
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("skillId", skillId);
+        body.put("activated", activated);
+        body.put("deactivatedSiblings", deactivated);
+        return body;
+    }
+
+    /**
+     * Delete every rule (every revision) belonging to the supplied skill.
+     * Mirrors the per-row delete but operates on the whole skill group at
+     * once. Also undeploys orphaned Flowable definitions.
+     */
+    @DeleteMapping("/skill/{skillId}")
+    public Map<String, Object> deleteAllForSkill(@PathVariable String skillId) {
+        List<RuleDomain> all = domainRepo.listBySkill(skillId);
+        java.util.Set<String> procKeys = new java.util.LinkedHashSet<>();
+        for (RuleDomain d : all) {
+            if (d.getFlowableProcKey() != null && !d.getFlowableProcKey().isBlank()) {
+                procKeys.add(d.getFlowableProcKey());
+            }
+        }
+        int deletedRows = 0;
+        java.util.Set<String> seenGroups = new java.util.HashSet<>();
+        for (RuleDomain d : all) {
+            // deleteGroupContaining wipes all revisions of one (skill,intent)
+            // group at once; skip rows whose group we've already deleted.
+            String groupKey = d.getSkillId() + "::" + d.getIntentLabel();
+            if (!seenGroups.add(groupKey)) continue;
+            deletedRows += domainRepo.deleteGroupContaining(d.getId());
+        }
+        int undeployed = 0;
+        for (String procKey : procKeys) {
+            if (domainRepo.countByFlowableProcKey(procKey) > 0) continue;
+            try {
+                List<ProcessDefinition> defs = repositoryService.createProcessDefinitionQuery()
+                        .processDefinitionKey(procKey).list();
+                for (ProcessDefinition def : defs) {
+                    repositoryService.deleteDeployment(def.getDeploymentId(), true);
+                    undeployed++;
+                }
+            } catch (Exception ex) {
+                log.warn("[RuleDomain] failed to undeploy Flowable proc {} after skill delete: {}",
+                        procKey, ex.getMessage());
+            }
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("skillId", skillId);
+        body.put("deletedRevisions", deletedRows);
+        body.put("undeployedFlowableDefinitions", undeployed);
+        return body;
+    }
+
+    /**
+     * Run every rule of the supplied skill against the same input map. The
+     * admin UI's "Test full skill" action — useful when the user wants to
+     * verify every rule end-to-end without going through a chat session.
+     */
+    @PostMapping("/skill/{skillId}/test")
+    public Map<String, Object> testAllForSkill(@PathVariable String skillId,
+                                               @RequestBody(required = false) Map<String, Object> body) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inputs = body != null && body.get("inputs") instanceof Map<?, ?>
+                ? (Map<String, Object>) body.get("inputs")
+                : Map.of();
+        String sessionId = "test-" + UUID.randomUUID();
+        String turnId = "test-turn";
+
+        List<Map<String, Object>> results = new java.util.ArrayList<>();
+        List<RuleDomain> rules = domainRepo.listBySkill(skillId).stream()
+                .filter(d -> RuleDomain.STATUS_ACTIVE.equals(d.getStatus())
+                        || RuleDomain.STATUS_DRAFT.equals(d.getStatus()))
+                .toList();
+        for (RuleDomain d : rules) {
+            try {
+                ExecutionOutcome outcome = bpmnRuntime.execute(d, inputs, sessionId, turnId, false);
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("ruleId", d.getId());
+                r.put("ruleName", d.getRuleName() != null ? d.getRuleName() : d.getIntentLabel());
+                r.put("success", outcome.error() == null);
+                r.put("error", outcome.error());
+                r.put("outputs", outcome.outputs());
+                r.put("latencyMs", outcome.latencyMs());
+                r.put("flowableProcId", outcome.flowableProcId());
+                results.add(r);
+            } catch (Exception ex) {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("ruleId", d.getId());
+                r.put("ruleName", d.getRuleName() != null ? d.getRuleName() : d.getIntentLabel());
+                r.put("success", false);
+                r.put("error", ex.getMessage());
+                results.add(r);
+            }
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("skillId", skillId);
+        resp.put("ruleCount", rules.size());
+        resp.put("results", results);
+        return resp;
     }
 }

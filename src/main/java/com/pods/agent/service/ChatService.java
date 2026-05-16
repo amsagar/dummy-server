@@ -39,6 +39,9 @@ import java.util.Base64;
 import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.nio.file.Path;
 import java.util.UUID;
@@ -84,6 +87,16 @@ public class ChatService {
     private final ExecutionLogService executionLogService;
     private final AgentOrchestrator agentOrchestrator;
     private final ObjectMapper objectMapper;
+
+    // Dedicated executor for title generation. Isolated from the FJ commonPool
+    // (which the chat turn, trace compile, and other async work share) so the
+    // title gen LLM call can fire immediately and the session.updated event
+    // arrives mid-stream rather than getting queued behind heavier tasks.
+    private final Executor titleGenExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "title-gen");
+        t.setDaemon(true);
+        return t;
+    });
 
     public ChatService(AgentSessionManager sessionManager,
                        ChatSessionRepository sessionRepository,
@@ -203,9 +216,10 @@ public class ChatService {
 
                 String finalUserMessage = enrichMessageWithAttachments(request);
 
+                CompletableFuture<Void> titleGenFuture = CompletableFuture.completedFuture(null);
                 if (isFirstMessage) {
                     String sourceMessage = request.getMessage() == null || request.getMessage().isBlank() ? finalUserMessage : request.getMessage();
-                    scheduleAsyncTitleGeneration(sessionId, userId, sourceMessage, state, sender);
+                    titleGenFuture = scheduleAsyncTitleGeneration(sessionId, userId, sourceMessage, state, sender);
                 }
 
                 saveMessage(sessionId, "user", finalUserMessage, null);
@@ -251,6 +265,18 @@ public class ChatService {
                 } catch (Exception e) {
                     log.warn("[ChatService] Failed to write execution log for turn={}: {}",
                             turnId, e.getMessage());
+                }
+                // Brief wait so the title's session.updated event arrives
+                // before the SSE stream closes. Title gen runs in parallel
+                // with the chat turn so it's usually already done; this
+                // bounded wait covers the case where the chat turn returned
+                // fast (e.g. capabilities query) and title gen is still
+                // mid-LLM-call.
+                try {
+                    titleGenFuture.get(2500, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException te) {
+                    log.debug("[ChatService] Title gen still in flight at stream close — session.updated will fire after the stream ends");
+                } catch (Exception ignored) {
                 }
                 sender.complete();
                 session.setActiveEmitter(null);
@@ -316,14 +342,14 @@ public class ChatService {
         return generateTitleFallback(userMessage);
     }
 
-    private void scheduleAsyncTitleGeneration(String sessionId,
-                                              String userId,
-                                              String sourceMessage,
-                                              ChatState state,
-                                              SseEventSender sender) {
-        if (sourceMessage == null || sourceMessage.isBlank()) return;
+    private CompletableFuture<Void> scheduleAsyncTitleGeneration(String sessionId,
+                                                                 String userId,
+                                                                 String sourceMessage,
+                                                                 ChatState state,
+                                                                 SseEventSender sender) {
+        if (sourceMessage == null || sourceMessage.isBlank()) return CompletableFuture.completedFuture(null);
         ChatState stateSnapshot = state == null ? null : state.copy();
-        CompletableFuture.runAsync(() -> {
+        return CompletableFuture.runAsync(() -> {
             try {
                 String title = generateTitle(sourceMessage, stateSnapshot);
                 sessionRepository.renameTitle(sessionId, userId, title);
@@ -332,7 +358,7 @@ public class ChatService {
             } catch (Exception e) {
                 log.debug("[ChatService] Async title generation failed for session={}: {}", sessionId, e.getMessage());
             }
-        });
+        }, titleGenExecutor);
     }
 
     private String generateTitleWithAi(String userMessage, ChatState state) {
