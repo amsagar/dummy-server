@@ -218,6 +218,10 @@ public class BpmnCompiler {
         return cur.getClass().getSimpleName() + ": " + cur.getMessage();
     }
 
+    /** Matches the (illegal-on-delegate-tasks) {@code resultVariableName="..."} attribute. */
+    private static final Pattern RESULT_VAR_ATTR =
+            Pattern.compile("\\s+(?:flowable:)?resultVariableName\\s*=\\s*\"[^\"]*\"");
+
     public static String sanitize(String llmOutput) {
         if (llmOutput == null) return "";
         String s = llmOutput.trim();
@@ -225,6 +229,11 @@ public class BpmnCompiler {
         if (open.find() && open.start() == 0) s = s.substring(open.end());
         Matcher close = CODE_FENCE_CLOSE.matcher(s);
         if (close.find()) s = s.substring(0, close.start());
+        // Strip resultVariableName="..." attributes — Flowable rejects them on
+        // service tasks using delegateExpression/class. The delegates already
+        // write to process variables via the outputBinding field; this
+        // attribute is always redundant on our generated BPMNs.
+        s = RESULT_VAR_ATTR.matcher(s).replaceAll("");
         return s.trim();
     }
 

@@ -212,19 +212,39 @@ public class TraceBasedBpmnCompiler {
                 2. Use ${toolCallDelegate} for tool calls, ${decisionTableDelegate} for
                    decision-table evaluations, ${feelExtractDelegate} for in-process
                    transformations.
-                3. Reference field paths EXACTLY as they appear in the response samples below.
+                3. Service-task outputs MUST be written via a <flowable:field name="outputBinding">
+                   extension element naming the target process variable.
+                   NEVER use the resultVariableName="..." attribute — Flowable rejects it on
+                   tasks using flowable:delegateExpression and the deploy will fail.
+                4. Reference field paths EXACTLY as they appear in the response samples below.
                    Do not invent fields. If you can't find a path in the sample, don't use it.
-                4. Replace observed literal values with process variables:
+                5. Replace observed literal values with process variables:
                      - Long numeric ids → orderId, customerId, etc.
                      - Date/time literals → today() or a process variable
                      - String literals that came from the user → keep templated
-                5. When the trace shows N structurally-identical calls (same tool, varying only
+                6. When the trace shows N structurally-identical calls (same tool, varying only
                    in per-item fields), fold into a multi-instance subprocess over the
                    driving list.
-                6. Do NOT emit <bpmn:boundaryEvent> for tool failures — they're auto-injected.
-                7. Emit a final t_assemble step that builds a single "result" variable shaped
+                7. Do NOT emit <bpmn:boundaryEvent> for tool failures — they're auto-injected.
+                8. Emit a final t_assemble step that builds a single "result" variable shaped
                    per the rule's purpose. The orchestrator merges per-rule results into the
                    composite outcome by the rule's result_key.
+
+                Example service task with correct output binding:
+                  <serviceTask id="t_get_order" name="Get Order"
+                               flowable:delegateExpression="${toolCallDelegate}">
+                    <extensionElements>
+                      <flowable:field name="toolName">
+                        <flowable:string>Get_OrderID</flowable:string>
+                      </flowable:field>
+                      <flowable:field name="inputBindings">
+                        <flowable:string>{"ORD_ID":"${orderId}"}</flowable:string>
+                      </flowable:field>
+                      <flowable:field name="outputBinding">
+                        <flowable:string>order</flowable:string>
+                      </flowable:field>
+                    </extensionElements>
+                  </serviceTask>
 
                 Required XML preamble:
                 <?xml version="1.0" encoding="UTF-8"?>

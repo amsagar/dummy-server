@@ -525,3 +525,6 @@ CREATE TABLE IF NOT EXISTS agent.rule_executions (
 
 CREATE INDEX IF NOT EXISTS idx_rule_executions_domain
     ON agent.rule_executions (domain_id, created_at DESC);
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_json TEXT;
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_source_hash TEXT;
+ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_at BIGINT;
