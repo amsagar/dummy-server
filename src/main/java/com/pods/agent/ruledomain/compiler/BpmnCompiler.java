@@ -20,6 +20,7 @@ import org.flowable.bpmn.model.FlowElement;
 import org.flowable.bpmn.model.Process;
 import org.flowable.bpmn.model.SequenceFlow;
 import org.flowable.bpmn.model.ServiceTask;
+import org.flowable.bpmn.model.SubProcess;
 import org.flowable.common.engine.api.io.InputStreamProvider;
 import org.flowable.engine.RepositoryService;
 import org.flowable.engine.repository.Deployment;
@@ -262,7 +263,25 @@ public class BpmnCompiler {
 
             boolean changed = false;
             for (Process proc : model.getProcesses()) {
-                changed |= attachBoundariesToProc(proc);
+                // 1. Demote any LLM-emitted error end events that target
+                //    TOOL_EXECUTION_FAILED to plain end events, in every
+                //    scope. Required: the LLM keeps emitting these as
+                //    error end events, which re-throws and crashes at the
+                //    top of the process. Plain end terminates cleanly.
+                changed |= demoteToolFailureErrorEnds(proc);
+                for (FlowElement fe : new ArrayList<>(proc.getFlowElements())) {
+                    if (fe instanceof SubProcess sp) {
+                        changed |= demoteToolFailureErrorEnds(sp);
+                    }
+                }
+                // 2. Attach error boundaries to any tool task missing one,
+                //    in every scope.
+                changed |= attachBoundariesInScope(proc, proc);
+                for (FlowElement fe : new ArrayList<>(proc.getFlowElements())) {
+                    if (fe instanceof SubProcess sp) {
+                        changed |= attachBoundariesInScope(proc, sp);
+                    }
+                }
             }
             if (!changed) return xml;
 
@@ -275,9 +294,27 @@ public class BpmnCompiler {
         }
     }
 
-    private static boolean attachBoundariesToProc(Process proc) {
+    /**
+     * Attach an error boundary to every {@code toolCallDelegate} service
+     * task in {@code scope} (a {@link Process} or {@link SubProcess}), and
+     * make sure the scope has a single PLAIN end event the boundary flows
+     * to. Important: the end event is plain — not an error end event. An
+     * error end event would re-throw {@code TOOL_EXECUTION_FAILED} to the
+     * parent scope, and at the top of the process Flowable rejects that
+     * with "no matching parent execution". Plain end terminates the scope
+     * cleanly; the orchestrator detects the tool failure via the
+     * {@code _failedTool} process variable that {@code ToolCallDelegate}
+     * sets before throwing.
+     *
+     * <p>{@code proc} is the owning process — it's the {@link FlowElementsContainer}
+     * we must register added flow elements on even when {@code scope} is a
+     * subprocess (Flowable's BPMN model API only exposes scoped
+     * {@code addFlowElement} on Process).
+     */
+    private static boolean attachBoundariesInScope(Process proc,
+                                                    org.flowable.bpmn.model.FlowElementsContainer scope) {
         List<ServiceTask> toolTasks = new ArrayList<>();
-        for (FlowElement fe : proc.getFlowElements()) {
+        for (FlowElement fe : scope.getFlowElements()) {
             if (fe instanceof ServiceTask st && isToolCallDelegate(st)) {
                 if (st.getBoundaryEvents() != null && !st.getBoundaryEvents().isEmpty()) {
                     boolean alreadyHandled = st.getBoundaryEvents().stream().anyMatch(b ->
@@ -290,7 +327,7 @@ public class BpmnCompiler {
         }
         if (toolTasks.isEmpty()) return false;
 
-        EndEvent sharedEnd = ensureSharedErrorEnd(proc);
+        EndEvent sharedEnd = ensurePlainEndForFailure(proc, scope);
 
         for (ServiceTask st : toolTasks) {
             String beId = st.getId() + "_onError";
@@ -304,15 +341,41 @@ public class BpmnCompiler {
             eed.setErrorCode("TOOL_EXECUTION_FAILED");
             be.addEventDefinition(eed);
 
-            proc.addFlowElement(be);
+            // Boundary events live in the same scope as the attached task.
+            scope.addFlowElement(be);
             if (st.getBoundaryEvents() == null) st.setBoundaryEvents(new ArrayList<>());
             st.getBoundaryEvents().add(be);
 
             SequenceFlow sf = new SequenceFlow(beId, sharedEnd.getId());
             sf.setId(beId + "_flow");
-            proc.addFlowElement(sf);
+            scope.addFlowElement(sf);
         }
         return true;
+    }
+
+    /**
+     * Strip the {@code <errorEventDefinition errorCode="TOOL_EXECUTION_FAILED">}
+     * from every end event in this scope that the LLM emitted as a tool-
+     * failure terminator. Error end events re-throw their error at the
+     * parent scope; at the top of a process there's no parent and Flowable
+     * fails with "no matching parent execution". We want the boundary to
+     * route execution to a PLAIN end event so the process terminates
+     * cleanly with the tool error captured via the {@code _failedTool}
+     * process variable.
+     */
+    private static boolean demoteToolFailureErrorEnds(org.flowable.bpmn.model.FlowElementsContainer scope) {
+        boolean changed = false;
+        for (FlowElement fe : scope.getFlowElements()) {
+            if (!(fe instanceof EndEvent ee)) continue;
+            if (ee.getEventDefinitions() == null || ee.getEventDefinitions().isEmpty()) continue;
+            boolean removed = ee.getEventDefinitions().removeIf(d -> {
+                if (!(d instanceof ErrorEventDefinition eed)) return false;
+                String code = eed.getErrorCode();
+                return code == null || code.isBlank() || "TOOL_EXECUTION_FAILED".equals(code);
+            });
+            if (removed) changed = true;
+        }
+        return changed;
     }
 
     private static boolean isToolCallDelegate(ServiceTask st) {
@@ -320,18 +383,35 @@ public class BpmnCompiler {
         return impl != null && impl.contains("toolCallDelegate");
     }
 
-    private static EndEvent ensureSharedErrorEnd(Process proc) {
-        String sharedId = "endOnToolFailure";
-        FlowElement existing = proc.getFlowElement(sharedId);
-        if (existing instanceof EndEvent ee) return ee;
+    /**
+     * Look up (or create) the plain end event used as the merge point for
+     * every tool-failure boundary in this scope. Per-scope ids
+     * ({@code endOnToolFailure} at the top, {@code endOnToolFailure__<spId>}
+     * inside subprocesses) avoid id collisions when both scopes need one.
+     *
+     * <p>If the LLM already emitted an end event with this id but made it
+     * an error end event (the old contract), we strip the error event
+     * definition rather than creating a duplicate.
+     */
+    private static EndEvent ensurePlainEndForFailure(Process proc,
+                                                      org.flowable.bpmn.model.FlowElementsContainer scope) {
+        String sharedId = scope == proc
+                ? "endOnToolFailure"
+                : "endOnToolFailure__" + ((FlowElement) scope).getId();
+        FlowElement existing = scope.getFlowElement(sharedId);
+        if (existing instanceof EndEvent ee) {
+            // Demote any pre-existing error-end-event to a plain end event.
+            if (ee.getEventDefinitions() != null && !ee.getEventDefinitions().isEmpty()) {
+                ee.getEventDefinitions().removeIf(d -> d instanceof ErrorEventDefinition);
+            }
+            return ee;
+        }
 
         EndEvent ee = new EndEvent();
         ee.setId(sharedId);
         ee.setName("Tool failure");
-        ErrorEventDefinition errDef = new ErrorEventDefinition();
-        errDef.setErrorCode("TOOL_EXECUTION_FAILED");
-        ee.addEventDefinition(errDef);
-        proc.addFlowElement(ee);
+        // INTENTIONALLY no ErrorEventDefinition — see method docstring.
+        scope.addFlowElement(ee);
         return ee;
     }
 

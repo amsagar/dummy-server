@@ -462,7 +462,13 @@ public class TraceBasedBpmnCompiler {
                    The driving collection MUST be built from an earlier outputBinding
                    variable, not from a bare input.
                 5. Do NOT emit `<boundaryEvent>` elements for tool failures — they are
-                   auto-injected by the compiler post-processor.
+                   auto-injected by the compiler post-processor. Do NOT emit an
+                   `endOnToolFailure` end event either, and especially do NOT make any
+                   end event an *error* end event (with `<errorEventDefinition>`).
+                   Error end events re-throw their error, and at the top of the process
+                   nothing catches it — runs crash with "no matching parent execution
+                   for error code TOOL_EXECUTION_FAILED". A single plain `<endEvent>`
+                   per scope is all you need; the post-processor adds the failure path.
 
                 Field-name reminder (from the contract above):
                   - toolCallDelegate         → toolName, argTemplate, outputBinding[, postTransform]
