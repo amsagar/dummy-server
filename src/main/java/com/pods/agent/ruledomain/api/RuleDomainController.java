@@ -379,9 +379,12 @@ public class RuleDomainController {
         String turnId = "test-turn";
 
         List<Map<String, Object>> results = new java.util.ArrayList<>();
+        // Include DEPRECATED rules — this endpoint is an admin tool, so a
+        // deprecated rule should still be testable from the UI (it's not
+        // deleted, just non-routable). The runtime path still uses status
+        // for routing decisions, but admin test runs are status-blind.
         List<RuleDomain> rules = domainRepo.listBySkill(skillId).stream()
-                .filter(d -> RuleDomain.STATUS_ACTIVE.equals(d.getStatus())
-                        || RuleDomain.STATUS_DRAFT.equals(d.getStatus()))
+                .filter(d -> !RuleDomain.STATUS_FAILED.equals(d.getStatus()))
                 .toList();
         for (RuleDomain d : rules) {
             try {

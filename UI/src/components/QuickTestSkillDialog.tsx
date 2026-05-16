@@ -6,21 +6,26 @@ import { Play, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   extractBpmnVariables,
+  classifyVariables,
   unionVariables,
   defaultForVar,
-  looksMultiline,
   coerce,
+  type BpmnVarRef,
 } from "@/lib/bpmnVariables";
+import { FieldGroup } from "@/components/QuickTestRuleDialog";
+import { AlertTriangle } from "lucide-react";
 
 interface RuleRef {
   id: string;
   ruleName?: string | null;
   intentLabel: string;
+  status?: string;
 }
 
 interface RuleDomainDetail {
   id: string;
   bpmnXml: string;
+  status?: string;
 }
 
 interface PerRuleResult {
@@ -69,6 +74,33 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
     const perRule = detailQueries.map((q) => extractBpmnVariables(q.data?.bpmnXml));
     return unionVariables(perRule);
   }, [allLoaded, detailQueries]);
+
+  // Classify the union. A variable is "required" if it's referenced by
+  // the FIRST tool's inputBindings in ANY rule — that's the user-provided
+  // identifier (e.g. orderId). Everything else is suspect.
+  const { required, suspect } = useMemo(() => {
+    if (!allLoaded) return { required: [] as BpmnVarRef[], suspect: [] as BpmnVarRef[] };
+    const reqUnion = new Set<string>();
+    for (const q of detailQueries) {
+      const xml = q.data?.bpmnXml;
+      if (!xml) continue;
+      const localVars = extractBpmnVariables(xml);
+      const { required: req } = classifyVariables(xml, localVars);
+      for (const v of req) reqUnion.add(v.name);
+    }
+    const required: BpmnVarRef[] = [];
+    const suspect: BpmnVarRef[] = [];
+    for (const v of inputVars) {
+      if (reqUnion.has(v.name)) required.push(v);
+      else suspect.push(v);
+    }
+    return { required, suspect };
+  }, [allLoaded, detailQueries, inputVars]);
+
+  const deprecatedCount = useMemo(
+    () => detailQueries.filter((q) => q.data?.status === "DEPRECATED").length,
+    [detailQueries],
+  );
 
   const [values, setValues] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -136,50 +168,45 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
           {!allLoaded && (
             <div className="text-sm text-gray-500">Loading rule BPMNs…</div>
           )}
-          {allLoaded && inputVars.length === 0 && (
-            <div className="text-sm text-gray-500">
-              No input variables were detected across the skill's rules. Click "Run" to execute
-              every rule with an empty input map.
+          {allLoaded && deprecatedCount > 0 && (
+            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-[12px] text-amber-900">
+              <div className="font-semibold flex items-center gap-1">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                {deprecatedCount} of {rules.length} rule
+                {rules.length === 1 ? "" : "s"} {deprecatedCount === 1 ? "is" : "are"} deprecated
+              </div>
+              <div className="mt-0.5">
+                Deprecated rules aren't routed at runtime, but admin tests still execute them
+                for validation.
+              </div>
             </div>
           )}
-          {allLoaded && inputVars.map((v) => (
-            <div key={v.name}>
-              <div className="flex items-baseline justify-between mb-0.5">
-                <label className="text-xs font-mono text-gray-800">{v.name}</label>
-                {v.usages.length > 0 && (
-                  <span
-                    className="text-[10px] text-gray-500 font-mono truncate ml-2 max-w-[60%]"
-                    title={v.usages.join("\n")}
-                  >
-                    used as: {v.usages[0]}
-                  </span>
-                )}
-              </div>
-              {looksMultiline(v.usages) ? (
-                <textarea
-                  value={values[v.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [v.name]: e.target.value }))
-                  }
-                  spellCheck={false}
-                  rows={3}
-                  className="w-full rounded border bg-gray-50 p-2 text-xs font-mono"
-                  placeholder="Scalar, JSON object, or JSON array"
-                />
-              ) : (
-                <input
-                  type="text"
-                  value={values[v.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [v.name]: e.target.value }))
-                  }
-                  spellCheck={false}
-                  className="w-full rounded border bg-gray-50 p-2 text-xs font-mono"
-                  placeholder="Scalar, or JSON for objects/arrays"
-                />
-              )}
+          {allLoaded && inputVars.length === 0 && (
+            <div className="text-sm text-gray-500">
+              No input variables were detected across the skill's rules. Click "Run all rules" to
+              execute every rule with an empty input map.
             </div>
-          ))}
+          )}
+          {allLoaded && required.length > 0 && (
+            <FieldGroup
+              title="Required inputs"
+              subtitle="Values the lookup tool of one or more rules consumes — same map is sent to every rule"
+              variant="required"
+              variables={required}
+              values={values}
+              onChange={(name, val) => setValues((prev) => ({ ...prev, [name]: val }))}
+            />
+          )}
+          {allLoaded && suspect.length > 0 && (
+            <FieldGroup
+              title="Likely compiler defect"
+              subtitle="These variables are referenced as bare ${vars} but should have been derived from a prior tool's response. Provide values to test, but the affected rules should be re-compiled."
+              variant="suspect"
+              variables={suspect}
+              values={values}
+              onChange={(name, val) => setValues((prev) => ({ ...prev, [name]: val }))}
+            />
+          )}
 
           {results && (
             <div className="mt-4 pt-3 border-t space-y-2">

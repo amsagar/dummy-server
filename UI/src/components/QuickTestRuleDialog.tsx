@@ -2,13 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { Button } from "@/components/ui/button";
-import { Play, X } from "lucide-react";
+import { Play, X, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import {
   extractBpmnVariables,
+  classifyVariables,
+  suspectHint,
   defaultForVar,
   looksMultiline,
   coerce,
+  type BpmnVarRef,
 } from "@/lib/bpmnVariables";
 
 interface Props {
@@ -20,6 +23,8 @@ interface Props {
 interface RuleDomainDetail {
   id: string;
   bpmnXml: string;
+  status?: string;
+  lastError?: string | null;
 }
 
 interface TestRunResult {
@@ -31,10 +36,11 @@ interface TestRunResult {
 }
 
 /**
- * Small modal-style dialog for running a single rule from the list page,
- * without navigating into the editor. The form is auto-derived from the
- * BPMN's referenced variables so the user doesn't have to know the input
- * shape.
+ * Single-rule quick-test dialog. Auto-generates a form from the BPMN's
+ * variable references and splits them into "required" (the values the
+ * lookup tool consumes — what users actually provide) and "suspect"
+ * (values the compiler should have derived from a prior tool's response
+ * but left as bare process variables).
  */
 export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
   const open = ruleId !== null;
@@ -46,6 +52,10 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
   });
 
   const inputVars = useMemo(() => extractBpmnVariables(detail?.bpmnXml), [detail]);
+  const { required, suspect } = useMemo(
+    () => classifyVariables(detail?.bpmnXml, inputVars),
+    [detail, inputVars],
+  );
 
   const [values, setValues] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -98,53 +108,40 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
         </div>
 
         <div className="p-4 overflow-y-auto space-y-3">
-          {!detail && (
-            <div className="text-sm text-gray-500">Loading rule…</div>
+          {detail?.status === "DEPRECATED" && (
+            <DeprecatedBanner lastError={detail.lastError} />
           )}
+          {!detail && <div className="text-sm text-gray-500">Loading rule…</div>}
           {detail && inputVars.length === 0 && (
             <div className="text-sm text-gray-500">
-              No input variables were detected in this rule's BPMN. Click "Run" to execute it with
-              an empty input map.
+              No input variables were detected in this rule's BPMN. Click "Run" to execute it
+              with an empty input map.
             </div>
           )}
-          {detail && inputVars.map((v) => (
-            <div key={v.name}>
-              <div className="flex items-baseline justify-between mb-0.5">
-                <label className="text-xs font-mono text-gray-800">{v.name}</label>
-                {v.usages.length > 0 && (
-                  <span
-                    className="text-[10px] text-gray-500 font-mono truncate ml-2 max-w-[60%]"
-                    title={v.usages.join("\n")}
-                  >
-                    used as: {v.usages[0]}
-                  </span>
-                )}
-              </div>
-              {looksMultiline(v.usages) ? (
-                <textarea
-                  value={values[v.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [v.name]: e.target.value }))
-                  }
-                  spellCheck={false}
-                  rows={3}
-                  className="w-full rounded border bg-gray-50 p-2 text-xs font-mono"
-                  placeholder="Scalar, JSON object, or JSON array"
-                />
-              ) : (
-                <input
-                  type="text"
-                  value={values[v.name] ?? ""}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [v.name]: e.target.value }))
-                  }
-                  spellCheck={false}
-                  className="w-full rounded border bg-gray-50 p-2 text-xs font-mono"
-                  placeholder="Scalar, or JSON for objects/arrays"
-                />
-              )}
-            </div>
-          ))}
+          {detail && required.length > 0 && (
+            <FieldGroup
+              title="Required inputs"
+              subtitle="Values the lookup tool consumes"
+              variant="required"
+              variables={required}
+              values={values}
+              onChange={(name, val) =>
+                setValues((prev) => ({ ...prev, [name]: val }))
+              }
+            />
+          )}
+          {detail && suspect.length > 0 && (
+            <FieldGroup
+              title="Likely compiler defect"
+              subtitle="These are referenced as bare ${vars} but should have been derived from a prior tool's response. Provide a value to test, but the rule should be re-compiled."
+              variant="suspect"
+              variables={suspect}
+              values={values}
+              onChange={(name, val) =>
+                setValues((prev) => ({ ...prev, [name]: val }))
+              }
+            />
+          )}
 
           {result && (
             <div className="mt-4 pt-3 border-t space-y-2">
@@ -191,6 +188,106 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Shared sub-components ────────────────────────────────────────────────
+
+export function DeprecatedBanner({ lastError }: { lastError?: string | null }) {
+  return (
+    <div className="rounded border border-amber-200 bg-amber-50 p-2 text-[12px] text-amber-900">
+      <div className="font-semibold flex items-center gap-1">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        Deprecated rule
+      </div>
+      <div className="mt-0.5">
+        This rule is no longer routed at runtime. Admin tests still execute it for validation.
+      </div>
+      {lastError && (
+        <div className="mt-0.5 text-[11px] font-mono text-amber-800">
+          Last error: {lastError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface FieldGroupProps {
+  title: string;
+  subtitle?: string;
+  variant: "required" | "suspect";
+  variables: BpmnVarRef[];
+  values: Record<string, string>;
+  onChange: (name: string, value: string) => void;
+}
+
+export function FieldGroup({
+  title,
+  subtitle,
+  variant,
+  variables,
+  values,
+  onChange,
+}: FieldGroupProps) {
+  const isSuspect = variant === "suspect";
+  return (
+    <div
+      className={`rounded border p-3 space-y-3 ${
+        isSuspect ? "border-orange-200 bg-orange-50/40" : "border-gray-200"
+      }`}
+    >
+      <div>
+        <div
+          className={`text-[11px] font-semibold uppercase tracking-wide ${
+            isSuspect ? "text-orange-800" : "text-gray-700"
+          }`}
+        >
+          {title}
+        </div>
+        {subtitle && (
+          <div className="text-[11px] text-gray-600 mt-0.5">{subtitle}</div>
+        )}
+      </div>
+      {variables.map((v) => (
+        <div key={v.name}>
+          <div className="flex items-baseline justify-between mb-0.5">
+            <label className="text-xs font-mono text-gray-800">{v.name}</label>
+            {v.usages.length > 0 && (
+              <span
+                className="text-[10px] text-gray-500 font-mono truncate ml-2 max-w-[60%]"
+                title={v.usages.join("\n")}
+              >
+                used as: {v.usages[0]}
+              </span>
+            )}
+          </div>
+          {looksMultiline(v.usages) ? (
+            <textarea
+              value={values[v.name] ?? ""}
+              onChange={(e) => onChange(v.name, e.target.value)}
+              spellCheck={false}
+              rows={3}
+              className="w-full rounded border bg-white p-2 text-xs font-mono"
+              placeholder="Scalar, JSON object, or JSON array"
+            />
+          ) : (
+            <input
+              type="text"
+              value={values[v.name] ?? ""}
+              onChange={(e) => onChange(v.name, e.target.value)}
+              spellCheck={false}
+              className="w-full rounded border bg-white p-2 text-xs font-mono"
+              placeholder="Scalar, or JSON for objects/arrays"
+            />
+          )}
+          {isSuspect && (
+            <div className="text-[11px] text-orange-700 mt-0.5">
+              {suspectHint(v.name)}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

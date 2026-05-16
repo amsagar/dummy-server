@@ -120,7 +120,17 @@ public class TraceBasedBpmnCompiler {
         xml = BpmnCompiler.injectErrorBoundaries(xml);
 
         bus.emit("rule_domain.compile.validating", Map.of("llmMs", llmMs, "ruleName", ruleName));
-        String error = bpmnCompiler.tryDeploy(xml, skillName, intentLabel);
+
+        // Structural pre-check: reject any bare ${X} reference where X
+        // isn't a user-provided identifier, an output of an earlier step,
+        // a delegate bean, or a FEEL function. This catches the
+        // "compiler left a literal as a bare input" failure mode that
+        // produces unusable rules like the old container-availability
+        // BPMN where ${zip} and ${orderType} should have been derived
+        // from ${order.*}.
+        String structuralError = validateInputDiscipline(xml);
+        String error = structuralError != null ? structuralError
+                : bpmnCompiler.tryDeploy(xml, skillName, intentLabel);
 
         long now = System.currentTimeMillis();
         String resultKey = manifestRule.effectiveResultKey();
@@ -200,6 +210,92 @@ public class TraceBasedBpmnCompiler {
         return req.call().content();
     }
 
+    // Bare ${X} references the compiler may legally introduce. Anything
+    // else is treated as a bug: the compiler should have derived the
+    // value from a prior tool's outputBinding, not invented a new input.
+    private static final java.util.Set<String> ALLOWED_BARE_INPUTS = java.util.Set.of(
+            "userMessage", "orderId", "customerId", "sessionId");
+
+    private static final java.util.Set<String> KNOWN_DELEGATES = java.util.Set.of(
+            "toolCallDelegate", "decisionTableDelegate", "feelExtractDelegate");
+
+    private static final java.util.Set<String> FEEL_FUNCTIONS = java.util.Set.of(
+            "now", "today", "date", "time", "duration", "string", "number", "boolean",
+            "size", "count", "sum", "min", "max", "abs", "floor", "ceiling", "round",
+            "concatenate", "contains", "starts_with", "ends_with", "matches",
+            "upper_case", "lower_case", "substring", "split", "list_contains", "not");
+
+    /**
+     * Walk the produced BPMN and reject it if it references any bare
+     * {@code ${X}} where {@code X} isn't in the allowlist, isn't a
+     * delegate bean, isn't an output of an earlier step in the same
+     * process, and isn't a FEEL function call. Returns {@code null} on
+     * success, or a human-readable error string when the BPMN should be
+     * rejected (the rule is then saved as FAILED with this string in
+     * {@code lastError}).
+     *
+     * <p>This is the structural check that catches the
+     * "${zip}, ${orderType}, ${actualSequence} are bare inputs but
+     * should have been derived from ${order.*}" failure mode that
+     * produced unusable container-availability / leg-sequence rules in
+     * the first trace-compile attempt.
+     */
+    static String validateInputDiscipline(String bpmnXml) {
+        if (bpmnXml == null) return null;
+        java.util.Set<String> outputs = new java.util.HashSet<>();
+        // outputBinding values — `<flowable:field name="outputBinding"><flowable:string>X</flowable:string></flowable:field>`
+        java.util.regex.Matcher om = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"outputBinding\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (om.find()) {
+            String name = om.group(1).trim();
+            if (name.matches("[A-Za-z_][A-Za-z0-9_]*")) outputs.add(name);
+        }
+        // multi-instance loop element variable
+        java.util.regex.Matcher mi = java.util.regex.Pattern.compile(
+                "flowable:elementVariable\\s*=\\s*\"([^\"]+)\"").matcher(bpmnXml);
+        while (mi.find()) outputs.add(mi.group(1).trim());
+
+        // Walk every ${...} body and look at the LEADING identifier of
+        // each comma/paren/operator-separated fragment.
+        java.util.Map<String, String> firstBadUsage = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher em = java.util.regex.Pattern.compile("[$#]\\{([^}]+)\\}").matcher(bpmnXml);
+        while (em.find()) {
+            String body = em.group(1).trim();
+            for (String frag : body.split("[(),\\s+\\-*/&|=!<>?:]+")) {
+                if (frag.isEmpty()) continue;
+                java.util.regex.Matcher idm = java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*").matcher(frag);
+                if (!idm.find()) continue;
+                String lead = idm.group();
+                if (lead.startsWith("_")) continue;
+                if (FEEL_FUNCTIONS.contains(lead)) continue;
+                if (KNOWN_DELEGATES.contains(lead)) continue;
+                if (ALLOWED_BARE_INPUTS.contains(lead)) continue;
+                if (outputs.contains(lead)) continue;
+                if ("true".equals(lead) || "false".equals(lead) || "null".equals(lead)) continue;
+                // It's a bare reference to something we can't explain.
+                // We only flag it as "bare" when the fragment itself is
+                // just the identifier (no `.field` or `[idx]` access).
+                if (frag.equals(lead)) {
+                    firstBadUsage.putIfAbsent(lead, body);
+                }
+            }
+        }
+        if (firstBadUsage.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN references bare process variable(s) the compiler "
+                + "should have derived from a prior tool's response:");
+        for (var e : firstBadUsage.entrySet()) {
+            msg.append("\n  - ").append(e.getKey())
+                    .append(" (used as ${").append(e.getValue()).append("})");
+        }
+        msg.append("\nFix: derive these from an earlier outputBinding variable ")
+                .append("(e.g. ${order.<path>}) or via a feelExtractDelegate step. ")
+                .append("Allowed bare inputs: ").append(ALLOWED_BARE_INPUTS).append(".");
+        return msg.toString();
+    }
+
     private static String traceSystemPrompt() {
         return """
                 You are converting a recorded execution trace into a parameterized BPMN 2.0
@@ -218,15 +314,36 @@ public class TraceBasedBpmnCompiler {
                    tasks using flowable:delegateExpression and the deploy will fail.
                 4. Reference field paths EXACTLY as they appear in the response samples below.
                    Do not invent fields. If you can't find a path in the sample, don't use it.
-                5. Replace observed literal values with process variables:
-                     - Long numeric ids → orderId, customerId, etc.
-                     - Date/time literals → today() or a process variable
-                     - String literals that came from the user → keep templated
-                6. When the trace shows N structurally-identical calls (same tool, varying only
+                5. *** INPUT VARIABLE DISCIPLINE — STRICT ***
+                   The ONLY process variables you may reference as bare ${X} (without a
+                   `.field` or `[i]` access path) are these "user-provided identifiers":
+                       userMessage, orderId, customerId, sessionId
+                   Every other value you need MUST be expressed as `${name.path}` where
+                   `name` is a variable already written by an earlier service task's
+                   outputBinding in the SAME process. For example: prefer
+                   `${order.Lines[0].DeliveryAddress.PostalCode}` over `${zip}`.
+                   If a value cannot be derived from any prior tool's response, you must
+                   either:
+                     (a) introduce a `feelExtractDelegate` service task earlier that
+                         computes it from existing variables, OR
+                     (b) use a literal constant from the trace verbatim (do NOT invent a
+                         new input variable for it).
+                   Bare ${X} references to anything outside the allowlist above will be
+                   rejected by the post-compile validator and the rule will fail.
+                6. Replace observed literal values with process variables FROM EARLIER
+                   STEPS — not new inputs:
+                     - Long numeric ids that match the user message → ${orderId}.
+                     - Date/time literals → today() or now() (FEEL functions).
+                     - Any other value present in a prior tool's response → derive it
+                       via a path expression on that response's outputBinding name.
+                     - String literals that don't appear anywhere else → keep verbatim.
+                7. When the trace shows N structurally-identical calls (same tool, varying only
                    in per-item fields), fold into a multi-instance subprocess over the
-                   driving list.
-                7. Do NOT emit <bpmn:boundaryEvent> for tool failures — they're auto-injected.
-                8. Emit a final t_assemble step that builds a single "result" variable shaped
+                   driving list. The driving list MUST be built from an earlier outputBinding
+                   variable (e.g. via a feelExtractDelegate FEEL expression) — never as a
+                   bare input.
+                8. Do NOT emit <bpmn:boundaryEvent> for tool failures — they're auto-injected.
+                9. Emit a final t_assemble step that builds a single "result" variable shaped
                    per the rule's purpose. The orchestrator merges per-rule results into the
                    composite outcome by the rule's result_key.
 
@@ -284,9 +401,13 @@ public class TraceBasedBpmnCompiler {
         }
 
         sb.append("\n## Process variables available to your BPMN\n");
+        sb.append("Allowed bare ${X} references (these are the user-provided identifiers):\n");
         sb.append("  - userMessage (raw user text)\n");
         sb.append("  - orderId (best-effort numeric extract from user message)\n");
-        sb.append("  - Any variable you bind via outputBinding on an earlier step\n\n");
+        sb.append("  - customerId, sessionId (if applicable)\n");
+        sb.append("\nAll OTHER values must be derived via path expressions like\n");
+        sb.append("`${order.Lines[0].DeliveryAddress.PostalCode}` from variables written by\n");
+        sb.append("an earlier step's outputBinding. Do NOT invent new bare inputs.\n\n");
 
         sb.append("## Result\n");
         sb.append("Emit a t_assemble step at the end that builds a `result` variable. ");

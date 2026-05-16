@@ -213,6 +213,83 @@ export function coerce(raw: string): unknown {
   return raw;
 }
 
+/**
+ * Classify discovered input variables into two buckets:
+ *  - `required`: the variable(s) bound to the FIRST tool's inputBindings
+ *    (the "lookup" tool — e.g. `Get_OrderID` consumes `${orderId}` as
+ *    `ORD_ID`). These are the values a user actually has to provide.
+ *  - `suspect`: every other discovered input. These *should* have been
+ *    derived from a prior tool's output by the compiler; their presence
+ *    almost always means the trace-compiler left a literal as a bare
+ *    process variable instead of templating it from `order.<path>`.
+ *
+ * The classification is best-effort and heuristic. It only fires when we
+ * can find the BPMN's first service task — otherwise everything falls
+ * back to `required`, matching today's behavior.
+ */
+export interface ClassifiedVars {
+  required: BpmnVarRef[];
+  suspect: BpmnVarRef[];
+}
+
+export function classifyVariables(
+  bpmnXml: string | null | undefined,
+  vars: BpmnVarRef[],
+): ClassifiedVars {
+  if (!bpmnXml || vars.length === 0) return { required: vars, suspect: [] };
+  const firstToolInputs = firstServiceTaskInputs(bpmnXml);
+  if (firstToolInputs.size === 0) return { required: vars, suspect: [] };
+
+  const required: BpmnVarRef[] = [];
+  const suspect: BpmnVarRef[] = [];
+  for (const v of vars) {
+    if (firstToolInputs.has(v.name)) required.push(v);
+    else suspect.push(v);
+  }
+  return { required, suspect };
+}
+
+// Find every ${var} referenced inside the inputBindings of the BPMN's
+// first service task. We don't bother parsing the DAG — the source order
+// of <serviceTask> elements matches topological order for the compiler's
+// straight-pipeline output.
+function firstServiceTaskInputs(bpmnXml: string): Set<string> {
+  const out = new Set<string>();
+  const taskRe = /<serviceTask\b[\s\S]*?<\/serviceTask>/;
+  const taskMatch = bpmnXml.match(taskRe);
+  if (!taskMatch) return out;
+  const taskBlock = taskMatch[0];
+  const bindingsRe =
+    /<flowable:field\s+name\s*=\s*"inputBindings"[^>]*>\s*<flowable:string>([\s\S]*?)<\/flowable:string>/;
+  const bm = taskBlock.match(bindingsRe);
+  if (!bm) return out;
+  const body = bm[1].replace(/<!\[CDATA\[|\]\]>/g, "");
+  const exprRe = /[$#]\{([^}]+)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = exprRe.exec(body)) !== null) {
+    const ident = m[1].trim().match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (ident) out.add(ident[0]);
+  }
+  return out;
+}
+
+/** A friendly hint for a suspect variable — speculate where the compiler
+ *  probably should have pulled it from. Best-effort: we don't know the
+ *  real `order` shape, but the suggestion at least nudges the operator. */
+export function suspectHint(name: string): string {
+  const n = name.toLowerCase();
+  if (n === "zip" || n === "postalcode") {
+    return "Likely should be derived from `order.Lines[0].DeliveryAddress.PostalCode` or similar.";
+  }
+  if (n === "ordertype") {
+    return "Likely should be derived from `order.orderType` (compiler left it as a bare input).";
+  }
+  if (n === "actualsequence" || n.endsWith("sequence")) {
+    return "Likely should be derived from `order.Lines` via a FEEL expression — not a user input.";
+  }
+  return "Likely should be derived from a prior tool's response — compiler may have left it bare.";
+}
+
 /** Union the variable lists of N rules, deduping by name and concatenating
  *  usages so the `used as:` hint shows every place the variable appears. */
 export function unionVariables(perRule: BpmnVarRef[][]): BpmnVarRef[] {
