@@ -58,6 +58,8 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
   );
 
   const [values, setValues] = useState<Record<string, string>>({});
+  // Stable signature so editing a field doesn't trigger the reset effect.
+  const inputVarsKey = useMemo(() => inputVars.map((v) => v.name).join("|"), [inputVars]);
   useEffect(() => {
     if (!open) {
       setValues({});
@@ -65,7 +67,8 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
       return;
     }
     setValues(Object.fromEntries(inputVars.map((v) => [v.name, defaultForVar(v)])));
-  }, [open, inputVars]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, inputVarsKey]);
 
   const [result, setResult] = useState<TestRunResult | null>(null);
 

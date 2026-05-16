@@ -103,6 +103,11 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
   );
 
   const [values, setValues] = useState<Record<string, string>>({});
+  // Use a stable string signature (joined names) instead of the inputVars
+  // array reference. useQueries returns a new array on every render, so
+  // inputVars also gets a new ref every render — depending on it directly
+  // would re-run this effect every render and wipe the user's edits.
+  const inputVarsKey = useMemo(() => inputVars.map((v) => v.name).join("|"), [inputVars]);
   useEffect(() => {
     if (!open) {
       setValues({});
@@ -110,7 +115,10 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
       return;
     }
     setValues(Object.fromEntries(inputVars.map((v) => [v.name, defaultForVar(v)])));
-  }, [open, inputVars]);
+    // inputVars intentionally read at effect-time; the trigger is the
+    // stable name signature, not the array reference.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, inputVarsKey]);
 
   const [results, setResults] = useState<{
     ruleCount: number;
