@@ -37,7 +37,8 @@ public class BpmnTraceListenerRegistrar {
         runtimeService.addEventListener(listener,
                 FlowableEngineEventType.ACTIVITY_STARTED,
                 FlowableEngineEventType.ACTIVITY_COMPLETED,
-                FlowableEngineEventType.ACTIVITY_CANCELLED);
+                FlowableEngineEventType.ACTIVITY_CANCELLED,
+                FlowableEngineEventType.MULTI_INSTANCE_ACTIVITY_COMPLETED);
         log.info("[BpmnTraceListenerRegistrar] registered BpmnTraceListener on Flowable RuntimeService");
     }
 }

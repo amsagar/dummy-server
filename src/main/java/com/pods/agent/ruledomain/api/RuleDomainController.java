@@ -194,7 +194,80 @@ public class RuleDomainController {
         response.put("latencyMs", outcome.latencyMs());
         response.put("flowableProcId", outcome.flowableProcId());
         response.put("executionId", executionId);
+        response.put("diagnostics", computeRunDiagnostics(domain.getBpmnXml(), outcome.outputs()));
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Inspect the BPMN + the run's outputs to surface conditions that
+     * succeeded structurally but produced no items — typically a
+     * multi-instance subprocess whose driving filter matched zero
+     * elements. Distinguishing "filter matched nothing legitimately"
+     * from "filter is wrong / data didn't flow" is otherwise impossible
+     * for the test panel user.
+     */
+    private List<Map<String, Object>> computeRunDiagnostics(String bpmnXml, Map<String, Object> outputs) {
+        List<Map<String, Object>> notes = new java.util.ArrayList<>();
+        if (bpmnXml == null || bpmnXml.isBlank()) return notes;
+
+        // Find every multi-instance subprocess: its id, its driving
+        // collection variable name, and its aggregation target name.
+        java.util.regex.Matcher spRe = java.util.regex.Pattern.compile(
+                "<subProcess\\b[^>]*\\bid\\s*=\\s*\"([^\"]+)\"[^>]*>[\\s\\S]*?<multiInstanceLoopCharacteristics\\b[^>]*"
+                + "\\bflowable:collection\\s*=\\s*\"[$#]\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\""
+                + "[\\s\\S]*?<flowable:variableAggregation\\b[^>]*\\btarget\\s*=\\s*\"([^\"]+)\"",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (spRe.find()) {
+            String subprocessId = spRe.group(1);
+            String collectionVar = spRe.group(2);
+            String aggTarget = spRe.group(3);
+            // Find an empty list in outputs that likely corresponds to
+            // this aggregation. Search the outputs JSON recursively for
+            // any empty array under any key (the assemble step typically
+            // renames the aggregation target to a user-facing key, so we
+            // can't always match by name).
+            String emptyAt = findFirstEmptyArrayPath(outputs);
+            if (emptyAt != null) {
+                Map<String, Object> note = new LinkedHashMap<>();
+                note.put("type", "subprocess_zero_iterations");
+                note.put("subprocessId", subprocessId);
+                note.put("collectionVar", collectionVar);
+                note.put("aggregationTarget", aggTarget);
+                note.put("emptyOutputPath", emptyAt);
+                note.put("message", "Subprocess `" + subprocessId + "` had a multi-instance loop over "
+                        + "collection `" + collectionVar + "`. The collection resolved to an empty list, "
+                        + "so the subprocess ran 0 iterations. Check whether the upstream FEEL filter "
+                        + "binding `" + collectionVar + "` was supposed to match items for this order.");
+                notes.add(note);
+            }
+        }
+        return notes;
+    }
+
+    /** Recursively scan a map/list/scalar structure for the first empty
+     *  array and return its dotted path. Used to associate an empty
+     *  output array with a multi-instance subprocess diagnostic. */
+    @SuppressWarnings("unchecked")
+    private static String findFirstEmptyArrayPath(Object value) {
+        return findFirstEmptyArrayPath(value, "");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String findFirstEmptyArrayPath(Object value, String prefix) {
+        if (value == null) return null;
+        if (value instanceof java.util.List<?> l) {
+            if (l.isEmpty()) return prefix.isEmpty() ? "(root)" : prefix;
+            return null;
+        }
+        if (value instanceof Map<?, ?> m) {
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                String key = String.valueOf(e.getKey());
+                String childPath = prefix.isEmpty() ? key : prefix + "." + key;
+                String found = findFirstEmptyArrayPath(e.getValue(), childPath);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /**
@@ -482,6 +555,7 @@ public class RuleDomainController {
                 r.put("outputs", outcome.outputs());
                 r.put("latencyMs", outcome.latencyMs());
                 r.put("flowableProcId", outcome.flowableProcId());
+                r.put("diagnostics", computeRunDiagnostics(d.getBpmnXml(), outcome.outputs()));
                 results.add(r);
             } catch (Exception ex) {
                 Map<String, Object> r = new LinkedHashMap<>();

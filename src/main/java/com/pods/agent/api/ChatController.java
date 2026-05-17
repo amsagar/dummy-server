@@ -90,7 +90,11 @@ public class ChatController {
             // Option B: skill manifest auto-derivation from prose + trace.
             "rule_domain.manifest_derivation.start",
             "rule_domain.manifest_derivation.failed",
-            "rule_domain.manifest_derived"
+            "rule_domain.manifest_derived",
+            // Multi-instance subprocess that ran 0 iterations — useful to
+            // distinguish "filter matched nothing" from "result lost in
+            // aggregation" in the test panel.
+            "rule_domain.subprocess.skipped"
     );
 
     private final ChatService chatService;

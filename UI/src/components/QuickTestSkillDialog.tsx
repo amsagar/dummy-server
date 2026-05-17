@@ -28,6 +28,15 @@ interface RuleDomainDetail {
   status?: string;
 }
 
+interface PerRuleDiagnostic {
+  type?: string;
+  subprocessId?: string;
+  collectionVar?: string;
+  aggregationTarget?: string;
+  emptyOutputPath?: string;
+  message?: string;
+}
+
 interface PerRuleResult {
   ruleId: string;
   ruleName?: string;
@@ -35,6 +44,7 @@ interface PerRuleResult {
   error?: string | null;
   outputs?: Record<string, unknown> | null;
   latencyMs?: number | null;
+  diagnostics?: PerRuleDiagnostic[] | null;
 }
 
 interface Props {
@@ -250,6 +260,25 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
                     <pre className="text-[11px] bg-white border rounded p-2 overflow-x-auto max-h-40">
                       {JSON.stringify(r.outputs, null, 2)}
                     </pre>
+                  )}
+                  {r.diagnostics && r.diagnostics.length > 0 && (
+                    <div className="space-y-1 mt-1">
+                      {r.diagnostics.map((d, idx) => (
+                        <div
+                          key={idx}
+                          className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2"
+                        >
+                          {d.message ?? d.type ?? "diagnostic"}
+                          {d.collectionVar && (
+                            <div className="font-mono text-[10px] text-amber-700 mt-0.5">
+                              collection: <code>{d.collectionVar}</code>
+                              {d.subprocessId && <> · subprocess: <code>{d.subprocessId}</code></>}
+                              {d.emptyOutputPath && <> · empty at: <code>{d.emptyOutputPath}</code></>}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               ))}

@@ -222,6 +222,8 @@ public class AgenticTraceCompiler {
             if (err == null) err = validateBoundVariableReferences(cleaned);
             if (err == null) err = validateFeelLiteralSyntax(cleaned);
             if (err == null) err = validateMultiInstanceCollectionFilter(cleaned);
+            if (err == null) err = validateAggregationUnwrap(cleaned);
+            if (err == null) err = validateFeelPathsExistInTrace(cleaned, slice);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -847,6 +849,277 @@ public class AgenticTraceCompiler {
                 else if ("feelExpr".equals(which)) feelExpr = value;
             }
             if (var.equals(binding) && feelExpr != null) return feelExpr;
+        }
+        return null;
+    }
+
+    /**
+     * For every multi-instance subprocess with a {@code variableAggregation},
+     * verify the aggregation target variable is properly unwrapped wherever
+     * it's referenced in a feelExpr.
+     *
+     * <p>Flowable wraps each iteration's value under the {@code source}
+     * variable name: a subprocess that writes {@code _legResult = {…}} per
+     * iteration produces a target list shaped like
+     * {@code [{_legResult: {…}}, {_legResult: {…}}, …]}, NOT a flat
+     * {@code [{…}, {…}]}. Assemble steps that reference the target without
+     * the {@code for r in X return r._sourceVar} unwrap produce arrays of
+     * effectively-empty objects (Jackson hides the underscore-prefixed
+     * field).
+     *
+     * <p>This validator rejects any feelExpr that references the target
+     * without unwrapping it. Allowed reference patterns:
+     * <ul>
+     *   <li>{@code for r in X return r.Y …} (the canonical unwrap)</li>
+     *   <li>{@code count(X)} / {@code size(X)} (length, no value access)</li>
+     *   <li>{@code if X = null …} or {@code X = null} (null check)</li>
+     *   <li>{@code if … = null then [] else for r in X return r.Y …}</li>
+     * </ul>
+     */
+    static String validateAggregationUnwrap(String bpmnXml) {
+        if (bpmnXml == null) return null;
+
+        // 1. Find every (target, source) aggregation pair.
+        java.util.Map<String, String> aggPairs = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher aggRe = java.util.regex.Pattern.compile(
+                "<flowable:variableAggregation\\b[^>]*\\btarget\\s*=\\s*\"([^\"]+)\"[^>]*>"
+                + "\\s*<variable\\b[^>]*\\bsource\\s*=\\s*\"([^\"]+)\"[^/>]*/?>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (aggRe.find()) {
+            aggPairs.put(aggRe.group(1).trim(), aggRe.group(2).trim());
+        }
+        if (aggPairs.isEmpty()) return null;
+
+        // 2. For every feelExpr body, check references to each target.
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        java.util.regex.Matcher feelRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"feelExpr\"[^>]*>"
+                + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (feelRe.find()) {
+            String body = feelRe.group(1).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
+            for (var entry : aggPairs.entrySet()) {
+                String target = entry.getKey();
+                String source = entry.getValue();
+                String issue = checkAggregationRefs(body, target, source);
+                if (issue != null) problems.add(issue);
+            }
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN references variableAggregation target(s) without unwrapping. "
+                + "Flowable wraps each iteration's result under the source variable name, so a "
+                + "target with source `Y` is shaped `[{Y:val}, {Y:val}, …]` — accessing it "
+                + "directly serializes to empty objects.\n");
+        for (String p : problems) msg.append("  - ").append(p).append("\n");
+        msg.append("Fix: change every bare reference to `target` into "
+                + "`for r in target return r.source` (or `r.source.<field>` to project).");
+        return msg.toString();
+    }
+
+    /** True if the body legitimately handles the target via unwrap or a
+     *  length/null-check only. Returns the issue string for the first
+     *  bare-reference problem, else null. */
+    private static String checkAggregationRefs(String body, String target, String source) {
+        // Find every occurrence of `target` as a whole identifier in the body.
+        java.util.regex.Matcher refRe = java.util.regex.Pattern.compile(
+                "(?<![A-Za-z0-9_])" + java.util.regex.Pattern.quote(target) + "(?![A-Za-z0-9_])")
+                .matcher(body);
+        while (refRe.find()) {
+            int idx = refRe.start();
+            // Look at a generous window around this reference to classify it.
+            int from = Math.max(0, idx - 80);
+            int to = Math.min(body.length(), refRe.end() + 80);
+            String ctx = body.substring(from, to);
+
+            // Pattern 1: `for r in target return r.source …` — canonical unwrap.
+            java.util.regex.Pattern unwrap = java.util.regex.Pattern.compile(
+                    "for\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+" + java.util.regex.Pattern.quote(target)
+                            + "\\s+return\\s+\\1\\." + java.util.regex.Pattern.quote(source) + "\\b");
+            if (unwrap.matcher(ctx).find()) continue;
+
+            // Pattern 2: `count(target)` / `size(target)` / `length(target)`.
+            java.util.regex.Pattern len = java.util.regex.Pattern.compile(
+                    "(?:count|size|length)\\s*\\(\\s*" + java.util.regex.Pattern.quote(target) + "\\s*\\)");
+            if (len.matcher(ctx).find()) continue;
+
+            // Pattern 3: null check — `target = null` or `target != null`.
+            java.util.regex.Pattern nullChk = java.util.regex.Pattern.compile(
+                    java.util.regex.Pattern.quote(target) + "\\s*(?:=|!=)\\s*null");
+            if (nullChk.matcher(ctx).find()) continue;
+
+            // Bare reference. Report.
+            String snippet = body.substring(from, to).replaceAll("\\s+", " ").trim();
+            return "target `" + target + "` (source `" + source + "`) referenced without unwrap "
+                    + "near: ‹" + snippet + "›";
+        }
+        return null;
+    }
+
+    /**
+     * Reject FEEL paths that reference fields not present in any recorded
+     * trace response (or in any earlier outputBinding's value shape).
+     *
+     * <p>Catches the {@code order.OrderType} class of error — the LLM
+     * picks a similar-named field from the wrong variable. By walking
+     * the recorded JSON schema, we can tell whether a path actually
+     * resolves to something the runtime will find.
+     *
+     * <p>Build a schema map: for each known output-binding variable name
+     * (and for each tool step), record the set of field names that appear
+     * at each depth. Then for every FEEL access path in the BPMN starting
+     * with one of those variable names, walk the schema and reject when
+     * the path leaves the schema.
+     *
+     * <p>Conservative: missing field at depth N flags only when the path
+     * is unambiguous (no list-index, filter, or function call). Paths
+     * containing `[…]` or `(…)` are skipped because the LLM may be doing
+     * dynamic filtering whose result shape we can't statically determine.
+     */
+    static String validateFeelPathsExistInTrace(String bpmnXml, ExecutionTrace slice) {
+        if (bpmnXml == null || slice == null) return null;
+
+        // 1. Build a schema map: varName → set of dotted-path field names
+        //    that appear under that variable.
+        java.util.Map<String, java.util.Set<String>> schemaByVar = new java.util.LinkedHashMap<>();
+        for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+            if (step.output() == null) continue;
+            // The LLM binds the response to whatever outputBinding name the
+            // BPMN declares. We don't always know that mapping from here,
+            // so we register the schema under every plausible name: the
+            // tool name itself, and the common conventional names. The
+            // validator only fires when a path is unambiguously wrong.
+            // To keep things simple, we register under a single key:
+            // the BPMN's outputBinding for the matching tool name.
+            // — But we can also walk the BPMN to find the outputBinding map.
+        }
+
+        java.util.Map<String, String> outputBindingByTool = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher tm = java.util.regex.Pattern.compile(
+                "<serviceTask\\b[^>]*flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*toolCallDelegate\\s*\\}\\s*\"[\\s\\S]*?</serviceTask>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (tm.find()) {
+            String taskBlock = tm.group();
+            String toolName = null;
+            String outputBinding = null;
+            java.util.regex.Matcher fm = java.util.regex.Pattern.compile(
+                    "<flowable:field\\s+name\\s*=\\s*\"(toolName|outputBinding)\"[^>]*>"
+                    + "\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
+                    java.util.regex.Pattern.DOTALL).matcher(taskBlock);
+            while (fm.find()) {
+                String which = fm.group(1);
+                String val = fm.group(2).trim();
+                if ("toolName".equals(which)) toolName = val;
+                else if ("outputBinding".equals(which)) outputBinding = val;
+            }
+            if (toolName != null && outputBinding != null) {
+                outputBindingByTool.put(toolName, outputBinding);
+            }
+        }
+
+        // Populate schemaByVar using outputBinding mapping.
+        for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+            if (step.name() == null || step.output() == null) continue;
+            String var = outputBindingByTool.get(step.name());
+            if (var == null) continue;
+            java.util.Set<String> fields = schemaByVar.computeIfAbsent(var, k -> new java.util.LinkedHashSet<>());
+            collectFieldPaths(step.output(), "", fields, 4 /* maxDepth */);
+        }
+        if (schemaByVar.isEmpty()) return null;
+
+        // 2. Walk every FEEL body in the BPMN. Extract access paths and
+        //    check each against the schema.
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        java.util.regex.Matcher feelRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(?:feelExpr|argTemplate|inputsTemplate|postTransform)\"[^>]*>"
+                + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (feelRe.find()) {
+            String body = feelRe.group(1).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
+            // Extract `varName.field1.field2` access paths (no [], no ()).
+            java.util.regex.Matcher pathRe = java.util.regex.Pattern.compile(
+                    "\\b([A-Za-z_][A-Za-z0-9_]*)((?:\\.[A-Za-z_][A-Za-z0-9_]*)+)").matcher(body);
+            while (pathRe.find()) {
+                String varName = pathRe.group(1);
+                if (!schemaByVar.containsKey(varName)) continue; // not an output var we know about
+                // Skip if path immediately follows a `for X in ` (loop var, not the output var).
+                int matchStart = pathRe.start();
+                String preceding = body.substring(Math.max(0, matchStart - 30), matchStart);
+                if (preceding.matches(".*\\bfor\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\s+\\b" + java.util.regex.Pattern.quote(varName) + "\\s*$")) continue;
+                // Skip if next char is `[` or `(` (filter/index/call — dynamic).
+                int matchEnd = pathRe.end();
+                if (matchEnd < body.length()) {
+                    char next = body.charAt(matchEnd);
+                    if (next == '[' || next == '(') continue;
+                }
+
+                String fieldPath = pathRe.group(2).substring(1); // strip leading dot
+                java.util.Set<String> known = schemaByVar.get(varName);
+                if (known.contains(fieldPath)) continue;
+                // Path doesn't exist. Build a suggestion if a sibling does.
+                String suggestion = suggestSimilarPath(varName, fieldPath, schemaByVar);
+                String problem = "`" + varName + "." + fieldPath + "` does not exist in the recorded `"
+                        + varName + "` response.";
+                if (suggestion != null) problem += " Did you mean `" + suggestion + "`?";
+                if (!problems.contains(problem)) problems.add(problem);
+            }
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN references FEEL paths that don't exist in any recorded trace "
+                + "response. The runtime will resolve them to null, producing wrong output:\n");
+        for (String p : problems) msg.append("  - ").append(p).append("\n");
+        msg.append("Fix: re-read the trace `*.output.json` files and use only paths that actually "
+                + "appear there. If you need a value from a different earlier step, change the "
+                + "variable name in the path (e.g. `legSequenceResult.outputs.X` instead of `order.X`).");
+        return msg.toString();
+    }
+
+    /** Walk a JsonNode and collect every dotted field path (relative to
+     *  the root) up to {@code maxDepth} levels. Arrays are walked but
+     *  array indices are dropped from the path — we record only "Lines"
+     *  rather than "Lines[0]" since FEEL queries use field names. */
+    private static void collectFieldPaths(JsonNode node, String prefix,
+                                          java.util.Set<String> into, int maxDepth) {
+        if (node == null || node.isNull() || maxDepth < 0) return;
+        if (node.isObject()) {
+            for (String name : node.propertyNames()) {
+                String path = prefix.isEmpty() ? name : prefix + "." + name;
+                into.add(path);
+                JsonNode child = node.get(name);
+                if (child != null && (child.isObject() || child.isArray())) {
+                    collectFieldPaths(child, path, into, maxDepth - 1);
+                }
+            }
+        } else if (node.isArray()) {
+            // For arrays of objects, descend into the FIRST element to
+            // record the per-item field names under the same prefix
+            // (FEEL filter syntax: `Lines[X = …].Field` not `Lines[0].Field`).
+            if (node.size() > 0) {
+                JsonNode first = node.get(0);
+                if (first != null && (first.isObject() || first.isArray())) {
+                    collectFieldPaths(first, prefix, into, maxDepth - 1);
+                }
+            }
+        }
+    }
+
+    /** Best-effort suggestion: find any path in any schema map entry that
+     *  ends with the same final-segment name as the missing field. */
+    private static String suggestSimilarPath(String wrongVar, String wrongPath,
+                                             java.util.Map<String, java.util.Set<String>> schemaByVar) {
+        String wantedTail = wrongPath.contains(".") ? wrongPath.substring(wrongPath.lastIndexOf('.') + 1) : wrongPath;
+        if (wantedTail.length() < 3) return null; // too short to disambiguate
+        String lowered = wantedTail.toLowerCase(java.util.Locale.ROOT);
+        for (var entry : schemaByVar.entrySet()) {
+            for (String path : entry.getValue()) {
+                String tail = path.contains(".") ? path.substring(path.lastIndexOf('.') + 1) : path;
+                if (tail.equalsIgnoreCase(wantedTail) || tail.toLowerCase(java.util.Locale.ROOT).contains(lowered)) {
+                    return entry.getKey() + "." + path;
+                }
+            }
         }
         return null;
     }

@@ -27,12 +27,22 @@ interface RuleDomainDetail {
   lastError?: string | null;
 }
 
+interface TestDiagnostic {
+  type?: string;
+  subprocessId?: string;
+  collectionVar?: string;
+  aggregationTarget?: string;
+  emptyOutputPath?: string;
+  message?: string;
+}
+
 interface TestRunResult {
   success: boolean;
   error?: string | null;
   outputs?: Record<string, unknown> | null;
   latencyMs?: number | null;
   executionId?: string | null;
+  diagnostics?: TestDiagnostic[] | null;
 }
 
 /**
@@ -171,6 +181,28 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
                 <pre className="text-[11px] bg-gray-50 border rounded p-2 overflow-x-auto max-h-48">
                   {JSON.stringify(result.outputs, null, 2)}
                 </pre>
+              )}
+              {result.diagnostics && result.diagnostics.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                    Diagnostics
+                  </div>
+                  {result.diagnostics.map((d, idx) => (
+                    <div
+                      key={idx}
+                      className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2"
+                    >
+                      {d.message ?? d.type ?? "diagnostic"}
+                      {d.collectionVar && (
+                        <div className="font-mono text-[10px] text-amber-700 mt-0.5">
+                          collection: <code>{d.collectionVar}</code>
+                          {d.subprocessId && <> · subprocess: <code>{d.subprocessId}</code></>}
+                          {d.emptyOutputPath && <> · empty at: <code>{d.emptyOutputPath}</code></>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}

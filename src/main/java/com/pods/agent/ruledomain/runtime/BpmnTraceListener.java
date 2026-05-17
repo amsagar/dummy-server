@@ -6,6 +6,7 @@ import org.flowable.common.engine.api.delegate.event.FlowableEngineEventType;
 import org.flowable.common.engine.api.delegate.event.FlowableEvent;
 import org.flowable.engine.RuntimeService;
 import org.flowable.engine.delegate.event.FlowableActivityEvent;
+import org.flowable.engine.delegate.event.FlowableMultiInstanceActivityCompletedEvent;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -39,6 +40,32 @@ public class BpmnTraceListener extends AbstractFlowableEventListener {
     public void onEvent(FlowableEvent event) {
         if (!(event instanceof FlowableActivityEvent ae)) return;
         FlowableEngineEventType type = (FlowableEngineEventType) event.getType();
+
+        // Multi-instance subprocess completed — if numberOfInstances is 0,
+        // the multi-instance "loop" ran zero iterations because its driving
+        // collection was empty. Emit a diagnostic so the test panel can
+        // distinguish "filter matched 0 items legitimately" from
+        // "filter matched items but they were lost in aggregation."
+        if (type == FlowableEngineEventType.MULTI_INSTANCE_ACTIVITY_COMPLETED
+                && event instanceof FlowableMultiInstanceActivityCompletedEvent mae) {
+            int total = mae.getNumberOfInstances();
+            if (total == 0) {
+                String turnId = lookupTurnId(ae.getProcessInstanceId());
+                if (turnId == null) return;
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("turnId", turnId);
+                payload.put("nodeId", ae.getActivityId());
+                payload.put("nodeName", ae.getActivityName());
+                payload.put("nodeType", ae.getActivityType());
+                payload.put("numberOfInstances", 0);
+                payload.put("reason",
+                        "multi-instance collection resolved to 0 items — the filter "
+                        + "binding this collection produced an empty list, so the "
+                        + "subprocess ran zero iterations.");
+                bus.emit("rule_domain.subprocess.skipped", payload);
+            }
+            return;
+        }
 
         String eventType;
         switch (type) {
