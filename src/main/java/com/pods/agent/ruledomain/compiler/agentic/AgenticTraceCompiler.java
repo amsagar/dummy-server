@@ -225,6 +225,7 @@ public class AgenticTraceCompiler {
             if (err == null) err = validateAggregationUnwrap(cleaned);
             if (err == null) err = validateFeelPathsExistInTrace(cleaned, slice);
             if (err == null) err = validateDecisionTableMatchedUsage(cleaned);
+            if (err == null) err = validateBindsResultVariable(cleaned, rule.effectiveResultKey());
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -989,6 +990,55 @@ public class AgenticTraceCompiler {
         return msg.toString();
     }
 
+    /**
+     * Reject a BPMN whose final assemble step binds to anything other
+     * than the process variable {@code result}. {@code BpmnRuntime}
+     * reads back exactly {@code result} (always lowercase) to assemble
+     * the outcome's outputs — if no service task binds it, the run
+     * fails at end-of-process with
+     * {@code "BPMN completed without writing the 'result' variable"}.
+     *
+     * <p>The LLM sometimes confuses the rule's {@code result_key} from
+     * manifest.json with the outputBinding name and writes
+     * {@code outputBinding=<resultKey>} instead of
+     * {@code outputBinding=result}. This validator catches that pre-deploy.
+     *
+     * <p>Approach: count outputBinding values across the BPMN. If none
+     * is exactly {@code result}, fail with a rewrite snippet shaped for
+     * this rule's {@code result_key}.
+     */
+    static String validateBindsResultVariable(String bpmnXml, String resultKey) {
+        if (bpmnXml == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"outputBinding\"[^>]*>"
+                + "\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        java.util.Set<String> bindings = new java.util.LinkedHashSet<>();
+        while (m.find()) bindings.add(m.group(1).trim());
+        if (bindings.contains("result")) return null;
+        String rk = resultKey == null || resultKey.isBlank() ? "<result_key>" : resultKey;
+        return ("Compiled BPMN has no service task that binds to the process variable `result`. "
+                + "The orchestrator reads `result` (always lowercase) to produce the rule's "
+                + "outcome — without it, every run reports \"BPMN completed without writing the "
+                + "'result' variable\" and the rule effectively fails at runtime.\n\n"
+                + "Observed outputBinding values: " + bindings + "\n\n"
+                + "Fix the final feelExtractDelegate's outputBinding:\n"
+                + "  - `outputBinding` MUST be `result` (always lowercase, no quotes around the key).\n"
+                + "  - `feelExpr` MUST be a JSON object whose KEY is the rule's `result_key` "
+                + "and whose VALUE is the assembled data. `result_key` for this rule is `"
+                + rk + "`, so the assemble step should look like:\n\n"
+                + "  <serviceTask id=\"t_assemble\" flowable:delegateExpression=\"${feelExtractDelegate}\">\n"
+                + "    <extensionElements>\n"
+                + "      <flowable:field name=\"feelExpr\">\n"
+                + "        <flowable:string><![CDATA[{ " + rk + ": <your assembled value> }]]></flowable:string>\n"
+                + "      </flowable:field>\n"
+                + "      <flowable:field name=\"outputBinding\">\n"
+                + "        <flowable:string><![CDATA[result]]></flowable:string>\n"
+                + "      </flowable:field>\n"
+                + "    </extensionElements>\n"
+                + "  </serviceTask>\n");
+    }
+
     static String validateAggregationUnwrap(String bpmnXml) {
         if (bpmnXml == null) return null;
 
@@ -1396,6 +1446,23 @@ public class AgenticTraceCompiler {
                 NOT `X = [{a:1}, {a:1}]`. To get a flat list of values in the assemble step,
                 unwrap with FEEL: `for r in X return r.y`. The validator can't catch a
                 missing unwrap, so the obligation is on you.
+
+                ### Final assemble — outputBinding MUST be `result`
+
+                The orchestrator reads the process variable literally named `result`
+                (always lowercase) to produce the rule's outcome. Your rule's
+                `result_key` from manifest.json is the KEY of the wrapping object you
+                produce inside `feelExpr` — NOT the outputBinding name. Pattern:
+
+                  feelExpr     →  `{ <result_key>: <assembled value> }`
+                  outputBinding →  `result`
+
+                Example for `result_key=serviceability`:
+                  feelExpr     →  `{ serviceability: for r in serviceabilityResults return r._legResult }`
+                  outputBinding →  `result`
+
+                If your final assemble binds to anything other than `result`, the
+                validator rejects the BPMN with a precise rewrite snippet.
 
                 ### Decision-table calls — use the native delegate, not toolCallDelegate
 
