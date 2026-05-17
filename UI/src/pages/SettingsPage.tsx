@@ -30,6 +30,7 @@ interface ModelRow {
   modelID: string;
   displayName?: string;
   enabled?: boolean;
+  hasKey?: boolean;
   modelKind?: string;
 }
 
@@ -74,6 +75,8 @@ export default function SettingsPage() {
       allModels
         .filter((m) => (m.modelKind ?? "chat") !== "embedding")
         .filter((m) => m.enabled !== false)
+        // "Configured" means creds are present for runtime routing.
+        .filter((m) => m.hasKey !== false)
         .map(modelToOption),
     [allModels]
   );
@@ -207,7 +210,10 @@ export default function SettingsPage() {
       </Section>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Section title="Compiler model" help="LLM that produces the BPMN on cache miss (cold path).">
+        <Section
+          title="Rule generation model"
+          help="Selected model is used for rule generation (manifest derivation + BPMN compile)."
+        >
           <ModelPicker
             options={chatOptions}
             providerId={draft.compilerProviderId}

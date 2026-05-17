@@ -1,14 +1,18 @@
 package com.pods.agent.ruledomain.api;
 
 import com.pods.agent.config.RuleDomainProperties;
+import com.pods.agent.domain.ModelConfig;
+import com.pods.agent.repository.ModelRepository;
 import com.pods.agent.ruledomain.repository.RuleDomainConfigRepository;
 import com.pods.agent.ruledomain.repository.RuleDomainConfigRepository.ConfigRow;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.HttpStatus;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,11 +32,14 @@ public class RuleDomainConfigController {
 
     private final RuleDomainConfigRepository repository;
     private final RuleDomainProperties properties;
+    private final ModelRepository modelRepository;
 
     public RuleDomainConfigController(RuleDomainConfigRepository repository,
-                                      RuleDomainProperties properties) {
+                                      RuleDomainProperties properties,
+                                      ModelRepository modelRepository) {
         this.repository = repository;
         this.properties = properties;
+        this.modelRepository = modelRepository;
     }
 
     @GetMapping
@@ -43,6 +50,14 @@ public class RuleDomainConfigController {
 
     @PutMapping
     public ResponseEntity<Map<String, Object>> put(@RequestBody UpdateRequest body) {
+        // Rule generation must run on an explicitly selected, configured chat model.
+        // No implicit provider/model defaults here: if the selected model is disabled
+        // or missing credentials, fail fast so the UI can correct it.
+        requireEnabledConfiguredChatModel(
+                body.compilerProviderId,
+                body.compilerModelId,
+                "rule generation model");
+
         ConfigRow saved = repository.save(new ConfigRow(
                 body.enabled,
                 joinSkills(body.enabledSkills),
@@ -51,8 +66,8 @@ public class RuleDomainConfigController {
                 body.promoteAfterSuccessfulRuns,
                 body.shadowMode,
                 body.autoDeprecateErrorRate,
-                nz(body.compilerProviderId, "anthropic"),
-                nz(body.compilerModelId, "claude-opus-4-5"),
+                nz(body.compilerProviderId, ""),
+                nz(body.compilerModelId, ""),
                 nz(body.summarizerProviderId, "anthropic"),
                 nz(body.summarizerModelId, "claude-haiku-4-5"),
                 nz(body.embeddingProviderId, ""),
@@ -62,6 +77,31 @@ public class RuleDomainConfigController {
         // Refresh the in-memory bean so subsequent requests see the new settings.
         properties.refreshFromDb();
         return ResponseEntity.ok(toResponse(saved));
+    }
+
+    private void requireEnabledConfiguredChatModel(String providerId, String modelId, String fieldName) {
+        String p = providerId == null ? "" : providerId.trim();
+        String m = modelId == null ? "" : modelId.trim();
+        if (p.isEmpty() || m.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Please select a " + fieldName + " from configured models.");
+        }
+        ModelConfig model = modelRepository.findById(p, m)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Selected " + fieldName + " '" + p + "/" + m + "' is not registered."));
+        if ("embedding".equalsIgnoreCase(model.getModelKind())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Selected " + fieldName + " '" + p + "/" + m + "' is not a chat model.");
+        }
+        if (!model.isEnabled()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Selected " + fieldName + " '" + p + "/" + m + "' is disabled.");
+        }
+        if (!model.isHasKey()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Selected " + fieldName + " '" + p + "/" + m + "' is missing credentials.");
+        }
     }
 
     private static Map<String, Object> toResponse(ConfigRow row) {
