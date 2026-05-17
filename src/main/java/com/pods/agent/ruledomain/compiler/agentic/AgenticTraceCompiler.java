@@ -499,12 +499,26 @@ public class AgenticTraceCompiler {
                     "parallel_task", "batch", "pipeline", "task",
                     "agent_send", "agent_receive", "plan_exit", "todowrite");
 
+    /** Decision-table meta-tools the LLM-loop uses to discover and invoke
+     *  tables. In a compiled BPMN, table evaluation goes through the
+     *  native {@code ${decisionTableDelegate}} bean, not through
+     *  {@code toolCallDelegate}. The `dtSearch` and `dtMetadata`
+     *  meta-tools have no compiled equivalent at all — the compiler
+     *  already knows the table name, so those exploration steps should
+     *  be elided entirely. */
+    private static final java.util.Set<String> DECISION_TABLE_META_TOOLS =
+            java.util.Set.of("dtEvaluate", "dtSearch", "dtMetadata");
+
     /**
      * Reject any {@code toolCallDelegate} serviceTask whose {@code toolName}
      * field references an agent meta-tool (parallel_task, batch, pipeline,
      * task, agent_send, agent_receive). These framework primitives don't
      * map to a real HTTP / integration tool and would silently produce
      * empty results at runtime.
+     *
+     * <p>Also reject decision-table meta-tools (dtEvaluate, dtSearch,
+     * dtMetadata) — those have a native BPMN delegate equivalent and
+     * shouldn't be routed through {@code toolCallDelegate}.
      */
     static String validateNoMetaToolsInToolCall(String bpmnXml) {
         if (bpmnXml == null) return null;
@@ -514,24 +528,48 @@ public class AgenticTraceCompiler {
         java.util.regex.Pattern toolNameRe = java.util.regex.Pattern.compile(
                 "<flowable:field\\s+name\\s*=\\s*\"toolName\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
                 java.util.regex.Pattern.DOTALL);
-        java.util.Set<String> offenders = new java.util.LinkedHashSet<>();
+        java.util.Set<String> agentOffenders = new java.util.LinkedHashSet<>();
+        java.util.Set<String> dtOffenders = new java.util.LinkedHashSet<>();
         java.util.regex.Matcher tm = taskRe.matcher(bpmnXml);
         while (tm.find()) {
             java.util.regex.Matcher fm = toolNameRe.matcher(tm.group());
             if (!fm.find()) continue;
             String name = fm.group(1).trim();
-            if (RESERVED_META_TOOL_NAMES.contains(name)) offenders.add(name);
+            if (RESERVED_META_TOOL_NAMES.contains(name)) agentOffenders.add(name);
+            else if (DECISION_TABLE_META_TOOLS.contains(name)) dtOffenders.add(name);
         }
-        if (offenders.isEmpty()) return null;
-        return "Compiled BPMN uses agent meta-tool name(s) " + offenders
-                + " as the toolName on a ${toolCallDelegate} serviceTask. These are framework "
-                + "primitives (orchestration helpers from the LLM tool loop), not real domain "
-                + "tools — calling them via toolCallDelegate would silently produce empty "
-                + "results.\nFix: replace the toolName with the real domain tool you want to "
-                + "invoke (e.g. `Serviceability`, `ContainerAvailability`). To run that tool "
-                + "in parallel per item, wrap the toolCallDelegate serviceTask in a "
-                + "<subProcess> with <multiInstanceLoopCharacteristics isSequential=\"false\" "
-                + "flowable:collection=\"${listVar}\" flowable:elementVariable=\"item\"/>.";
+        if (agentOffenders.isEmpty() && dtOffenders.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder();
+        if (!dtOffenders.isEmpty()) {
+            msg.append("Compiled BPMN routes decision-table meta-tool(s) ").append(dtOffenders)
+                    .append(" through ${toolCallDelegate}. These are LLM-loop discovery/eval ")
+                    .append("primitives, not domain tools. In a compiled BPMN the trace-grounded ")
+                    .append("equivalent is the native ${decisionTableDelegate}.\n")
+                    .append("Fix for `dtEvaluate`: replace the toolCallDelegate serviceTask with\n")
+                    .append("  <serviceTask flowable:delegateExpression=\"${decisionTableDelegate}\">\n")
+                    .append("    <flowable:field name=\"tableName\"><flowable:string><![CDATA[<TABLE NAME>]]></flowable:string></flowable:field>\n")
+                    .append("    <flowable:field name=\"inputsTemplate\"><flowable:string><![CDATA[{\"<column>\":\"<feel expression>\"}]]></flowable:string></flowable:field>\n")
+                    .append("    <flowable:field name=\"outputBinding\"><flowable:string><![CDATA[<varName>]]></flowable:string></flowable:field>\n")
+                    .append("  The result variable has shape {matched, rows, outputs}.\n")
+                    .append("Fix for `dtSearch` / `dtMetadata`: REMOVE those serviceTasks entirely. ")
+                    .append("They're discovery steps the LLM-loop used to find a table name; in a ")
+                    .append("compiled BPMN the table name is already known and hardcoded in ")
+                    .append("decisionTableDelegate's tableName field.\n");
+        }
+        if (!agentOffenders.isEmpty()) {
+            if (msg.length() > 0) msg.append("\n");
+            msg.append("Compiled BPMN uses agent meta-tool name(s) ").append(agentOffenders)
+                    .append(" as the toolName on a ${toolCallDelegate} serviceTask. These are framework ")
+                    .append("primitives (orchestration helpers from the LLM tool loop), not real domain ")
+                    .append("tools — calling them via toolCallDelegate would silently produce empty ")
+                    .append("results.\nFix: replace the toolName with the real domain tool you want to ")
+                    .append("invoke (e.g. `Serviceability`, `ContainerAvailability`). To run that tool ")
+                    .append("in parallel per item, wrap the toolCallDelegate serviceTask in a ")
+                    .append("<subProcess> with <multiInstanceLoopCharacteristics isSequential=\"false\" ")
+                    .append("flowable:collection=\"${listVar}\" flowable:elementVariable=\"item\"/>.");
+        }
+        return msg.toString();
     }
 
     // ── Bound-variable references ────────────────────────────────────────
@@ -1358,6 +1396,24 @@ public class AgenticTraceCompiler {
                 NOT `X = [{a:1}, {a:1}]`. To get a flat list of values in the assemble step,
                 unwrap with FEEL: `for r in X return r.y`. The validator can't catch a
                 missing unwrap, so the obligation is on you.
+
+                ### Decision-table calls — use the native delegate, not toolCallDelegate
+
+                The LLM-loop has three "meta-tools" it uses to work with decision tables:
+                `dtSearch` (find tables by name), `dtMetadata` (inspect a table's columns),
+                and `dtEvaluate` (run a table). In a COMPILED BPMN these go away:
+
+                  - Replace `toolCallDelegate{toolName=dtEvaluate}` with the native
+                    `${decisionTableDelegate}` (with `tableName` + `inputsTemplate` +
+                    `outputBinding` fields). It runs the table directly in-process.
+                  - REMOVE any `dtSearch` / `dtMetadata` serviceTasks entirely. The
+                    trace shows the LLM-loop used them to discover the table name; the
+                    compiler already knows it — bake the table name into the
+                    decisionTableDelegate's `tableName` field instead.
+
+                If you produce a BPMN that calls `dtEvaluate` (or `dtSearch` / `dtMetadata`)
+                through `toolCallDelegate`, the validator will reject it with a precise
+                rewrite instruction.
 
                 ### decisionTableDelegate output shape — important convention
 
