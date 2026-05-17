@@ -153,7 +153,21 @@ public class AsyncTraceCompiler {
                 "skillName", skill.getName(),
                 "ruleCount", slices.size()));
 
-        int compiled = 0;
+        // Compile rules in parallel on FJ commonPool. Each agentic
+        // compile is independent (separate workspace, separate
+        // conversation history). FJ commonPool is the validated thread
+        // context for Azure SDK Netty calls — same pool the chat turn
+        // and manifest deriver use. Wall time drops from sum(per-rule)
+        // to max(per-rule).
+        final String capturedSessionId = sessionId;
+        final String capturedSkillId = skill.getId();
+        final String capturedSkillName = skill.getName();
+        final String capturedMarkdown = routed.markdown();
+        final String capturedGroupId = domainGroupId;
+        final String capturedGroupName = domainGroupName;
+        final String capturedToolSig = toolSignature;
+
+        java.util.List<java.util.concurrent.CompletableFuture<RuleDomain>> futures = new java.util.ArrayList<>();
         for (Map.Entry<String, ExecutionTrace> e : slices.entrySet()) {
             String ruleName = e.getKey();
             if (alreadyTraceCompiled.contains(ruleName)) {
@@ -164,27 +178,42 @@ public class AsyncTraceCompiler {
                     .filter(r -> ruleName.equals(r.name()))
                     .findFirst().orElse(null);
             if (manifestRule == null) continue;
+            final ExecutionTrace ruleSlice = e.getValue();
+            final SkillRuleManifest.Rule capturedRule = manifestRule;
 
+            futures.add(java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    return traceCompiler.compileFromTrace(
+                            capturedSessionId,
+                            capturedSkillId,
+                            capturedSkillName,
+                            capturedMarkdown,
+                            capturedGroupId,
+                            capturedGroupName,
+                            capturedRule,
+                            capturedToolSig,
+                            ruleSlice);
+                } catch (Exception ex) {
+                    log.warn("[AsyncTraceCompiler] rule={} compile threw: {}",
+                            ruleName, ex.getMessage(), ex);
+                    return null;
+                }
+            }, java.util.concurrent.ForkJoinPool.commonPool()));
+        }
+
+        int compiled = 0;
+        for (var f : futures) {
             try {
-                RuleDomain saved = traceCompiler.compileFromTrace(
-                        sessionId,
-                        skill.getId(),
-                        skill.getName(),
-                        routed.markdown(),
-                        domainGroupId,
-                        domainGroupName,
-                        manifestRule,
-                        toolSignature,
-                        e.getValue());
+                RuleDomain saved = f.join();
+                if (saved == null) continue;
                 if (RuleDomain.STATUS_FAILED.equals(saved.getStatus())) {
                     log.warn("[AsyncTraceCompiler] rule={} compile failed: {}",
-                            ruleName, saved.getLastError());
+                            saved.getRuleName(), saved.getLastError());
                 } else {
                     compiled++;
                 }
             } catch (Exception ex) {
-                log.warn("[AsyncTraceCompiler] rule={} compile threw: {}",
-                        ruleName, ex.getMessage(), ex);
+                log.warn("[AsyncTraceCompiler] compile future join failed: {}", ex.getMessage(), ex);
             }
         }
 

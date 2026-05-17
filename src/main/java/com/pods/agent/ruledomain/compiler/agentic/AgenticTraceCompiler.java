@@ -51,8 +51,10 @@ public class AgenticTraceCompiler {
 
     /** Cap on the validate-and-revise loop. Each attempt is itself a
      *  Spring AI internal tool loop (the LLM may read many files inside
-     *  one attempt), so this caps the outer REVISIONS only. */
-    private static final int MAX_ATTEMPTS = 5;
+     *  one attempt). Empirically attempts 4+ rarely recover after three
+     *  failures on the same rule — they burn 6–10 min of compute for
+     *  negligible additional success rate. Three is the sweet spot. */
+    private static final int MAX_ATTEMPTS = 3;
 
     private final ModelProviderRouter modelProviderRouter;
     private final RuleDomainProperties props;
@@ -135,28 +137,14 @@ public class AgenticTraceCompiler {
 
         // Conversation history reused across revision attempts so the LLM
         // sees its own prior BPMN + the validator feedback when revising.
+        //
+        // The initial user message inlines the small files (manifest +
+        // trace step summary). Each compile_read_file round-trip costs
+        // ~15s with Azure GPT-5.2; inlining what we already have saves
+        // 2–3 tool calls per attempt. The LLM still reads big .output.json
+        // files on demand via compile_read_file.
         List<Message> history = new ArrayList<>();
-        history.add(new UserMessage(
-                "Compile the BPMN for rule `" + rule.name() + "` (one rule of skill `"
-                + skillName + "`). Your workspace is at: " + compileRoot + "\n\n"
-                + "REQUIRED reading order:\n"
-                + "  1. `compile_read_file` `index.md` — overview.\n"
-                + "  2. `compile_read_file` `manifest.json` — YOUR RULE SCOPE. The `tools` "
-                + "array lists every tool you may invoke. Do not exceed it.\n"
-                + "  3. `compile_list_files` `trace/**` — see this rule's recorded steps.\n"
-                + "  4. `compile_read_file` the FIRST trace output (typically "
-                + "`trace/01-<tool>.output.json`) — your authoritative schema.\n"
-                + "  5. `compile_read_file` each subsequent `trace/NN-<tool>.input.json` — "
-                + "for every value passed, locate the matching value in a prior `.output.json` "
-                + "and use a FEEL path. Never hardcode.\n"
-                + "  6. `compile_read_file` `instructions.md` and `skill.md` for the contract "
-                + "and any business rules the trace alone doesn't explain.\n\n"
-                + "Constraints:\n"
-                + "  - Implement ONLY this rule's slice. The skill describes a longer "
-                + "workflow with other rules; do not include their tool calls.\n"
-                + "  - The number of `${toolCallDelegate}` serviceTasks should match the "
-                + "number of tool steps in this rule's trace.\n\n"
-                + "When you have the BPMN ready, call `compile_write_bpmn` with the complete XML."));
+        history.add(new UserMessage(buildInitialPrompt(rule, skillName, compileRoot, slice)));
 
         String systemPrompt = promptBuilder.buildSystem() + "\n\n" + agenticAddendum();
 
@@ -199,6 +187,30 @@ public class AgenticTraceCompiler {
             // Run sanitize + boundary injection + every validator. If any
             // check fails, feed the error back to the LLM for revision.
             String cleaned = BpmnCompiler.sanitize(xml);
+
+            // First — confirm the BPMN parses at all. Most common failure
+            // is a FEEL expression containing `<`, `>`, or `&` inside a
+            // <flowable:string> that wasn't CDATA-wrapped. Catching this
+            // BEFORE injectErrorBoundaries means the parse-failure becomes
+            // a revision message to the LLM (with row/col) instead of an
+            // exception that crashes the whole attempt.
+            String parseErr = BpmnCompiler.firstXmlParseError(cleaned);
+            if (parseErr != null) {
+                bus.emit("rule_domain.compile.agentic.validator_failed", Map.of(
+                        "ruleName", rule.name(),
+                        "attempt", attempt,
+                        "error", parseErr));
+                lastError = parseErr;
+                history.add(new UserMessage(
+                        "Your submitted BPMN doesn't parse as XML.\n\n"
+                        + parseErr + "\n\n"
+                        + "Most common cause: a FEEL expression in a `<flowable:string>` body "
+                        + "contains a bare `<`, `>`, or `&` character without CDATA wrapping. "
+                        + "EVERY `<flowable:string>` body MUST be wrapped in `<![CDATA[ … ]]>`. "
+                        + "Revise the XML and call `compile_write_bpmn` again with a parsable version."));
+                continue;
+            }
+
             cleaned = BpmnCompiler.injectErrorBoundaries(cleaned);
 
             String err = TraceBasedBpmnCompiler.validateDelegateFieldNames(cleaned);
@@ -241,6 +253,89 @@ public class AgenticTraceCompiler {
                 "attempts", MAX_ATTEMPTS,
                 "lastError", lastError == null ? "" : lastError));
         return failed(start, compileRoot, lastError);
+    }
+
+    /**
+     * Build the initial user message. Inlines manifest (small) and a
+     * compact trace summary (one line per step) so the LLM can start
+     * writing the BPMN without a round-trip for each. Large
+     * trace/*.output.json files stay in the VFS and are read on demand.
+     */
+    private String buildInitialPrompt(SkillRuleManifest.Rule rule,
+                                      String skillName,
+                                      Path compileRoot,
+                                      ExecutionTrace slice) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Compile the BPMN for rule `").append(rule.name())
+                .append("` (one rule of skill `").append(skillName)
+                .append("`). Your workspace is at: ").append(compileRoot).append("\n\n");
+
+        // 1. Inline manifest — it's tiny and the LLM needs every byte.
+        sb.append("## Manifest (your rule's authoritative scope)\n```json\n");
+        try {
+            tools.jackson.databind.node.ObjectNode root = objectMapper.createObjectNode();
+            root.put("skill", skillName);
+            root.put("rule", rule.name());
+            if (rule.intentExamples() != null) {
+                tools.jackson.databind.node.ArrayNode ex = root.putArray("intent_examples");
+                for (String s : rule.intentExamples()) ex.add(s);
+            }
+            root.put("result_key", rule.effectiveResultKey());
+            if (rule.tools() != null) {
+                tools.jackson.databind.node.ArrayNode t = root.putArray("tools");
+                for (String s : rule.tools()) t.add(s);
+            }
+            sb.append(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
+        } catch (Exception ex) {
+            sb.append("{\"rule\":\"").append(rule.name()).append("\"}");
+        }
+        sb.append("\n```\n\n");
+
+        // 2. Trace summary — index, tool name, payload sizes, latency.
+        //    Lets the LLM see at a glance what each step is and decide
+        //    which output.json files are worth reading in detail.
+        sb.append("## Recorded trace summary (this rule's tool steps only)\n");
+        int i = 1;
+        for (ExecutionTrace.TraceStep s : slice.toolSteps()) {
+            String idx = String.format(java.util.Locale.ROOT, "%02d", i++);
+            int inSize = jsonSize(s.input());
+            int outSize = jsonSize(s.output());
+            sb.append("  ").append(idx).append(". ").append(s.name())
+                    .append("  —  input ").append(inSize).append("B, output ").append(outSize)
+                    .append("B, ").append(s.elapsedMs()).append("ms")
+                    .append("  →  files: `trace/").append(idx).append("-").append(safeFile(s.name()))
+                    .append(".input.json`, `.output.json`\n");
+        }
+        sb.append("\n");
+
+        // 3. Suggested next reads. The LLM picks; we suggest the most
+        //    useful starting point and explain why.
+        sb.append("## What to do\n\n");
+        sb.append("Start by calling `compile_read_file` on the **first tool's output** "
+                + "(typically the order-fetch response). That's the authoritative schema you'll "
+                + "ground every later FEEL path against.\n\n");
+        sb.append("Then, for each subsequent step, read the `.input.json` and locate every value "
+                + "in the prior `.output.json`. Encode each as a FEEL path — never hardcode a "
+                + "literal that came from the trace.\n\n");
+        sb.append("Optional: `compile_read_file` `skill.md` if you need business rules the trace "
+                + "alone doesn't explain (e.g. ItemCode→ServiceCode mappings).\n\n");
+        sb.append("Constraints:\n");
+        sb.append("  - Implement ONLY this rule's slice. Other rules of the same skill have their "
+                + "own BPMNs; do not include their tool calls here.\n");
+        sb.append("  - Number of `${toolCallDelegate}` serviceTasks should match the number of "
+                + "tool steps above.\n");
+        sb.append("  - EVERY `<flowable:string>` body MUST be `<![CDATA[ … ]]>` wrapped.\n\n");
+        sb.append("When ready, call `compile_write_bpmn` with the complete XML.");
+        return sb.toString();
+    }
+
+    private static int jsonSize(tools.jackson.databind.JsonNode node) {
+        if (node == null || node.isNull()) return 0;
+        return node.toString().length();
+    }
+
+    private static String safeFile(String s) {
+        return s == null ? "x" : s.replaceAll("[^A-Za-z0-9._-]", "_");
     }
 
     private CompileResult failed(long start, Path root, String error) {
@@ -841,6 +936,16 @@ public class AgenticTraceCompiler {
                 You are running as an agent with filesystem tools. The trace, skill, and
                 manifest for ONE rule of a multi-rule skill are written to files; you
                 inspect them at will and submit your BPMN via a tool call.
+
+                ### *** XML WELL-FORMEDNESS — ENFORCED BY PARSER ***
+
+                EVERY `<flowable:string>` body MUST be wrapped in `<![CDATA[ … ]]>`.
+                Unconditional, no exceptions. FEEL expressions routinely contain `<`, `>`,
+                and `&` characters that break XML parsing if they appear raw. The parser
+                will reject your BPMN with a row/column error and you'll have to revise.
+
+                YES:  `<flowable:string><![CDATA[if a < b then x else y]]></flowable:string>`
+                NO:   `<flowable:string>if a < b then x else y</flowable:string>`
 
                 ### *** RULE SCOPE — STRICTEST CONSTRAINT, ENFORCED ***
 

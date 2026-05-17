@@ -253,6 +253,43 @@ public class BpmnCompiler {
      * primary deploy pass in {@link #tryDeploy} is still the source of truth for
      * compile validity.
      */
+    /**
+     * Try to parse the BPMN with Flowable's converter and return a
+     * human-readable error string if parsing fails, else {@code null}.
+     * Used by the agentic compile loop to convert XML well-formedness
+     * failures into LLM revision feedback instead of letting the
+     * exception kill the whole attempt.
+     *
+     * <p>The most common cause we see in practice is a FEEL expression
+     * containing a bare {@code <} or {@code &} inside a
+     * {@code <flowable:string>} that wasn't CDATA-wrapped. The returned
+     * message includes the row/col so the LLM can locate it.
+     */
+    public static String firstXmlParseError(String xml) {
+        if (xml == null || xml.isBlank()) return "BPMN is empty.";
+        try {
+            BpmnXMLConverter converter = new BpmnXMLConverter();
+            InputStreamProvider isp = () -> new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8));
+            converter.convertToBpmnModel(isp, false, false);
+            return null;
+        } catch (Exception ex) {
+            // Walk the cause chain for an XMLStreamException — it carries the
+            // row/col location which is the actionable info for the LLM.
+            Throwable t = ex;
+            while (t != null) {
+                if (t instanceof javax.xml.stream.XMLStreamException xse) {
+                    String loc = xse.getLocation() == null ? "?"
+                            : "line " + xse.getLocation().getLineNumber()
+                              + ", column " + xse.getLocation().getColumnNumber();
+                    return "BPMN failed to parse at " + loc + ": "
+                            + (xse.getMessage() == null ? "" : xse.getMessage().trim());
+                }
+                t = t.getCause();
+            }
+            return "BPMN failed to parse: " + (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage().trim());
+        }
+    }
+
     public static String injectErrorBoundaries(String xml) {
         if (xml == null || xml.isBlank()) return xml;
         try {

@@ -422,39 +422,65 @@ public class TraceBasedBpmnCompiler {
         }
         if (traceValues.isEmpty()) return null;
 
-        // 2. Walk every argTemplate / inputsTemplate / feelExpr value in
-        //    the BPMN. Extract every quoted FEEL string literal `"foo"`
-        //    inside those values. Flag if it matches a trace value.
+        // 2. Walk every argTemplate / inputsTemplate / postTransform field
+        //    in the BPMN. Parse its content as a JSON-shaped object and
+        //    inspect ONLY the value side of each `(key, value)` pair —
+        //    keys are static parameter names, not derivable. Skip the
+        //    `tableName` field entirely (it's a static decision-table
+        //    identifier). For `feelExpr` walk every literal but apply the
+        //    looks-like-identifier exemption so single-token uppercase
+        //    codes (`"NEW"`, `"WRT"`, …) pass through.
         java.util.Map<String, String> offenders = new java.util.LinkedHashMap<>();
-        java.util.regex.Matcher fieldRe = java.util.regex.Pattern.compile(
-                "<flowable:field\\s+name\\s*=\\s*\"(argTemplate|inputsTemplate|feelExpr|postTransform)\"[^>]*>"
+
+        // 2a. JSON-shaped fields: argTemplate / inputsTemplate / postTransform.
+        java.util.regex.Matcher jsonFieldRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(argTemplate|inputsTemplate|postTransform)\"[^>]*>"
                 + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
                 java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
-        while (fieldRe.find()) {
-            String body = fieldRe.group(2).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
-            // FEEL literals are double-quoted; inside JSON-of-FEEL the
-            // outer JSON quotes are escaped (\"value\"). Strip the JSON
-            // escapes first so we recover the raw FEEL.
-            String unescaped = body.replace("\\\"", "\"");
-            java.util.regex.Matcher feelLitRe = java.util.regex.Pattern.compile(
-                    "\"\\\\\"([^\\\\\"]+)\\\\\"\"|\"([^\"]{" + MIN_INTERESTING_LITERAL_LENGTH + ",})\"").matcher(unescaped);
-            while (feelLitRe.find()) {
-                String lit = feelLitRe.group(1) != null ? feelLitRe.group(1) : feelLitRe.group(2);
-                if (lit == null || lit.isBlank()) continue;
-                String trimmed = lit.trim();
-                if (trimmed.length() < MIN_INTERESTING_LITERAL_LENGTH) continue;
-                if (ALLOWED_TRACE_LITERALS.contains(trimmed)) continue;
-                // Skip obvious key names ("foo": "bar" — the "foo" half is
-                // a key, not a value). We can't distinguish keys from
-                // values structurally here, but trace values are
-                // typically multi-token strings or specific identifiers,
-                // so we look at trace match: if the literal isn't in
-                // traceValues, no harm anyway.
-                if (traceValues.containsKey(trimmed) && !offenders.containsKey(trimmed)) {
-                    offenders.put(trimmed, traceValues.get(trimmed));
+        while (jsonFieldRe.find()) {
+            String body = jsonFieldRe.group(2).replaceAll("<!\\[CDATA\\[|\\]\\]>", "").trim();
+            tools.jackson.databind.JsonNode tree;
+            try {
+                tree = STATIC_MAPPER.readTree(body);
+            } catch (Exception ex) {
+                // Body isn't strict JSON — common for FEEL-quoted values.
+                // Fall through to a regex value-only scan as a fallback.
+                collectValueOnlyLiterals(body, traceValues, offenders);
+                continue;
+            }
+            if (tree != null && tree.isObject()) {
+                for (String key : tree.propertyNames()) {
+                    tools.jackson.databind.JsonNode v = tree.get(key);
+                    if (v != null && v.isTextual()) {
+                        checkLiteral(v.asString(), traceValues, offenders);
+                    } else if (v != null && (v.isObject() || v.isArray())) {
+                        // Nested — recurse, still only checking text values.
+                        collectTextValuesFromJson(v, traceValues, offenders);
+                    }
                 }
+            } else {
+                collectValueOnlyLiterals(body, traceValues, offenders);
             }
         }
+
+        // 2b. feelExpr — its content is FEEL, not key-value JSON. Apply a
+        // looser check: extract every double-quoted literal but skip
+        // identifier-shaped tokens (`"NEW"`, `"WRT"`) via the
+        // looksLikeIdentifierConstant heuristic.
+        java.util.regex.Matcher feelFieldRe = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"feelExpr\"[^>]*>"
+                + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (feelFieldRe.find()) {
+            String body = feelFieldRe.group(1).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
+            java.util.regex.Matcher litRe = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(body);
+            while (litRe.find()) {
+                String lit = litRe.group(1);
+                if (looksLikeIdentifierConstant(lit)) continue;
+                checkLiteral(lit, traceValues, offenders);
+            }
+        }
+
         if (offenders.isEmpty()) return null;
 
         StringBuilder msg = new StringBuilder(
@@ -502,6 +528,94 @@ public class TraceBasedBpmnCompiler {
 
     private static String safeStep(String s) {
         return s == null ? "?" : s.replaceAll("[^A-Za-z0-9_]", "_");
+    }
+
+    /** Used to parse argTemplate / inputsTemplate / postTransform bodies
+     *  as JSON so we can inspect only the value side of each pair. */
+    private static final tools.jackson.databind.ObjectMapper STATIC_MAPPER =
+            new tools.jackson.databind.ObjectMapper();
+
+    /** Test a single string literal against the trace-values map and
+     *  record it as an offender if it matches AND isn't an identifier-
+     *  shaped constant (e.g. "NEW", "WRT"). Centralizes the check used
+     *  by both the JSON-walk and the FEEL-walk. */
+    private static void checkLiteral(String value,
+                                     java.util.Map<String, String> traceValues,
+                                     java.util.Map<String, String> offenders) {
+        if (value == null) return;
+        String trimmed = value.trim();
+        if (trimmed.length() < MIN_INTERESTING_LITERAL_LENGTH) return;
+        if (ALLOWED_TRACE_LITERALS.contains(trimmed)) return;
+        if (looksLikeIdentifierConstant(trimmed)) return;
+        if (traceValues.containsKey(trimmed) && !offenders.containsKey(trimmed)) {
+            offenders.put(trimmed, traceValues.get(trimmed));
+        }
+    }
+
+    /** Recurse into nested JSON only collecting textual VALUES (never
+     *  keys). Used when an argTemplate value is itself an object/array. */
+    private static void collectTextValuesFromJson(tools.jackson.databind.JsonNode node,
+                                                  java.util.Map<String, String> traceValues,
+                                                  java.util.Map<String, String> offenders) {
+        if (node == null || node.isNull()) return;
+        if (node.isTextual()) {
+            checkLiteral(node.asString(), traceValues, offenders);
+            return;
+        }
+        if (node.isObject()) {
+            for (String name : node.propertyNames()) {
+                collectTextValuesFromJson(node.get(name), traceValues, offenders);
+            }
+            return;
+        }
+        if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                collectTextValuesFromJson(node.get(i), traceValues, offenders);
+            }
+        }
+    }
+
+    /** Fallback for argTemplate bodies that aren't strict JSON (FEEL
+     *  literals with escaped quotes, multiline strings, etc.). Walk the
+     *  body looking for `"key" : "value"` patterns and only check the
+     *  value side. */
+    private static void collectValueOnlyLiterals(String body,
+                                                  java.util.Map<String, String> traceValues,
+                                                  java.util.Map<String, String> offenders) {
+        // Match `"key" : "value"` non-greedy, allowing escape sequences in
+        // value. Captures only the value.
+        java.util.regex.Matcher kvRe = java.util.regex.Pattern.compile(
+                "\"[^\"]+\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(body);
+        while (kvRe.find()) {
+            String value = kvRe.group(1).replace("\\\"", "\"");
+            // The value may itself be a FEEL-quoted literal like `\"foo\"`
+            // (which after JSON unescape becomes `"foo"`). Strip one layer.
+            if (value.startsWith("\"") && value.endsWith("\"") && value.length() > 1) {
+                value = value.substring(1, value.length() - 1);
+            }
+            checkLiteral(value, traceValues, offenders);
+        }
+    }
+
+    /** True for short identifier-shaped strings that the LLM legitimately
+     *  hardcodes as protocol or business constants. Examples this passes:
+     *  "NEW", "WRT", "OK", "IDEL", "Salesforce". Examples this fails:
+     *  "64157" (zip), "Initial Delivery" (has space), "Leg Sequences"
+     *  (handled separately as tableName), "abc def" (multi-word).
+     *
+     *  Rule: a single alphanumeric token of ≤ 12 chars, must contain at
+     *  least one letter, must start with a letter, no spaces. */
+    private static boolean looksLikeIdentifierConstant(String s) {
+        if (s == null || s.isBlank()) return false;
+        if (s.length() > 12) return false;
+        if (!Character.isLetter(s.charAt(0))) return false;
+        boolean hasLetter = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isLetter(c)) hasLetter = true;
+            else if (!Character.isDigit(c) && c != '_' && c != '-') return false;
+        }
+        return hasLetter;
     }
 
     private static String suggestForBean(String bean, String wrongName) {
