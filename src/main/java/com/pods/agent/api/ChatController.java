@@ -83,6 +83,7 @@ public class ChatController {
             // Phase 2: async trace-based compile lifecycle.
             "rule_domain.compile.trace_started",
             "rule_domain.compile.trace_finished",
+            "rule_domain.compile.trace_skipped",
             // Phase 3: coverage signals.
             "rule_domain.coverage_miss",
             "rule_domain.coverage_extended",

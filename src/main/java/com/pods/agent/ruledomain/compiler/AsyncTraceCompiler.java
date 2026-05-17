@@ -116,6 +116,16 @@ public class AsyncTraceCompiler {
         }
         ExecutionTrace trace = traceOpt.get();
 
+        // Gate: do not compile rules from a trace whose tool calls
+        // failed. A trace where Get_OrderID timed out 3 times and the LLM
+        // returned "validation_failed" is not a successful run we want to
+        // generalize from — the BPMN would encode nothing but timeouts.
+        // Require at least one successful tool call AND that the failure
+        // rate not be overwhelming.
+        if (!traceLooksRunnable(trace, skill.getName(), turnId)) {
+            return;
+        }
+
         // Option B: derive a manifest from prose + trace if the skill didn't
         // ship one. Persisted on the skill row so we only pay this LLM call
         // once per (skill, markdown-revision) pair.
@@ -179,6 +189,12 @@ public class AsyncTraceCompiler {
                     .findFirst().orElse(null);
             if (manifestRule == null) continue;
             final ExecutionTrace ruleSlice = e.getValue();
+            // Per-rule gate: skip slices whose required tool calls all
+            // failed. A rule's BPMN can't be derived from a trace that
+            // only saw timeouts and errors for that rule's tools.
+            if (!sliceLooksRunnable(ruleSlice, ruleName)) {
+                continue;
+            }
             final SkillRuleManifest.Rule capturedRule = manifestRule;
 
             futures.add(java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -293,5 +309,75 @@ public class AsyncTraceCompiler {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Whole-trace gate. Reject runs that don't look like a successful
+     * end-to-end execution we want to generalize from.
+     *
+     * <p>Heuristics:
+     * <ul>
+     *   <li>At least one tool step exists.</li>
+     *   <li>At least one tool step succeeded (status="success").</li>
+     *   <li>Failure rate is below 50% — a trace where most tool calls
+     *       failed isn't a teaching example.</li>
+     * </ul>
+     *
+     * <p>Emits {@code rule_domain.compile.trace_skipped} so operators
+     * can see why a turn produced no rules. Returns true when the trace
+     * is worth compiling from.
+     */
+    private boolean traceLooksRunnable(ExecutionTrace trace, String skillName, String turnId) {
+        List<ExecutionTrace.TraceStep> toolSteps = trace.toolSteps();
+        if (toolSteps.isEmpty()) {
+            emitSkip(skillName, turnId, "no_tool_steps",
+                    "Trace contains no tool calls — nothing to compile from.");
+            return false;
+        }
+        int succeeded = 0;
+        int failed = 0;
+        for (ExecutionTrace.TraceStep s : toolSteps) {
+            if ("success".equals(s.status())) succeeded++;
+            else if ("failed".equals(s.status())) failed++;
+        }
+        if (succeeded == 0) {
+            emitSkip(skillName, turnId, "no_successful_tool_calls",
+                    "Trace has " + failed + " tool calls but none succeeded — the run "
+                    + "didn't produce a usable schema. Re-run when upstream tools are healthy.");
+            return false;
+        }
+        if (failed * 2 >= toolSteps.size()) {
+            emitSkip(skillName, turnId, "tool_failure_rate_too_high",
+                    "Trace tool failure rate " + failed + "/" + toolSteps.size()
+                    + " ≥ 50% — refusing to compile from a mostly-broken run.");
+            return false;
+        }
+        return true;
+    }
+
+    /** Per-rule slice gate. After whole-trace passed, individual rules may
+     *  still have a slice whose required tools all failed. */
+    private boolean sliceLooksRunnable(ExecutionTrace slice, String ruleName) {
+        List<ExecutionTrace.TraceStep> toolSteps = slice.toolSteps();
+        if (toolSteps.isEmpty()) {
+            log.debug("[AsyncTraceCompiler] rule={} slice has no tool steps — skipping", ruleName);
+            return false;
+        }
+        boolean anySuccess = toolSteps.stream().anyMatch(s -> "success".equals(s.status()));
+        if (!anySuccess) {
+            log.warn("[AsyncTraceCompiler] rule={} slice has only failed tool calls — skipping compile", ruleName);
+            return false;
+        }
+        return true;
+    }
+
+    private void emitSkip(String skillName, String turnId, String reason, String message) {
+        log.warn("[AsyncTraceCompiler] skipping compile for skill={} turn={}: {}",
+                skillName, turnId, message);
+        bus.emit("rule_domain.compile.trace_skipped", Map.of(
+                "turnId", turnId == null ? "" : turnId,
+                "skillName", skillName,
+                "reason", reason,
+                "message", message));
     }
 }
