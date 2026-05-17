@@ -224,6 +224,7 @@ public class AgenticTraceCompiler {
             if (err == null) err = validateMultiInstanceCollectionFilter(cleaned);
             if (err == null) err = validateAggregationUnwrap(cleaned);
             if (err == null) err = validateFeelPathsExistInTrace(cleaned, slice);
+            if (err == null) err = validateDecisionTableMatchedUsage(cleaned);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -876,6 +877,80 @@ public class AgenticTraceCompiler {
      *   <li>{@code if … = null then [] else for r in X return r.Y …}</li>
      * </ul>
      */
+    /**
+     * For every {@code decisionTableDelegate} output binding {@code X},
+     * confirm that the BPMN's assemble step uses {@code X.matched} (not
+     * just {@code X.outputs.<field>}) to determine the validation
+     * outcome.
+     *
+     * <p>Background: a decisionTableDelegate returns
+     * {@code {matched, rows, outputs}}. When no row matches, {@code outputs}
+     * is an empty object, so {@code X.outputs.valid} resolves to null.
+     * The LLM keeps writing assemble steps that pull from
+     * {@code outputs.valid} alone — producing rules whose top-level
+     * {@code valid} is always null on no-match, which is misleading. The
+     * canonical pass/fail flag is {@code X.matched}.
+     *
+     * <p>Conservative check: reject only when the BPMN references
+     * {@code X.outputs.…} but never references {@code X.matched} anywhere.
+     */
+    static String validateDecisionTableMatchedUsage(String bpmnXml) {
+        if (bpmnXml == null) return null;
+
+        // Find every decisionTableDelegate task's outputBinding.
+        java.util.Set<String> dtOutputBindings = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher tm = java.util.regex.Pattern.compile(
+                "<serviceTask\\b[^>]*flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*decisionTableDelegate\\s*\\}\\s*\"[\\s\\S]*?</serviceTask>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (tm.find()) {
+            String taskBlock = tm.group();
+            java.util.regex.Matcher fm = java.util.regex.Pattern.compile(
+                    "<flowable:field\\s+name\\s*=\\s*\"outputBinding\"[^>]*>"
+                    + "\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([^<\\]]+?)(?:\\]\\]>)?\\s*</flowable:string>",
+                    java.util.regex.Pattern.DOTALL).matcher(taskBlock);
+            if (fm.find()) dtOutputBindings.add(fm.group(1).trim());
+        }
+        if (dtOutputBindings.isEmpty()) return null;
+
+        // For each decision-table output variable, scan every feelExpr
+        // body to see whether `<var>.outputs.<x>` is used and whether
+        // `<var>.matched` is used.
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        for (String var : dtOutputBindings) {
+            boolean refsOutputs = false;
+            boolean refsMatched = false;
+            java.util.regex.Matcher feelRe = java.util.regex.Pattern.compile(
+                    "<flowable:field\\s+name\\s*=\\s*\"feelExpr\"[^>]*>"
+                    + "\\s*<flowable:string>([\\s\\S]*?)</flowable:string>",
+                    java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+            while (feelRe.find()) {
+                String body = feelRe.group(1).replaceAll("<!\\[CDATA\\[|\\]\\]>", "");
+                if (java.util.regex.Pattern.compile(
+                        "(?<![A-Za-z0-9_])" + java.util.regex.Pattern.quote(var) + "\\.outputs\\b").matcher(body).find()) {
+                    refsOutputs = true;
+                }
+                if (java.util.regex.Pattern.compile(
+                        "(?<![A-Za-z0-9_])" + java.util.regex.Pattern.quote(var) + "\\.matched\\b").matcher(body).find()) {
+                    refsMatched = true;
+                }
+            }
+            if (refsOutputs && !refsMatched) {
+                problems.add("decisionTable output `" + var + "` is read via `" + var
+                        + ".outputs.…` but never via `" + var + ".matched`. When no row matches, "
+                        + "`outputs` is `{}` so every nested field is null — your `valid` will "
+                        + "always be null on no-match. Add `" + var + ".matched` to the assemble "
+                        + "step (e.g. `valid: " + var + ".matched`) and use `if " + var
+                        + ".matched then " + var + ".outputs.<field> else …` for nested reads.");
+            }
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN reads decision-table output without using its `matched` flag:\n");
+        for (String p : problems) msg.append("  - ").append(p).append("\n");
+        return msg.toString();
+    }
+
     static String validateAggregationUnwrap(String bpmnXml) {
         if (bpmnXml == null) return null;
 
@@ -1283,6 +1358,29 @@ public class AgenticTraceCompiler {
                 NOT `X = [{a:1}, {a:1}]`. To get a flat list of values in the assemble step,
                 unwrap with FEEL: `for r in X return r.y`. The validator can't catch a
                 missing unwrap, so the obligation is on you.
+
+                ### decisionTableDelegate output shape — important convention
+
+                A `${decisionTableDelegate}` task with `outputBinding=X` writes the
+                variable `X` as:
+                    `{ matched: <boolean>, rows: [<matched rows>], outputs: <merged outputs> }`
+
+                When NO row matches, `matched = false`, `rows = []`, and `outputs = {}`
+                (empty object — every field lookup returns null). Your assemble step
+                MUST use `X.matched` as the authoritative pass/fail, NOT a nested
+                `X.outputs.valid` field that doesn't exist on no-match:
+
+                  RIGHT:
+                    valid: X.matched,
+                    journeyType: if X.matched then X.outputs.journeyType else null,
+                    message: if X.matched then X.outputs.message else "No matching row"
+
+                  WRONG:
+                    valid: X.outputs.valid       // null when no row matches
+                    journeyType: X.outputs.X     // null when no row matches
+
+                Always expose `matched` (or a `valid: X.matched` field built from it) in
+                the final `result` so callers can see whether the table found a match.
 
                 ### Style
 
