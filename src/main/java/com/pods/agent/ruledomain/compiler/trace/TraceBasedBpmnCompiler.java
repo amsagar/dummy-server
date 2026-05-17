@@ -422,6 +422,33 @@ public class TraceBasedBpmnCompiler {
         }
         if (traceValues.isEmpty()) return null;
 
+        // 1b. Build the set of values that appeared as INPUTS to any tool
+        //     in the recorded trace. A literal that was passed as a tool's
+        //     input in the LLM-loop run AND is re-passed in the BPMN is
+        //     the LLM correctly preserving a static parameter (decision
+        //     table name, query string, etc.) — not a "data leaked from
+        //     response into input" bug. Skip these via a ThreadLocal
+        //     consulted by checkLiteral.
+        java.util.Set<String> traceInputValues = new java.util.LinkedHashSet<>();
+        for (ExecutionTrace.TraceStep step : slice.toolSteps()) {
+            if (step.input() == null) continue;
+            java.util.Map<String, String> tmp = new java.util.LinkedHashMap<>();
+            collectStringValues(step.input(), "", tmp);
+            traceInputValues.addAll(tmp.keySet());
+        }
+        TRACE_INPUT_VALUES.set(traceInputValues);
+        try {
+            return doValidateLiteralGrounding(bpmnXml, traceValues);
+        } finally {
+            TRACE_INPUT_VALUES.remove();
+        }
+    }
+
+    /** Actual scan body, factored out so the ThreadLocal cleanup in the
+     *  public entry point is straightforward (try/finally around this). */
+    private static String doValidateLiteralGrounding(String bpmnXml,
+                                                      java.util.Map<String, String> traceValues) {
+
         // 2. Walk every argTemplate / inputsTemplate / postTransform field
         //    in the BPMN. Parse its content as a JSON-shaped object and
         //    inspect ONLY the value side of each `(key, value)` pair —
@@ -535,10 +562,18 @@ public class TraceBasedBpmnCompiler {
     private static final tools.jackson.databind.ObjectMapper STATIC_MAPPER =
             new tools.jackson.databind.ObjectMapper();
 
+    /** ThreadLocal holder for the trace-input value set, used by the
+     *  static checkLiteral helper. Validator runs are short-lived and
+     *  thread-confined; this avoids restructuring every caller's
+     *  signature to thread the set through. Cleared at end of run. */
+    private static final ThreadLocal<java.util.Set<String>> TRACE_INPUT_VALUES =
+            ThreadLocal.withInitial(java.util.Collections::emptySet);
+
     /** Test a single string literal against the trace-values map and
      *  record it as an offender if it matches AND isn't an identifier-
-     *  shaped constant (e.g. "NEW", "WRT"). Centralizes the check used
-     *  by both the JSON-walk and the FEEL-walk. */
+     *  shaped constant AND wasn't passed as input to any tool in the
+     *  recorded trace (which would indicate the LLM is preserving a
+     *  static parameter, not leaking response data into input). */
     private static void checkLiteral(String value,
                                      java.util.Map<String, String> traceValues,
                                      java.util.Map<String, String> offenders) {
@@ -547,6 +582,7 @@ public class TraceBasedBpmnCompiler {
         if (trimmed.length() < MIN_INTERESTING_LITERAL_LENGTH) return;
         if (ALLOWED_TRACE_LITERALS.contains(trimmed)) return;
         if (looksLikeIdentifierConstant(trimmed)) return;
+        if (TRACE_INPUT_VALUES.get().contains(trimmed)) return; // legit static input
         if (traceValues.containsKey(trimmed) && !offenders.containsKey(trimmed)) {
             offenders.put(trimmed, traceValues.get(trimmed));
         }
@@ -597,17 +633,23 @@ public class TraceBasedBpmnCompiler {
         }
     }
 
-    /** True for short identifier-shaped strings that the LLM legitimately
-     *  hardcodes as protocol or business constants. Examples this passes:
-     *  "NEW", "WRT", "OK", "IDEL", "Salesforce". Examples this fails:
-     *  "64157" (zip), "Initial Delivery" (has space), "Leg Sequences"
-     *  (handled separately as tableName), "abc def" (multi-word).
+    /** True for identifier-shaped strings: a single alphanumeric token
+     *  starting with a letter, no spaces, no special chars beyond `_`/`-`.
+     *  In a JSON-of-FEEL argTemplate, such values are typically FEEL
+     *  variable references (e.g. `"actualSequence"` resolves to the
+     *  process variable named `actualSequence`), not hardcoded string
+     *  literals. Multi-word phrases like "Initial Delivery" or numeric
+     *  values like "64157" don't match — those are still candidates for
+     *  the literal-grounding check.
      *
-     *  Rule: a single alphanumeric token of ≤ 12 chars, must contain at
-     *  least one letter, must start with a letter, no spaces. */
+     *  Trade-off: a true hardcode of an all-letters constant like
+     *  `"COMMERCIAL"` slips through. We accept that because the
+     *  false-positive rate of flagging legitimate variable references
+     *  was blocking compile cycles. */
     private static boolean looksLikeIdentifierConstant(String s) {
         if (s == null || s.isBlank()) return false;
-        if (s.length() > 12) return false;
+        // No upper length cap — `actualSequence`, `containerAvailability`,
+        // `serviceabilityResults` are all legitimate variable references.
         if (!Character.isLetter(s.charAt(0))) return false;
         boolean hasLetter = false;
         for (int i = 0; i < s.length(); i++) {
