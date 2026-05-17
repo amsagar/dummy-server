@@ -125,7 +125,7 @@ public class TraceBasedBpmnCompiler {
                 "attempts", result.attempts(),
                 "ok", result.ok()));
 
-        String xml = result.xml();
+        String xml = safeBpmnXmlForPersistence(result.xml());
         String error = result.ok() ? null : (result.lastError() == null ? "agentic compile failed" : result.lastError());
 
         long now = System.currentTimeMillis();
@@ -388,7 +388,13 @@ public class TraceBasedBpmnCompiler {
     private static final java.util.Set<String> ALLOWED_TRACE_LITERALS = java.util.Set.of(
             "US", "USA", "CA", "MX",
             "true", "false", "null",
-            "OK", "Salesforce", "SFDC", "Web", "WEB", "API"
+            "OK", "Salesforce", "SFDC", "Web", "WEB", "API",
+            // PODS protocol / rule constants used in valid filters and
+            // sequence normalization. These may legitimately be hardcoded
+            // in FEEL despite appearing in trace data.
+            "IDEL", "RETSC", "LDT", "REDEL", "FPU", "MOV", "SID",
+            "SFP", "SCDEL", "CSRED", "CSFPU",
+            "NEW", "WRT", "WTW", "RDL"
     );
     private static final int MIN_INTERESTING_LITERAL_LENGTH = 2;
 
@@ -719,5 +725,14 @@ public class TraceBasedBpmnCompiler {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "\n... (truncated)";
+    }
+
+    /**
+     * Failed compile attempts still persist a rule-domain row so admin/debug
+     * views can show the error. The DB schema requires {@code bpmn_xml NOT NULL},
+     * so normalize absent XML to empty string instead of null.
+     */
+    static String safeBpmnXmlForPersistence(String xml) {
+        return xml == null ? "" : xml;
     }
 }
