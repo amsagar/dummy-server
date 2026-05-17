@@ -237,6 +237,29 @@ handled outside your BPMN.
   ✅ Resolve once, gate once. Bind the named concepts as variables in a
      single `feelExtractDelegate` upstream of the loop; the gate and the
      tool call then share one consistent view.
+- ❌ Single-quoted FEEL strings — `"channel": "'Salesforce'"`. FEEL only
+     accepts double-quoted strings; single quotes never bind and the
+     argTemplate evaluation will fail silently at runtime.
+  ✅ `"channel": "\"Salesforce\""` — double-quoted FEEL literal, escaped
+     for the JSON wrapper. The validator rejects single-quoted forms.
+- ❌ Driving a multi-instance `<subProcess>` off bare `order.Lines` when
+     the skill names a specific subset (leg ItemCodes, parent items,
+     consolidated lines, ...). Every line in the order will be iterated,
+     not the subset.
+  ✅ Apply the filter in the upstream `feelExtractDelegate` that binds
+     the loop collection, e.g.
+     `order.Lines[list contains(["IDEL","RETSC","LDT","REDEL","FPU"], ItemCode)]`.
+     The validator rejects a multi-instance whose collection variable
+     was bound from bare `order.Lines`.
+- ❌ Referencing `order.X` (or any other root variable) without an
+     upstream `${toolCallDelegate}` step that binds it. The trace may
+     have cached the order from a sibling rule's call — your BPMN runs
+     in isolation and won't.
+  ✅ Every rule that touches `order.X` MUST include a `Get_OrderID`
+     `${toolCallDelegate}` serviceTask with
+     `argTemplate={"ORD_ID":"orderId"}` and `outputBinding=order` as its
+     first step. Same rule applies to any other root variable: bind it
+     upstream or don't reference it.
 
 ## Skill specification
 

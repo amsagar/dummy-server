@@ -117,6 +117,210 @@ class AgenticTraceCompilerValidatorsTest {
         assertTrue(error.contains("pipeline"), error);
     }
 
+    // ── validateBoundVariableReferences ────────────────────────────
+
+    @Test
+    void boundVarsValidatorRejectsOrderReferenceWithoutGetOrderId() {
+        // No outputBinding=order anywhere — `order.OrderIdentity` is unbound.
+        String bpmn = "<definitions>"
+                + feelExtractTaskXml("t_assemble", "{orderId: order.OrderIdentity}", "result")
+                + "</definitions>";
+
+        String error = AgenticTraceCompiler.validateBoundVariableReferences(bpmn);
+
+        assertNotNull(error);
+        assertTrue(error.contains("'order'"), error);
+        assertTrue(error.contains("Get_OrderID"), error);
+    }
+
+    @Test
+    void boundVarsValidatorAcceptsOrderReferenceWhenUpstreamBindsIt() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("Get_OrderID", "{\"ORD_ID\":\"orderId\"}", "order")
+                + feelExtractTaskXml("t_assemble", "{orderId: order.OrderIdentity}", "result")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    @Test
+    void boundVarsValidatorAcceptsOrchestratorSeeds() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("Get_OrderID", "{\"ORD_ID\":\"orderId\"}", "order")
+                + "</definitions>";
+
+        // `orderId` is a seed — referenced inside argTemplate, no binding needed.
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    @Test
+    void boundVarsValidatorAllowsMultiInstanceElementVariable() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("Get_OrderID", "{\"ORD_ID\":\"orderId\"}", "order")
+                + feelExtractTaskXml("t_legs", "order.Lines[ItemCode = \"IDEL\"]", "legLines")
+                + "<subProcess id=\"sp_each_leg\">"
+                + "<multiInstanceLoopCharacteristics isSequential=\"false\""
+                + " flowable:collection=\"${legLines}\" flowable:elementVariable=\"leg\"/>"
+                + feelExtractTaskXml("t_leg_extract", "leg.ItemCode", "code")
+                + "</subProcess>"
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    @Test
+    void boundVarsValidatorAllowsRespInsidePostTransform() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithPostTransform("Serviceability",
+                        "{\"OrigZip\":\"\\\"12345\\\"\"}",
+                        "result",
+                        "{code: _resp.Result.Code}")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    @Test
+    void boundVarsValidatorAllowsForLoopLocalsInFeel() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("Get_OrderID", "{\"ORD_ID\":\"orderId\"}", "order")
+                + feelExtractTaskXml(
+                        "t_seq",
+                        "for l in sort(order.Lines, function(a,b) a.Sequence < b.Sequence)"
+                                + " return l.ServiceCode",
+                        "sequence")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    @Test
+    void boundVarsValidatorAllowsAggregationTargetDownstream() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("Get_OrderID", "{\"ORD_ID\":\"orderId\"}", "order")
+                + feelExtractTaskXml("t_legs", "order.Lines[ItemCode = \"IDEL\"]", "legLines")
+                + "<subProcess id=\"sp\">"
+                + "<multiInstanceLoopCharacteristics isSequential=\"false\""
+                + " flowable:collection=\"${legLines}\" flowable:elementVariable=\"leg\">"
+                + "<flowable:variableAggregation target=\"agg\">"
+                + "<variable source=\"code\"/>"
+                + "</flowable:variableAggregation>"
+                + "</multiInstanceLoopCharacteristics>"
+                + feelExtractTaskXml("t_leg_extract", "leg.ItemCode", "code")
+                + "</subProcess>"
+                + feelExtractTaskXml("t_assemble", "{summary: agg.code}", "result")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateBoundVariableReferences(bpmn));
+    }
+
+    // ── validateFeelLiteralSyntax ───────────────────────────────────
+
+    @Test
+    void feelLiteralValidatorFlagsSingleQuotedString() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("ContainerAvailability",
+                        "{\"channel\":\"'Salesforce'\"}",
+                        "containers")
+                + "</definitions>";
+
+        String error = AgenticTraceCompiler.validateFeelLiteralSyntax(bpmn);
+
+        assertNotNull(error);
+        assertTrue(error.contains("'Salesforce'"), error);
+        assertTrue(error.contains("double quote"), error);
+    }
+
+    @Test
+    void feelLiteralValidatorAcceptsEscapedDoubleQuotedString() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("ContainerAvailability",
+                        "{\"channel\":\"\\\"Salesforce\\\"\"}",
+                        "containers")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateFeelLiteralSyntax(bpmn));
+    }
+
+    @Test
+    void feelLiteralValidatorFlagsIdenticalBranchIf() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("ContainerAvailability",
+                        "{\"customerType\":\"if order.AccountNumber != null"
+                                + " then \\\"COMMERCIAL\\\" else \\\"COMMERCIAL\\\"\"}",
+                        "containers")
+                + "</definitions>";
+
+        String error = AgenticTraceCompiler.validateFeelLiteralSyntax(bpmn);
+
+        assertNotNull(error);
+        assertTrue(error.contains("COMMERCIAL"), error);
+        assertTrue(error.contains("branches"), error);
+    }
+
+    @Test
+    void feelLiteralValidatorAcceptsDifferentiatedIfBranches() {
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("ContainerAvailability",
+                        "{\"customerType\":\"if order.AccountNumber != null"
+                                + " then \\\"COMMERCIAL\\\" else \\\"RESIDENTIAL\\\"\"}",
+                        "containers")
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateFeelLiteralSyntax(bpmn));
+    }
+
+    // ── validateMultiInstanceCollectionFilter ───────────────────────
+
+    @Test
+    void miFilterValidatorFlagsBareOrderLines() {
+        String bpmn = "<definitions>"
+                + feelExtractTaskXml("t_legs", "order.Lines", "legLines")
+                + "<subProcess id=\"sp\">"
+                + "<multiInstanceLoopCharacteristics isSequential=\"false\""
+                + " flowable:collection=\"${legLines}\" flowable:elementVariable=\"leg\"/>"
+                + "</subProcess>"
+                + "</definitions>";
+
+        String error = AgenticTraceCompiler.validateMultiInstanceCollectionFilter(bpmn);
+
+        assertNotNull(error);
+        assertTrue(error.contains("legLines"), error);
+        assertTrue(error.contains("order.Lines"), error);
+    }
+
+    @Test
+    void miFilterValidatorAcceptsFilteredCollection() {
+        String bpmn = "<definitions>"
+                + feelExtractTaskXml(
+                        "t_legs",
+                        "order.Lines[list contains([\"IDEL\",\"RETSC\",\"LDT\"], ItemCode)]",
+                        "legLines")
+                + "<subProcess id=\"sp\">"
+                + "<multiInstanceLoopCharacteristics isSequential=\"false\""
+                + " flowable:collection=\"${legLines}\" flowable:elementVariable=\"leg\"/>"
+                + "</subProcess>"
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateMultiInstanceCollectionFilter(bpmn));
+    }
+
+    @Test
+    void miFilterValidatorIgnoresCollectionBoundByToolCall() {
+        // When the collection variable is bound by a tool call (not a
+        // feelExtractDelegate), the validator must say nothing — it can't
+        // see the bare-Lines bug because there's no feelExpr to inspect.
+        String bpmn = "<definitions>"
+                + toolCallTaskXmlWithBinding("ListLegs", "{}", "legLines")
+                + "<subProcess id=\"sp\">"
+                + "<multiInstanceLoopCharacteristics isSequential=\"false\""
+                + " flowable:collection=\"${legLines}\" flowable:elementVariable=\"leg\"/>"
+                + "</subProcess>"
+                + "</definitions>";
+
+        assertNull(AgenticTraceCompiler.validateMultiInstanceCollectionFilter(bpmn));
+    }
+
     // ── helpers ─────────────────────────────────────────────────────
 
     private static ExecutionTrace traceWithStep(String toolName, JsonNode input) {
@@ -126,12 +330,41 @@ class AgenticTraceCompilerValidatorsTest {
     }
 
     private static String toolCallTaskXml(String toolName, String argTemplate) {
-        return "<serviceTask id=\"t_test\" name=\"" + toolName + "\""
+        return toolCallTaskXmlWithBinding(toolName, argTemplate, "out");
+    }
+
+    private static String toolCallTaskXmlWithBinding(String toolName, String argTemplate, String binding) {
+        return "<serviceTask id=\"t_" + binding + "\" name=\"" + toolName + "\""
                 + " flowable:delegateExpression=\"${toolCallDelegate}\">"
                 + "<extensionElements>"
                 + "<flowable:field name=\"toolName\"><flowable:string><![CDATA[" + toolName + "]]></flowable:string></flowable:field>"
                 + "<flowable:field name=\"argTemplate\"><flowable:string><![CDATA[" + argTemplate + "]]></flowable:string></flowable:field>"
-                + "<flowable:field name=\"outputBinding\"><flowable:string>out</flowable:string></flowable:field>"
+                + "<flowable:field name=\"outputBinding\"><flowable:string>" + binding + "</flowable:string></flowable:field>"
+                + "</extensionElements>"
+                + "</serviceTask>";
+    }
+
+    private static String toolCallTaskXmlWithPostTransform(String toolName,
+                                                           String argTemplate,
+                                                           String binding,
+                                                           String postTransform) {
+        return "<serviceTask id=\"t_" + binding + "\" name=\"" + toolName + "\""
+                + " flowable:delegateExpression=\"${toolCallDelegate}\">"
+                + "<extensionElements>"
+                + "<flowable:field name=\"toolName\"><flowable:string><![CDATA[" + toolName + "]]></flowable:string></flowable:field>"
+                + "<flowable:field name=\"argTemplate\"><flowable:string><![CDATA[" + argTemplate + "]]></flowable:string></flowable:field>"
+                + "<flowable:field name=\"outputBinding\"><flowable:string>" + binding + "</flowable:string></flowable:field>"
+                + "<flowable:field name=\"postTransform\"><flowable:string><![CDATA[" + postTransform + "]]></flowable:string></flowable:field>"
+                + "</extensionElements>"
+                + "</serviceTask>";
+    }
+
+    private static String feelExtractTaskXml(String id, String feelExpr, String binding) {
+        return "<serviceTask id=\"" + id + "\""
+                + " flowable:delegateExpression=\"${feelExtractDelegate}\">"
+                + "<extensionElements>"
+                + "<flowable:field name=\"feelExpr\"><flowable:string><![CDATA[" + feelExpr + "]]></flowable:string></flowable:field>"
+                + "<flowable:field name=\"outputBinding\"><flowable:string>" + binding + "</flowable:string></flowable:field>"
                 + "</extensionElements>"
                 + "</serviceTask>";
     }

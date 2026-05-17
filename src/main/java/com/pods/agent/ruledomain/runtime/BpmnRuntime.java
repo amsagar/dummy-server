@@ -165,19 +165,39 @@ public class BpmnRuntime {
         // Java types so the summarizer + serializer downstream don't have
         // to know about Jackson 2.x vs 3.x.
         Object resultRaw = BpmnVariables.toJavaNative(historicVars.get("result"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> resultVar = resultRaw instanceof Map<?, ?> r
-                ? (Map<String, Object>) r
-                : flattenedHistoricVars(historicVars);
+        Map<String, Object> resultVar = shapeOutputs(resultRaw, domain);
 
         Object failedToolVar = historicVars.get("_failedTool");
         boolean processAborted = historic != null && historic.getEndTime() == null;
         boolean tookErrorPath = failedToolVar != null;
-        boolean failed = processAborted || tookErrorPath;
+        // BpmnCompiler.injectErrorBoundaries names every error-boundary end
+        // event `endOnToolFailure` (top scope) or `endOnToolFailure__<spId>`
+        // (per subprocess). If the process completed cleanly but at one of
+        // those endpoints, the boundary fired and the rule's happy-path
+        // assemble step never ran — surface that as a failure rather than
+        // returning success with empty outputs.
+        String endActivity = historic == null ? null : historic.getEndActivityId();
+        boolean endedAtFailureEvent = endActivity != null && endActivity.startsWith("endOnToolFailure");
+        // If we ended at the assemble-end event but `result` is still null,
+        // the assemble's FEEL eval silently produced no binding. Treat as
+        // failure so callers see the BPMN is incomplete, not "succeeded
+        // with empty data".
+        boolean missingResultAfterCleanEnd = !processAborted && !endedAtFailureEvent
+                && resultRaw == null;
+        boolean failed = processAborted || tookErrorPath || endedAtFailureEvent
+                || missingResultAfterCleanEnd;
 
         String error;
         if (tookErrorPath) {
             error = "Tool execution failed: " + failedToolVar;
+        } else if (endedAtFailureEvent) {
+            error = "BPMN ended at error boundary endpoint '" + endActivity
+                    + "' — a service task failed and the error boundary routed "
+                    + "around the assemble step.";
+        } else if (missingResultAfterCleanEnd) {
+            error = "BPMN completed without writing the 'result' variable. "
+                    + "The assemble step did not run or its FEEL expression "
+                    + "produced no binding.";
         } else if (processAborted) {
             error = historic == null ? null : historic.getDeleteReason();
         } else {
@@ -209,15 +229,44 @@ public class BpmnRuntime {
         return out;
     }
 
-    /** Like {@code new LinkedHashMap<>(historicVars)} but with every value
-     *  passed through {@link BpmnVariables#toJavaNative} so any leftover
-     *  Jackson 2.x JsonNode trees become plain Java structures. */
-    private static Map<String, Object> flattenedHistoricVars(Map<String, Object> historicVars) {
-        Map<String, Object> out = new LinkedHashMap<>(historicVars.size());
-        for (Map.Entry<String, Object> e : historicVars.entrySet()) {
-            out.put(e.getKey(), BpmnVariables.toJavaNative(e.getValue()));
+    /**
+     * Shape the BPMN's final {@code result} variable into the outputs map
+     * surfaced on {@link ExecutionOutcome}. We never return the raw
+     * process-variable dump anymore: callers (chat orchestrator, admin
+     * test endpoint) only need the assembled result, and dumping every
+     * intermediate variable leaked the entire order / leg / aggregator
+     * state on every test run.
+     *
+     * <p>Shape rules:
+     * <ul>
+     *   <li>{@code null} (no result, or assemble step didn't run) →
+     *       empty map. The caller decides what to do (the execute path
+     *       already flags this as a failure).
+     *   <li>{@code Map} → returned as-is (the common case — the
+     *       compiler's assemble step writes a record).
+     *   <li>{@code List} / scalar / {@code JsonNode} → wrapped under the
+     *       domain's {@code resultKey} (e.g. {@code "serviceability"}),
+     *       falling back to {@code "result"} when the domain has none.
+     * </ul>
+     * Package-private so {@code BpmnRuntimeOutputShapeTest} can pin the
+     * contract without spinning up Flowable.
+     */
+    static Map<String, Object> shapeOutputs(Object resultRaw, RuleDomain domain) {
+        if (resultRaw == null) return Map.of();
+        if (resultRaw instanceof Map<?, ?> m) {
+            Map<String, Object> out = new LinkedHashMap<>(m.size());
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (e.getKey() == null) continue;
+                out.put(e.getKey().toString(), e.getValue());
+            }
+            return out;
         }
-        return out;
+        String key = domain != null
+                && domain.getResultKey() != null
+                && !domain.getResultKey().isBlank()
+                ? domain.getResultKey()
+                : "result";
+        return Map.of(key, resultRaw);
     }
 
     private void persist(RuleDomain domain,

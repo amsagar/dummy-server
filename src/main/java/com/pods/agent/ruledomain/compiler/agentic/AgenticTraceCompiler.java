@@ -207,6 +207,9 @@ public class AgenticTraceCompiler {
             if (err == null) err = validateRuleToolScope(cleaned, rule, slice);
             if (err == null) err = validateNoMetaToolsInToolCall(cleaned);
             if (err == null) err = validateArgTemplateKeys(cleaned, slice, objectMapper);
+            if (err == null) err = validateBoundVariableReferences(cleaned);
+            if (err == null) err = validateFeelLiteralSyntax(cleaned);
+            if (err == null) err = validateMultiInstanceCollectionFilter(cleaned);
             if (err == null) err = bpmnCompiler.tryDeploy(cleaned, skillName, rule.name());
 
             if (err == null) {
@@ -431,6 +434,326 @@ public class AgenticTraceCompiler {
                 + "in parallel per item, wrap the toolCallDelegate serviceTask in a "
                 + "<subProcess> with <multiInstanceLoopCharacteristics isSequential=\"false\" "
                 + "flowable:collection=\"${listVar}\" flowable:elementVariable=\"item\"/>.";
+    }
+
+    // ── Bound-variable references ────────────────────────────────────────
+
+    /** Orchestrator-provided seed variables. Always in scope in any rule
+     *  domain BPMN — no upstream {@code outputBinding} is required. */
+    private static final java.util.Set<String> ORCHESTRATOR_SEEDS = java.util.Set.of(
+            "userMessage", "orderId", "customerId", "sessionId",
+            "_turnId", "_sessionId");
+
+    /** FEEL / JUEL keywords + built-ins that may legitimately appear as the
+     *  head of a `X.` or `X[` form. Filtered out so they don't get flagged
+     *  as missing variable bindings. Conservative on purpose — better to
+     *  miss a few real issues than block valid BPMNs. */
+    private static final java.util.Set<String> FEEL_RESERVED = java.util.Set.of(
+            "if", "then", "else", "for", "in", "return", "function",
+            "some", "every", "satisfies", "between", "instance", "of",
+            "and", "or", "not", "true", "false", "null",
+            "sort", "count", "list", "contains", "string", "today",
+            "now", "date", "time", "duration", "number", "boolean",
+            "min", "max", "sum", "mean", "abs", "floor", "ceiling",
+            "concatenate", "append", "union", "distinct", "flatten");
+
+    /**
+     * Reject BPMN that references a process variable (via FEEL or JUEL)
+     * that no upstream task binds via {@code outputBinding}, and that
+     * isn't an orchestrator-provided seed or a multi-instance loop
+     * variable.
+     *
+     * <p>This catches the most damaging LLM regression: dropping the
+     * {@code Get_OrderID} step (because the trace cached the order from a
+     * sibling rule's prior call) and then referencing {@code order.X}
+     * everywhere — every reference silently resolves to {@code null} at
+     * runtime and the rule returns
+     * {@code {orderId: null, sequence: null, valid: true}}.
+     */
+    static String validateBoundVariableReferences(String bpmnXml) {
+        if (bpmnXml == null) return null;
+
+        // 1. Collect every variable bound by an outputBinding field.
+        java.util.Set<String> bound = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher om = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"outputBinding\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (om.find()) {
+            String v = om.group(1).trim();
+            if (!v.isEmpty()) bound.add(v);
+        }
+
+        // 2. Include multi-instance loop element variables and aggregation
+        //    targets. Loop-local: in scope inside the subprocess.
+        //    Aggregation target: bound after the multi-instance completes
+        //    and visible to downstream tasks.
+        java.util.regex.Matcher em = java.util.regex.Pattern.compile(
+                "<multiInstanceLoopCharacteristics\\b[^>]*\\bflowable:elementVariable\\s*=\\s*\"([^\"]+)\"",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (em.find()) bound.add(em.group(1).trim());
+
+        java.util.regex.Matcher agg = java.util.regex.Pattern.compile(
+                "<flowable:variableAggregation\\b[^>]*\\btarget\\s*=\\s*\"([^\"]+)\"",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (agg.find()) bound.add(agg.group(1).trim());
+
+        // 3. Walk every FEEL-bearing field and find unbound roots.
+        java.util.Map<String, java.util.Set<String>> offenders = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher xm = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(feelExpr|argTemplate|inputsTemplate|postTransform)\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (xm.find()) {
+            String which = xm.group(1);
+            String body = xm.group(2);
+            collectUnboundRoots(which, body, bound, offenders);
+        }
+
+        // 4. Also scan JUEL ${X} references in conditionExpression and
+        //    flowable:collection attributes — these must point at a
+        //    bound variable too.
+        java.util.regex.Matcher juel = java.util.regex.Pattern.compile(
+                "[$#]\\{\\s*!?\\s*([A-Za-z_][A-Za-z0-9_]*)\\b").matcher(bpmnXml);
+        while (juel.find()) {
+            String ident = juel.group(1);
+            // Skip delegate beans (`toolCallDelegate`, `feelExtractDelegate`, ...)
+            if (ident.endsWith("Delegate")) continue;
+            if (FEEL_RESERVED.contains(ident)) continue;
+            if (ORCHESTRATOR_SEEDS.contains(ident)) continue;
+            if (bound.contains(ident)) continue;
+            offenders.computeIfAbsent(ident, k -> new java.util.LinkedHashSet<>()).add("JUEL");
+        }
+
+        if (offenders.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN references variable(s) that no upstream task binds and that "
+                + "aren't orchestrator-provided seeds. Fix by adding the missing step that "
+                + "binds them BEFORE the first reference:");
+        for (java.util.Map.Entry<String, java.util.Set<String>> e : offenders.entrySet()) {
+            msg.append("\n  - '").append(e.getKey()).append("' referenced in ").append(e.getValue());
+            if ("order".equals(e.getKey())) {
+                msg.append(" — add `<serviceTask flowable:delegateExpression=\"${toolCallDelegate}\">` "
+                        + "with toolName=`Get_OrderID`, argTemplate=`{\"ORD_ID\":\"orderId\"}`, "
+                        + "outputBinding=`order` as the first step.");
+            }
+        }
+        msg.append("\nOrchestrator-provided seeds you may reference without binding: ")
+           .append(ORCHESTRATOR_SEEDS);
+        msg.append("\nBound by upstream outputBinding in this BPMN: ").append(bound);
+        return msg.toString();
+    }
+
+    /** Scan a single FEEL / JSON-with-FEEL body for navigation roots
+     *  ({@code X.}, {@code X[}) and add any that aren't bound, seeded,
+     *  FEEL-local, or reserved to {@code offenders}. */
+    private static void collectUnboundRoots(String fieldName,
+                                            String body,
+                                            java.util.Set<String> bound,
+                                            java.util.Map<String, java.util.Set<String>> offenders) {
+        if (body == null || body.isBlank()) return;
+        java.util.Set<String> feelLocals = extractFeelLocals(body);
+        // The lookbehind ensures we don't pick up `foo` inside `order.foo`
+        // (i.e., a property accessor) — only a true root identifier. We do
+        // NOT exclude `"` here: FEEL expressions appear inside JSON-quoted
+        // argTemplate values (`{"key":"order.X"}`), so an identifier
+        // preceded by `"` is still a legitimate root.
+        java.util.regex.Matcher rm = java.util.regex.Pattern.compile(
+                "(?<![.A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\\s*[.\\[]").matcher(body);
+        while (rm.find()) {
+            String ident = rm.group(1);
+            if (FEEL_RESERVED.contains(ident)) continue;
+            if (feelLocals.contains(ident)) continue;
+            if (ORCHESTRATOR_SEEDS.contains(ident)) continue;
+            if (bound.contains(ident)) continue;
+            // _resp is the raw tool response, available only inside postTransform.
+            if ("_resp".equals(ident) && "postTransform".equals(fieldName)) continue;
+            offenders.computeIfAbsent(ident, k -> new java.util.LinkedHashSet<>()).add(fieldName);
+        }
+    }
+
+    /** Identifiers introduced as locals inside a FEEL expression:
+     *  {@code for X in ...}, {@code function(X, Y)}, {@code some X in ...},
+     *  {@code every X in ...}. Scoped to the expression body — we don't
+     *  try to be precise about lexical nesting; over-allowing here only
+     *  costs a missed validator hit, never a false positive. */
+    private static java.util.Set<String> extractFeelLocals(String body) {
+        java.util.Set<String> locals = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher forM = java.util.regex.Pattern.compile(
+                "\\bfor\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+in\\b").matcher(body);
+        while (forM.find()) locals.add(forM.group(1));
+        java.util.regex.Matcher quantM = java.util.regex.Pattern.compile(
+                "\\b(?:some|every)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+in\\b").matcher(body);
+        while (quantM.find()) locals.add(quantM.group(1));
+        java.util.regex.Matcher fnM = java.util.regex.Pattern.compile(
+                "\\bfunction\\s*\\(\\s*([A-Za-z0-9_,\\s]+)\\s*\\)").matcher(body);
+        while (fnM.find()) {
+            for (String p : fnM.group(1).split(",")) {
+                String t = p.trim();
+                if (!t.isEmpty()) locals.add(t);
+            }
+        }
+        return locals;
+    }
+
+    // ── FEEL literal syntax ──────────────────────────────────────────────
+
+    /**
+     * Reject FEEL expressions that contain single-quoted string literals
+     * (FEEL only supports double quotes — single quotes never bind and
+     * cause a runtime parse failure) or {@code if X then "A" else "A"}
+     * patterns where both branches are the same literal (a clear LLM
+     * hallucination).
+     *
+     * <p>Scans the body of every {@code argTemplate}, {@code inputsTemplate},
+     * {@code feelExpr}, and {@code postTransform} field. JSON wrappers are
+     * tolerated — only the FEEL-meaningful contents are inspected.
+     */
+    static String validateFeelLiteralSyntax(String bpmnXml) {
+        if (bpmnXml == null) return null;
+
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        java.util.regex.Matcher xm = java.util.regex.Pattern.compile(
+                "<flowable:field\\s+name\\s*=\\s*\"(feelExpr|argTemplate|inputsTemplate|postTransform)\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (xm.find()) {
+            String which = xm.group(1);
+            String body = xm.group(2);
+            checkFeelLiteralSyntax(which, body, problems);
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN contains invalid FEEL syntax. FEEL string literals must use "
+                + "double quotes, and constant-branch `if` expressions are almost always a "
+                + "hallucination:");
+        for (String p : problems) msg.append("\n  - ").append(p);
+        msg.append("\nFix: replace `'Foo'` with `\"Foo\"` (escape as `\\\"Foo\\\"` inside the "
+                + "JSON wrapper). Replace `if X then \"A\" else \"A\"` with the literal `\"A\"`, "
+                + "or with a real branch that returns different values.");
+        return msg.toString();
+    }
+
+    private static final java.util.regex.Pattern SINGLE_QUOTED_FEEL = java.util.regex.Pattern.compile(
+            "'[^'\\n]*'");
+
+    /** Matches `if <cond> then "branchA" else "branchB"`. Tolerates the
+     *  JSON-escaped form (`\"X\"`) that appears verbatim inside the
+     *  raw {@code <flowable:string>} body before JSON parsing. We only
+     *  flag when the two literals are character-for-character identical
+     *  — anything else is legitimate branching. */
+    private static final java.util.regex.Pattern IF_SAME_BRANCH = java.util.regex.Pattern.compile(
+            "\\bif\\s+[^\\n]+?\\s+then\\s+\\\\?\"([^\"\\\\\\n]+)\\\\?\"\\s+else\\s+\\\\?\"([^\"\\\\\\n]+)\\\\?\"",
+            java.util.regex.Pattern.DOTALL);
+
+    private static void checkFeelLiteralSyntax(String fieldName,
+                                               String body,
+                                               java.util.List<String> problems) {
+        if (body == null || body.isBlank()) return;
+
+        // 1. Single-quoted FEEL strings. These never appear in valid FEEL
+        //    — FEEL strictly uses double quotes. JSON values inside an
+        //    argTemplate are quoted with double quotes too, so any `'...'`
+        //    we see is inside the FEEL expression itself.
+        java.util.regex.Matcher sm = SINGLE_QUOTED_FEEL.matcher(body);
+        java.util.Set<String> singles = new java.util.LinkedHashSet<>();
+        while (sm.find()) singles.add(sm.group());
+        if (!singles.isEmpty()) {
+            problems.add(fieldName + " contains single-quoted FEEL string(s) "
+                    + singles + " — FEEL uses double quotes.");
+        }
+
+        // 2. `if ... then "A" else "A"` — both branches identical literal.
+        java.util.regex.Matcher im = IF_SAME_BRANCH.matcher(body);
+        while (im.find()) {
+            String a = im.group(1);
+            String b = im.group(2);
+            if (a.equals(b)) {
+                problems.add(fieldName + " has an `if` expression whose branches both return "
+                        + "the same literal \"" + a + "\" — drop the `if` and use the literal "
+                        + "directly, or pick a real differentiating value for the else branch.");
+            }
+        }
+    }
+
+    // ── Multi-instance collection filter ─────────────────────────────────
+
+    /**
+     * Reject any multi-instance subprocess whose {@code flowable:collection}
+     * variable was bound from a bare {@code <rootVar>.Lines} expression
+     * with no {@code [filter]}. A multi-instance fan-out across the entire
+     * order's lines is rarely what the skill spec asks for — most rules
+     * restrict the iteration to a specific subset (e.g. leg ItemCodes).
+     *
+     * <p>Heuristic, not exact: we won't catch every wrong filter, but we
+     * do catch the most common regression of "the LLM forgot the filter
+     * entirely".
+     */
+    static String validateMultiInstanceCollectionFilter(String bpmnXml) {
+        if (bpmnXml == null) return null;
+
+        // 1. Find every multi-instance flowable:collection variable name.
+        java.util.Set<String> collectionVars = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher cm = java.util.regex.Pattern.compile(
+                "<multiInstanceLoopCharacteristics\\b[^>]*\\bflowable:collection\\s*=\\s*\"[$#]\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\"",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (cm.find()) collectionVars.add(cm.group(1).trim());
+        if (collectionVars.isEmpty()) return null;
+
+        // 2. For each collection variable, find the upstream feelExtract
+        //    serviceTask that binds it and inspect its feelExpr.
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        for (String var : collectionVars) {
+            String feelExpr = extractFeelExprForBinding(bpmnXml, var);
+            if (feelExpr == null) continue; // bound by a tool call or aggregator, not a FEEL extract
+            String trimmed = feelExpr.trim();
+            // Match `<rootVar>.Lines` (or `.lines` / `.LINES`) with no
+            // square-bracket filter immediately after.
+            java.util.regex.Matcher lm = java.util.regex.Pattern.compile(
+                    "^([A-Za-z_][A-Za-z0-9_]*)\\.(?:Lines|lines|LINES)\\s*$").matcher(trimmed);
+            if (lm.matches()) {
+                problems.add("multi-instance collection '" + var + "' is bound from bare `"
+                        + trimmed + "` — every line in the order will be processed.");
+            }
+        }
+        if (problems.isEmpty()) return null;
+
+        StringBuilder msg = new StringBuilder(
+                "Compiled BPMN fan-outs over the raw `order.Lines` list without filtering. "
+                + "If the skill restricts which lines count (e.g. by ItemCode), apply the "
+                + "filter upstream in the feelExtractDelegate that binds the collection "
+                + "variable:");
+        for (String p : problems) msg.append("\n  - ").append(p);
+        msg.append("\nFix: change the feelExpr to a filtered form such as "
+                + "`order.Lines[list contains([\"IDEL\",\"RETSC\",\"LDT\",\"REDEL\",\"FPU\"], ItemCode)]` "
+                + "and re-bind the same outputBinding variable.");
+        return msg.toString();
+    }
+
+    /** Find the {@code feelExpr} field of the {@code feelExtractDelegate}
+     *  serviceTask whose {@code outputBinding} is {@code var}. Returns
+     *  {@code null} when no such task exists (the variable may be bound
+     *  by a tool call or aggregator, which is fine — only FEEL extracts
+     *  can have the bare-Lines bug). */
+    private static String extractFeelExprForBinding(String bpmnXml, String var) {
+        java.util.regex.Matcher tm = java.util.regex.Pattern.compile(
+                "<serviceTask\\b[^>]*flowable:delegateExpression\\s*=\\s*\"\\s*[$#]\\{\\s*feelExtractDelegate\\s*\\}\\s*\"[\\s\\S]*?</serviceTask>",
+                java.util.regex.Pattern.DOTALL).matcher(bpmnXml);
+        while (tm.find()) {
+            String taskBlock = tm.group();
+            String binding = null;
+            String feelExpr = null;
+            java.util.regex.Matcher fm = java.util.regex.Pattern.compile(
+                    "<flowable:field\\s+name\\s*=\\s*\"(outputBinding|feelExpr)\"[^>]*>\\s*<flowable:string>\\s*(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?\\s*</flowable:string>",
+                    java.util.regex.Pattern.DOTALL).matcher(taskBlock);
+            while (fm.find()) {
+                String which = fm.group(1);
+                String value = fm.group(2);
+                if ("outputBinding".equals(which)) binding = value.trim();
+                else if ("feelExpr".equals(which)) feelExpr = value;
+            }
+            if (var.equals(binding) && feelExpr != null) return feelExpr;
+        }
+        return null;
     }
 
     /**
