@@ -528,3 +528,34 @@ CREATE INDEX IF NOT EXISTS idx_rule_executions_domain
 ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_json TEXT;
 ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_source_hash TEXT;
 ALTER TABLE agent.skills ADD COLUMN IF NOT EXISTS derived_manifest_at BIGINT;
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Per-activity I/O log for rule-domain BPMN runs.
+--
+-- One row per delegate invocation (toolCall / feelExtract / decisionTable).
+-- For multi-instance subprocesses, one row per iteration. Captures the
+-- exact input args and the bound output value, so failures like "lineId
+-- is null" can be diagnosed by inspecting actual per-iteration values
+-- instead of hypothesizing from the final assembled `result`.
+-- ────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS agent.rule_activity_events (
+    id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    execution_id         TEXT NOT NULL REFERENCES agent.rule_executions (id) ON DELETE CASCADE,
+    process_instance_id  TEXT NOT NULL,
+    activity_id          TEXT NOT NULL,
+    activity_name        TEXT,
+    activity_type        TEXT,
+    delegate_bean        TEXT,
+    iteration_index      INTEGER,
+    input_json           TEXT,
+    output_json          TEXT,
+    error_code           TEXT,
+    error_message        TEXT,
+    start_ts             BIGINT NOT NULL,
+    end_ts               BIGINT,
+    duration_ms          INTEGER,
+    created_at           BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_activity_events_execution
+    ON agent.rule_activity_events (execution_id, start_ts ASC);

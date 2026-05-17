@@ -6,6 +6,7 @@ import org.flowable.engine.delegate.BpmnError;
 import org.flowable.engine.delegate.DelegateExecution;
 import org.flowable.engine.delegate.JavaDelegate;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,14 +33,30 @@ public class FeelExtractDelegate implements JavaDelegate {
 
     private final FeelHelper feel;
     private final RuleDomainEventBus bus;
+    private final ObjectMapper objectMapper;
 
-    public FeelExtractDelegate(FeelHelper feel, RuleDomainEventBus bus) {
+    public FeelExtractDelegate(FeelHelper feel, RuleDomainEventBus bus, ObjectMapper objectMapper) {
         this.feel = feel;
         this.bus = bus;
+        this.objectMapper = objectMapper;
     }
 
     @Override
     public void execute(DelegateExecution execution) {
+        ActivityEventStaging staging = ActivityEventStaging.start(execution, "feelExtractDelegate");
+        try {
+            executeStaged(execution, staging);
+            staging.stage();
+        } catch (BpmnError be) {
+            staging.error(be.getErrorCode(), be.getMessage()).stage();
+            throw be;
+        } catch (RuntimeException ex) {
+            staging.error("UNEXPECTED", ex.getMessage()).stage();
+            throw ex;
+        }
+    }
+
+    private void executeStaged(DelegateExecution execution, ActivityEventStaging staging) {
         String expr = BpmnFieldReader.required(execution, "feelExpr");
         String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
 
@@ -49,6 +66,12 @@ public class FeelExtractDelegate implements JavaDelegate {
                 "turnId", turnId == null ? "" : turnId.toString(),
                 "nodeId", nodeId == null ? "" : nodeId,
                 "outputBinding", outputBinding));
+
+        // The FEEL expression itself is the most useful "input" for
+        // debugging. Variable scope is recorded transparently in the
+        // surrounding execution context but stashing the literal text
+        // makes postmortems direct.
+        staging.input(expr);
 
         Map<String, Object> ctx = BpmnVariables.readContext(execution);
         Object value;
@@ -60,6 +83,10 @@ public class FeelExtractDelegate implements JavaDelegate {
 
         log.debug("BPMN feel-extract: {} -> {}", expr, value);
         BpmnVariables.set(execution, outputBinding, value);
+        try {
+            staging.output(objectMapper.writeValueAsString(value));
+        } catch (Exception ignored) {
+        }
     }
 
 }

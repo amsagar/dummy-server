@@ -75,6 +75,20 @@ public class ToolCallDelegate implements JavaDelegate {
 
     @Override
     public void execute(DelegateExecution execution) {
+        ActivityEventStaging staging = ActivityEventStaging.start(execution, "toolCallDelegate");
+        try {
+            executeStaged(execution, staging);
+            staging.stage();
+        } catch (BpmnError be) {
+            staging.error(be.getErrorCode(), be.getMessage()).stage();
+            throw be;
+        } catch (RuntimeException ex) {
+            staging.error("UNEXPECTED", ex.getMessage()).stage();
+            throw ex;
+        }
+    }
+
+    private void executeStaged(DelegateExecution execution, ActivityEventStaging staging) {
         String toolName = BpmnFieldReader.required(execution, "toolName");
         String argTemplateJson = BpmnFieldReader.required(execution, "argTemplate");
         String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
@@ -108,6 +122,7 @@ public class ToolCallDelegate implements JavaDelegate {
             throw new BpmnError("PAYLOAD_SERIALIZE_FAILED",
                     "Could not serialize tool args: " + ex.getMessage());
         }
+        staging.input(payload);
 
         bus.emit("rule_domain.tool.call", Map.of(
                 "turnId", turnId == null ? "" : turnId,
@@ -153,6 +168,13 @@ public class ToolCallDelegate implements JavaDelegate {
         }
 
         BpmnVariables.set(execution, outputBinding, finalValue);
+
+        // Record what we bound for postmortem inspection.
+        try {
+            staging.output(objectMapper.writeValueAsString(finalValue));
+        } catch (Exception ignored) {
+            // serialization failure is non-fatal for activity logging
+        }
     }
 
     private ToolExecutionService.ExecutionResult executeWithTimeoutRetry(

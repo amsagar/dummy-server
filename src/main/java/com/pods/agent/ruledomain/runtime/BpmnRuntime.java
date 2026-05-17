@@ -3,6 +3,7 @@ package com.pods.agent.ruledomain.runtime;
 import com.pods.agent.ruledomain.model.ExecutionOutcome;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.RuleExecution;
+import com.pods.agent.ruledomain.repository.RuleActivityEventRepository;
 import com.pods.agent.ruledomain.repository.RuleExecutionRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.HistoryService;
@@ -43,6 +44,7 @@ public class BpmnRuntime {
     private final RepositoryService repositoryService;
     private final HistoryService historyService;
     private final RuleExecutionRepository executionRepo;
+    private final RuleActivityEventRepository activityEventRepo;
     private final ObjectMapper objectMapper;
 
     /**
@@ -63,11 +65,13 @@ public class BpmnRuntime {
                        RepositoryService repositoryService,
                        HistoryService historyService,
                        RuleExecutionRepository executionRepo,
+                       RuleActivityEventRepository activityEventRepo,
                        ObjectMapper objectMapper) {
         this.runtimeService = runtimeService;
         this.repositoryService = repositoryService;
         this.historyService = historyService;
         this.executionRepo = executionRepo;
+        this.activityEventRepo = activityEventRepo;
         this.objectMapper = objectMapper;
     }
 
@@ -128,6 +132,30 @@ public class BpmnRuntime {
         ensureDeployed(domain);
         long start = System.currentTimeMillis();
 
+        // Pre-allocate the rule_executions.id so delegates can stamp it
+        // on their activity events before the parent row is committed.
+        // The buffer collects them and gets flushed by persist() after
+        // the FK target exists.
+        String executionId = UUID.randomUUID().toString();
+        ActivityEventBuffer.open(executionId);
+
+        try {
+            return executeInternal(domain, inputs, sessionId, turnId, fromCacheHit, start, executionId);
+        } finally {
+            // Defensive: if anything threw before persist() reached the
+            // flush call, drain the buffer so it doesn't leak to a later
+            // execute() on the same thread.
+            ActivityEventBuffer.close();
+        }
+    }
+
+    private ExecutionOutcome executeInternal(RuleDomain domain,
+                                              Map<String, Object> inputs,
+                                              String sessionId,
+                                              String turnId,
+                                              boolean fromCacheHit,
+                                              long start,
+                                              String executionId) {
         Map<String, Object> variables = new LinkedHashMap<>(inputs == null ? Map.of() : inputs);
         // Propagate the chat turn id into process variables so cross-thread
         // emitters (BpmnTraceListener, etc.) can resolve the right SSE stream.
@@ -137,6 +165,8 @@ public class BpmnRuntime {
         if (sessionId != null && !sessionId.isBlank()) {
             variables.putIfAbsent("_sessionId", sessionId);
         }
+        // Delegates read this to stamp activity events.
+        variables.putIfAbsent("_executionId", executionId);
         String businessKey = "rd-" + UUID.randomUUID();
 
         ProcessInstance pi;
@@ -148,7 +178,7 @@ public class BpmnRuntime {
         } catch (Exception ex) {
             long latency = System.currentTimeMillis() - start;
             log.warn("Failed to start BPMN for domain {}: {}", domain.getId(), ex.getMessage());
-            persist(domain, null, sessionId, turnId, inputs, null, false, ex.getMessage(), latency);
+            persist(executionId, domain, null, sessionId, turnId, inputs, null, false, ex.getMessage(), latency);
             return ExecutionOutcome.failed(domain.getId(), null, ex.getMessage(), latency);
         }
 
@@ -206,7 +236,7 @@ public class BpmnRuntime {
         long latency = System.currentTimeMillis() - start;
 
         String outputsJson = safeJson(resultVar);
-        persist(domain, pi.getProcessInstanceId(), sessionId, turnId, inputs,
+        persist(executionId, domain, pi.getProcessInstanceId(), sessionId, turnId, inputs,
                 outputsJson, !failed, error, latency);
 
         if (failed) {
@@ -269,7 +299,8 @@ public class BpmnRuntime {
         return Map.of(key, resultRaw);
     }
 
-    private void persist(RuleDomain domain,
+    private void persist(String executionId,
+                         RuleDomain domain,
                          String procInstanceId,
                          String sessionId,
                          String turnId,
@@ -280,6 +311,7 @@ public class BpmnRuntime {
                          long latencyMs) {
         try {
             executionRepo.save(RuleExecution.builder()
+                    .id(executionId)
                     .domainId(domain.getId())
                     .sessionId(sessionId)
                     .turnId(turnId)
@@ -292,6 +324,16 @@ public class BpmnRuntime {
                     .build());
         } catch (Exception ex) {
             log.warn("Failed to persist rule_execution row: {}", ex.getMessage());
+            return; // FK target missing — don't try to flush activity events.
+        }
+        // Now flush per-activity events. Done AFTER the rule_executions
+        // row is committed so the FK is satisfied.
+        try {
+            java.util.List<com.pods.agent.ruledomain.model.RuleActivityEvent> staged =
+                    ActivityEventBuffer.close();
+            if (!staged.isEmpty()) activityEventRepo.saveAll(staged);
+        } catch (Exception ex) {
+            log.warn("Failed to flush rule_activity_events: {}", ex.getMessage());
         }
     }
 

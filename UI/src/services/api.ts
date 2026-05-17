@@ -198,6 +198,10 @@ export const api = {
       `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions/${encodeURIComponent(execId)}/trace`,
       { headers: getHeaders() }
     ).then(handleResponse),
+    activityEvents: (id: string, execId: string) => fetch(
+      `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/executions/${encodeURIComponent(execId)}/activity-events`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
     test: (id: string, inputs: Record<string, unknown>) => fetch(
       `${BASE_URL}/rule-domains/${encodeURIComponent(id)}/test`,
       {

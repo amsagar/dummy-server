@@ -51,6 +51,20 @@ public class DecisionTableDelegate implements JavaDelegate {
 
     @Override
     public void execute(DelegateExecution execution) {
+        ActivityEventStaging staging = ActivityEventStaging.start(execution, "decisionTableDelegate");
+        try {
+            executeStaged(execution, staging);
+            staging.stage();
+        } catch (BpmnError be) {
+            staging.error(be.getErrorCode(), be.getMessage()).stage();
+            throw be;
+        } catch (RuntimeException ex) {
+            staging.error("UNEXPECTED", ex.getMessage()).stage();
+            throw ex;
+        }
+    }
+
+    private void executeStaged(DelegateExecution execution, ActivityEventStaging staging) {
         String tableName = BpmnFieldReader.required(execution, "tableName");
         String inputsTemplateJson = BpmnFieldReader.required(execution, "inputsTemplate");
         String outputBinding = BpmnFieldReader.required(execution, "outputBinding");
@@ -82,6 +96,15 @@ public class DecisionTableDelegate implements JavaDelegate {
                 "tableName", tableName,
                 "inputs", inputs));
 
+        // Stage the resolved table + inputs for postmortem inspection.
+        try {
+            Map<String, Object> inputRecord = new LinkedHashMap<>();
+            inputRecord.put("tableName", tableName);
+            inputRecord.put("inputs", inputs);
+            staging.input(objectMapper.writeValueAsString(inputRecord));
+        } catch (Exception ignored) {
+        }
+
         log.debug("BPMN decision table eval: table={} inputs={}", tableName, inputs);
         EvaluationResult result;
         try {
@@ -110,6 +133,10 @@ public class DecisionTableDelegate implements JavaDelegate {
                 "matched", result.matched()));
 
         BpmnVariables.set(execution, outputBinding, out);
+        try {
+            staging.output(objectMapper.writeValueAsString(out));
+        } catch (Exception ignored) {
+        }
     }
 
 }

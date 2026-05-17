@@ -2,8 +2,10 @@ package com.pods.agent.ruledomain.api;
 
 import com.pods.agent.ruledomain.compiler.BpmnCompiler;
 import com.pods.agent.ruledomain.model.ExecutionOutcome;
+import com.pods.agent.ruledomain.model.RuleActivityEvent;
 import com.pods.agent.ruledomain.model.RuleDomain;
 import com.pods.agent.ruledomain.model.RuleExecution;
+import com.pods.agent.ruledomain.repository.RuleActivityEventRepository;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository;
 import com.pods.agent.ruledomain.repository.RuleDomainRepository.PageResult;
 import com.pods.agent.ruledomain.repository.RuleExecutionRepository;
@@ -47,6 +49,7 @@ public class RuleDomainController {
 
     private final RuleDomainRepository domainRepo;
     private final RuleExecutionRepository executionRepo;
+    private final RuleActivityEventRepository activityEventRepo;
     private final HistoryService historyService;
     private final RepositoryService repositoryService;
     private final BpmnRuntime bpmnRuntime;
@@ -54,12 +57,14 @@ public class RuleDomainController {
 
     public RuleDomainController(RuleDomainRepository domainRepo,
                                 RuleExecutionRepository executionRepo,
+                                RuleActivityEventRepository activityEventRepo,
                                 HistoryService historyService,
                                 RepositoryService repositoryService,
                                 BpmnRuntime bpmnRuntime,
                                 BpmnCompiler bpmnCompiler) {
         this.domainRepo = domainRepo;
         this.executionRepo = executionRepo;
+        this.activityEventRepo = activityEventRepo;
         this.historyService = historyService;
         this.repositoryService = repositoryService;
         this.bpmnRuntime = bpmnRuntime;
@@ -152,6 +157,19 @@ public class RuleDomainController {
         }).toList();
 
         return ResponseEntity.ok(rows);
+    }
+
+    /**
+     * Per-activity I/O log for one execution: input args, bound output,
+     * and any error per service-task invocation. Multi-instance subprocesses
+     * produce one row per iteration. Used by the UI to overlay actual
+     * values on the BPMN diagram so the operator can see exactly what
+     * each step processed.
+     */
+    @GetMapping("/{id}/executions/{execId}/activity-events")
+    public List<RuleActivityEvent> activityEvents(@PathVariable String id,
+                                                  @PathVariable String execId) {
+        return activityEventRepo.listForExecution(execId);
     }
 
     private static String classify(HistoricActivityInstance a, boolean runSucceeded) {

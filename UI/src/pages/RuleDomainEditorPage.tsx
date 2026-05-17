@@ -9,6 +9,7 @@ import type { BpmnElementRuntimeState, BpmnExecutionDecoration } from "@/compone
 import { Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ActivityValuesPanel, type ActivityEvent } from "@/components/bpmn/ActivityValuesPanel";
 import {
   extractBpmnVariables,
   defaultForVar,
@@ -133,6 +134,12 @@ export default function RuleDomainEditorPage() {
   const { data: executionTrace = [] } = useQuery<TraceEntry[]>({
     queryKey: ["rule-execution-trace", id, selectedExecutionId],
     queryFn: () => api.ruleDomains.executionTrace(id, selectedExecutionId!),
+    enabled: !!id && !!selectedExecutionId && tab === "executions",
+  });
+
+  const { data: activityEvents = [] } = useQuery<ActivityEvent[]>({
+    queryKey: ["rule-execution-activity-events", id, selectedExecutionId],
+    queryFn: () => api.ruleDomains.activityEvents(id, selectedExecutionId!),
     enabled: !!id && !!selectedExecutionId && tab === "executions",
   });
 
@@ -283,6 +290,7 @@ export default function RuleDomainEditorPage() {
                 xml={domain.bpmnXml}
                 trace={executionTrace}
                 decorations={traceDecorations}
+                activityEvents={activityEvents}
               />
             ) : (
               <div className="text-gray-400 text-sm py-8 text-center border rounded">
@@ -600,13 +608,16 @@ function ExecutionDetail({
   xml,
   trace,
   decorations,
+  activityEvents,
 }: {
   execution: RuleExecution;
   xml: string;
   trace: TraceEntry[];
   decorations: BpmnExecutionDecoration;
+  activityEvents: ActivityEvent[];
 }) {
   const erroredStep = trace.find((t) => t.errored || t.status === "failed");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   return (
     <div className="space-y-3">
@@ -623,6 +634,9 @@ function ExecutionDetail({
         <span className="text-gray-500">{new Date(execution.createdAt).toLocaleString()}</span>
         <span className="text-gray-500">· {execution.latencyMs ?? "?"} ms</span>
         <span className="text-gray-400 font-mono text-[10px]">proc {execution.flowableProcId}</span>
+        {activityEvents.length > 0 && (
+          <span className="text-gray-500">· {activityEvents.length} activity events recorded — click a node to inspect</span>
+        )}
       </div>
 
       {execution.errorMessage && (
@@ -638,7 +652,19 @@ function ExecutionDetail({
         </div>
       )}
 
-      <BpmnDiagram xml={xml} className="h-[55vh]" executionDecorations={decorations} />
+      <div className="relative">
+        <BpmnDiagram
+          xml={xml}
+          className="h-[55vh]"
+          executionDecorations={decorations}
+          onElementClick={setSelectedNodeId}
+        />
+        <ActivityValuesPanel
+          activityId={selectedNodeId}
+          events={activityEvents}
+          onClose={() => setSelectedNodeId(null)}
+        />
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
         <CountCard label="Steps" value={trace.length} />
