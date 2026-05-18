@@ -58,6 +58,67 @@ public class OrderValidationAnalyticsService {
      * match the old column names so the rest of the service reads
      * exactly like it did before.
      */
+    /**
+     * SQL fragment that derives a per-rule pass/fail signal by
+     * combining the {@code rule_executions.success} flag with hints
+     * extracted from {@code outputs_json}. A rule that ran cleanly
+     * (no error) but whose decision-table didn't match — or whose
+     * postTransform set {@code valid=false} / {@code isServiceable=false}
+     * for any leg — should still report {@code fail}, not {@code pass}.
+     *
+     * <p>Order of precedence:
+     * <ol>
+     *   <li>If the rule errored → {@code fail}</li>
+     *   <li>If the outputs JSON carries a {@code valid:false} or
+     *       {@code matched:false} (any depth ≤ 2) → {@code fail}</li>
+     *   <li>If the outputs carry an array where any element has
+     *       {@code isServiceable:false} or {@code checked:true} with
+     *       no {@code availableDates} → {@code fail}</li>
+     *   <li>Else → {@code pass}</li>
+     * </ol>
+     */
+    private static final String LEG_PASS_FAIL =
+            "CASE "
+            + "  WHEN NOT e.success THEN 'fail' "
+            + "  WHEN COALESCE("
+            + "         (NULLIF(e.outputs_json,'')::jsonb #>> '{legSequence,valid}')::boolean, "
+            + "         (NULLIF(e.outputs_json,'')::jsonb ->> 'valid')::boolean, "
+            + "         (NULLIF(e.outputs_json,'')::jsonb #>> '{legSequence,matched}')::boolean, "
+            + "         (NULLIF(e.outputs_json,'')::jsonb ->> 'matched')::boolean, "
+            + "         true"
+            + "       ) THEN 'pass' "
+            + "  ELSE 'fail' "
+            + "END";
+
+    /**
+     * For rules that emit an array of per-item results (serviceability,
+     * container), the rule "fails" if any element flags a problem.
+     * Done with a JSONB existence check via {@code jsonb_path_exists}.
+     */
+    private static final String SERVICEABILITY_PASS_FAIL =
+            "CASE "
+            + "  WHEN NOT e.success THEN 'fail' "
+            + "  WHEN jsonb_path_exists("
+            + "         COALESCE(NULLIF(e.outputs_json,'')::jsonb, '{}'::jsonb), "
+            + "         '$.serviceability[*] ? (@.isServiceable == false || @.serviceable == false)') "
+            + "    THEN 'fail' "
+            + "  WHEN jsonb_path_exists("
+            + "         COALESCE(NULLIF(e.outputs_json,'')::jsonb, '{}'::jsonb), "
+            + "         '$[*] ? (@.isServiceable == false || @.serviceable == false)') "
+            + "    THEN 'fail' "
+            + "  ELSE 'pass' "
+            + "END";
+
+    private static final String CONTAINER_PASS_FAIL =
+            "CASE "
+            + "  WHEN NOT e.success THEN 'fail' "
+            + "  WHEN jsonb_path_exists("
+            + "         COALESCE(NULLIF(e.outputs_json,'')::jsonb, '{}'::jsonb), "
+            + "         '$.containerAvailability[*] ? (@.checked == true && (!exists(@.availableDates) || @.availableDates.size() == 0))') "
+            + "    THEN 'fail' "
+            + "  ELSE 'pass' "
+            + "END";
+
     private static final String OV_RUNS_CTE =
             "WITH ov_runs AS ("
             + "  SELECT "
@@ -65,25 +126,23 @@ public class OrderValidationAnalyticsService {
             + "    d.skill_id AS workflow_id, "
             + "    COALESCE("
             + "      NULLIF(MAX(NULLIF(e.inputs_json, '')::jsonb ->> 'orderId'), ''), "
+            + "      NULLIF(MAX(NULLIF(e.inputs_json, '')::jsonb ->> 'OrderId'), ''), "
+            + "      NULLIF(MAX(NULLIF(e.inputs_json, '')::jsonb ->> 'ORD_ID'), ''), "
             + "      'ad-hoc-' || LEFT(MIN(e.id), 8)"
             + "    ) AS order_id, "
             + "    NULL::text AS journey_type, "
             + "    NULL::integer AS leg_lines, "
             + "    'COMPLETED' AS state, "
-            + "    CASE "
-            + "      WHEN BOOL_AND(e.success) THEN 'clear' "
-            + "      WHEN BOOL_OR(NOT e.success) THEN 'failed' "
-            + "      ELSE 'review' END AS overall_status, "
             + "    MAX(CASE "
             + "          WHEN COALESCE(d.rule_name, d.intent_label) ILIKE '%leg-sequence%' "
             + "            OR COALESCE(d.rule_name, d.intent_label) ILIKE '%legsequence%' "
-            + "          THEN CASE WHEN e.success THEN 'pass' ELSE 'fail' END END) AS leg_sequence_status, "
+            + "          THEN " + LEG_PASS_FAIL + " END) AS leg_sequence_status, "
             + "    MAX(CASE "
             + "          WHEN COALESCE(d.rule_name, d.intent_label) ILIKE '%serviceability%' "
-            + "          THEN CASE WHEN e.success THEN 'pass' ELSE 'fail' END END) AS serviceability_status, "
+            + "          THEN " + SERVICEABILITY_PASS_FAIL + " END) AS serviceability_status, "
             + "    MAX(CASE "
             + "          WHEN COALESCE(d.rule_name, d.intent_label) ILIKE '%container%' "
-            + "          THEN CASE WHEN e.success THEN 'pass' ELSE 'fail' END END) AS container_status, "
+            + "          THEN " + CONTAINER_PASS_FAIL + " END) AS container_status, "
             + "    MAX(CASE WHEN NOT e.success THEN e.error_message END) AS error_message, "
             + "    MIN(e.created_at) AS started_at, "
             + "    MAX(e.created_at) AS ended_at, "
@@ -96,6 +155,50 @@ public class OrderValidationAnalyticsService {
             + "  JOIN agent.rule_domains d ON d.id = e.domain_id "
             + "  WHERE d.skill_id = :workflow_id "
             + "  GROUP BY " + OV_ID_EXPR + ", d.skill_id"
+            + "), "
+            + "ov_runs_overall AS ("
+            + "  SELECT r.id, r.workflow_id, r.order_id, "
+            // OrderType / JourneyType lives anywhere inside the
+            // Get_OrderID toolCall response (often under Lines[] or
+            // an OrderHeader object). Use SQL/JSON path's recursive
+            // descent ($.**.<key>) so we find it regardless of depth.
+            // `lax` mode prevents errors when the key doesn't exist.
+            + "         COALESCE("
+            + "           (SELECT jsonb_path_query_first("
+            + "                     NULLIF(a.output_json,'')::jsonb, "
+            + "                     'lax $.**.OrderType') #>> '{}' "
+            + "            FROM agent.rule_activity_events a "
+            + "            JOIN agent.rule_executions e ON e.id = a.execution_id "
+            + "            WHERE " + OV_ID_EXPR + " = r.id "
+            + "              AND a.delegate_bean = 'toolCallDelegate' "
+            + "            ORDER BY a.start_ts ASC LIMIT 1), "
+            + "           (SELECT jsonb_path_query_first("
+            + "                     NULLIF(a.output_json,'')::jsonb, "
+            + "                     'lax $.**.JourneyType') #>> '{}' "
+            + "            FROM agent.rule_activity_events a "
+            + "            JOIN agent.rule_executions e ON e.id = a.execution_id "
+            + "            WHERE " + OV_ID_EXPR + " = r.id "
+            + "              AND a.delegate_bean = 'toolCallDelegate' "
+            + "            ORDER BY a.start_ts ASC LIMIT 1), "
+            + "           (SELECT jsonb_path_query_first("
+            + "                     NULLIF(a.output_json,'')::jsonb, "
+            + "                     'lax $.**.orderType') #>> '{}' "
+            + "            FROM agent.rule_activity_events a "
+            + "            JOIN agent.rule_executions e ON e.id = a.execution_id "
+            + "            WHERE " + OV_ID_EXPR + " = r.id "
+            + "              AND a.delegate_bean = 'toolCallDelegate' "
+            + "            ORDER BY a.start_ts ASC LIMIT 1)"
+            + "         ) AS journey_type, "
+            + "         r.leg_lines, r.state, "
+            + "         r.leg_sequence_status, r.serviceability_status, r.container_status, "
+            + "         r.error_message, r.started_at, r.ended_at, r.duration_ms, r.source, "
+            + "         CASE "
+            + "           WHEN r.leg_sequence_status = 'fail' OR r.serviceability_status = 'fail' "
+            + "             OR r.container_status = 'fail' THEN 'failed' "
+            + "           WHEN r.leg_sequence_status = 'pass' AND r.serviceability_status = 'pass' "
+            + "             AND COALESCE(r.container_status, 'pass') = 'pass' THEN 'clear' "
+            + "           ELSE 'review' END AS overall_status "
+            + "  FROM ov_runs r"
             + ") ";
 
     private final NamedParameterJdbcTemplate jdbc;
@@ -152,7 +255,7 @@ public class OrderValidationAnalyticsService {
                 + "  COUNT(*) FILTER (WHERE overall_status IN ('clear','review')) AS passed, "
                 + "  COUNT(*) FILTER (WHERE overall_status = 'failed') AS failed, "
                 + "  COALESCE(AVG(duration_ms)::int, 0) AS avg_ms "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :from_ts AND started_at <= :to_ts",
                 base);
 
@@ -179,7 +282,7 @@ public class OrderValidationAnalyticsService {
                 + "  COUNT(*) FILTER (WHERE container_status='pass') AS ct_pass, "
                 + "  COUNT(*) FILTER (WHERE container_status='fail') AS ct_fail, "
                 + "  COUNT(*) FILTER (WHERE container_status IS NULL) AS ct_skip "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :from_ts AND started_at <= :to_ts",
                 base);
         return new DashboardMetrics.PassFailByCheck(
@@ -195,7 +298,7 @@ public class OrderValidationAnalyticsService {
                 + "  (EXTRACT(EPOCH FROM date_trunc('day', to_timestamp(started_at/1000.0))) * 1000)::BIGINT AS day_start, "
                 + "  COUNT(*) AS total, "
                 + "  COUNT(*) FILTER (WHERE overall_status='failed') AS failures "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :from_ts AND started_at <= :to_ts "
                 + "GROUP BY day_start ORDER BY day_start ASC",
                 base,
@@ -208,7 +311,7 @@ public class OrderValidationAnalyticsService {
                 + "SELECT id, order_id, journey_type, "
                 + "       leg_sequence_status, serviceability_status, container_status, "
                 + "       overall_status, started_at, source "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :from_ts AND started_at <= :to_ts "
                 + "ORDER BY started_at DESC LIMIT :lim",
                 new MapSqlParameterSource()
@@ -255,7 +358,7 @@ public class OrderValidationAnalyticsService {
                 + "       COUNT(*) FILTER (WHERE overall_status='clear') AS passed, "
                 + "       COUNT(*) FILTER (WHERE overall_status='review') AS review, "
                 + "       COUNT(*) FILTER (WHERE overall_status='failed') AS failed "
-                + "FROM ov_runs " + where,
+                + "FROM ov_runs_overall " + where,
                 p);
 
         p.addValue("lim", Math.min(Math.max(limit, 1), 200));
@@ -264,7 +367,7 @@ public class OrderValidationAnalyticsService {
                 + "SELECT id, order_id, journey_type, leg_lines, leg_sequence_status, "
                 + "       serviceability_status, container_status, overall_status, "
                 + "       started_at, ended_at, state, error_message, source "
-                + "FROM ov_runs " + where
+                + "FROM ov_runs_overall " + where
                 + "ORDER BY started_at DESC LIMIT :lim OFFSET :off",
                 p, (rs, i) -> new OrderQueue.Row(
                         rs.getString("id"),
@@ -333,8 +436,11 @@ public class OrderValidationAnalyticsService {
         // destination / itemCode etc. We enrich the table rows here by
         // looking up the per-iteration toolCall input — which IS the
         // request payload — and merging extra fields in by lineId.
-        enrichFromToolCallInputs(instId, RULE_SERVICEABILITY, serviceability,
-                ServiceabilityFieldMerger.INSTANCE);
+        // Same enrichment the serviceability summary page uses — pulls
+        // origin/destination from the toolCall input AND ExceptionType
+        // from the raw toolCall output, so the run-detail table stays
+        // in sync with the per-check summary page.
+        enrichServiceabilityFromToolCalls(serviceability);
         enrichFromToolCallInputs(instId, RULE_CONTAINER, container,
                 ContainerFieldMerger.INSTANCE);
 
@@ -377,6 +483,73 @@ public class OrderValidationAnalyticsService {
      * id is passed instead), we fall back to a strict
      * {@code activity_id} match so existing callers still work.
      */
+    /**
+     * Surfaces the raw order JSON for one run by picking the first
+     * non-looped toolCall (usually the {@code Get_OrderID} fetch) and
+     * returning its {@code output_json}. Falls back to the first
+     * toolCall of the run if no clearly-singleton call is found.
+     */
+    public Map<String, Object> orderPayload(String instId) {
+        // The "order fetch" is the toolCallDelegate whose activity_id
+        // is NOT the most-frequent (looped) id. We compute that with
+        // the same window logic the per-leg view uses, just inverted.
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "WITH calls AS ("
+                + "  SELECT a.iteration_index, a.start_ts, a.input_json, a.output_json, a.activity_id "
+                + "  FROM agent.rule_activity_events a "
+                + "  JOIN agent.rule_executions e ON e.id = a.execution_id "
+                + "  WHERE " + OV_ID_EXPR + " = :ov "
+                + "    AND a.delegate_bean = 'toolCallDelegate'"
+                + "), "
+                + "with_cnt AS ("
+                + "  SELECT c.*, COUNT(*) OVER (PARTITION BY c.activity_id) AS cnt FROM calls c"
+                + "), "
+                + "with_max AS ("
+                + "  SELECT w.*, MAX(cnt) OVER () AS max_cnt FROM with_cnt w"
+                + ") "
+                + "SELECT input_json, output_json, activity_id "
+                + "FROM with_max "
+                + "WHERE (max_cnt = cnt AND cnt = 1) OR (cnt < max_cnt) "
+                + "ORDER BY start_ts ASC LIMIT 1",
+                new MapSqlParameterSource("ov", instId));
+
+        if (rows.isEmpty()) {
+            // No clearly-singleton call — fall back to the very first
+            // toolCall in time order regardless of cardinality.
+            rows = jdbc.queryForList(
+                    "SELECT a.input_json, a.output_json, a.activity_id "
+                    + "FROM agent.rule_activity_events a "
+                    + "JOIN agent.rule_executions e ON e.id = a.execution_id "
+                    + "WHERE " + OV_ID_EXPR + " = :ov "
+                    + "  AND a.delegate_bean = 'toolCallDelegate' "
+                    + "ORDER BY a.start_ts ASC LIMIT 1",
+                    new MapSqlParameterSource("ov", instId));
+        }
+        if (rows.isEmpty()) return null;
+
+        Map<String, Object> row = rows.get(0);
+        Object payload = parseJsonAsObject(stringOf(row.get("output_json")));
+        String orderId = null;
+        try {
+            JsonNode input = parseJson(stringOf(row.get("input_json")));
+            if (input != null) {
+                orderId = firstText(input, "orderId", "ORD_ID", "OrderId", "order_id");
+            }
+            if (orderId == null && payload != null) {
+                JsonNode out = parseJson(stringOf(row.get("output_json")));
+                if (out != null) {
+                    orderId = firstText(out, "orderId", "OrderIdentity", "OrderId", "order_id");
+                }
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("orderId", orderId);
+        body.put("activityId", stringOf(row.get("activity_id")));
+        body.put("payload", payload);
+        return body;
+    }
+
     public List<ActivityInvocation> runActivities(String instId, String activityDefId) {
         ConceptMatch match = resolveConcept(activityDefId);
         if (match == null) {
@@ -520,8 +693,8 @@ public class OrderValidationAnalyticsService {
                 if (inputs != null) {
                     try {
                         JsonNode n = objectMapper.readTree(inputs);
-                        JsonNode oid = n.path("orderId");
-                        if (oid.isTextual()) orderId = oid.asText();
+                        orderId = firstText(n, "orderId", "OrderId", "OrderIdentity",
+                                "order_id", "ORD_ID");
                     } catch (Exception ignored) { /* not JSON */ }
                 }
             }
@@ -550,7 +723,7 @@ public class OrderValidationAnalyticsService {
                 + "SELECT COUNT(*) AS total, "
                 + "       COUNT(*) FILTER (WHERE leg_sequence_status='pass') AS passed, "
                 + "       COUNT(*) FILTER (WHERE leg_sequence_status='fail') AS failed "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :fr AND started_at <= :to",
                 new MapSqlParameterSource()
                         .addValue("workflow_id", workflowId)
@@ -581,7 +754,7 @@ public class OrderValidationAnalyticsService {
                 + "       COUNT(*) FILTER (WHERE serviceability_status='pass') AS passed, "
                 + "       COUNT(*) FILTER (WHERE serviceability_status='fail') AS failed, "
                 + "       COUNT(*) FILTER (WHERE serviceability_status IS NULL) AS skipped "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :fr AND started_at <= :to",
                 new MapSqlParameterSource()
                         .addValue("workflow_id", workflowId)
@@ -598,8 +771,139 @@ public class OrderValidationAnalyticsService {
                 workflowId, since, until, RULE_SERVICEABILITY, search, limit, offset,
                 this::parseServiceability);
 
+        // The rule's postTransform usually only keeps lineId / itemCode /
+        // isServiceable / exceptionType. Pull origin / destination zip
+        // from the per-leg toolCall *input*, and any non-null
+        // ExceptionType from the raw toolCall *output* (which holds the
+        // full API response — CallInfo, PostalCodeException, etc.).
+        enrichServiceabilityFromToolCalls(recent);
+
         return new CheckResults.ServiceabilitySummary(
                 total, rate, failed, skipped, Collections.emptyList(), recent, recent.size());
+    }
+
+    /**
+     * Group results by run, fetch every per-leg toolCall (input+output)
+     * for that run, and merge missing fields into the parsed rows.
+     */
+    private void enrichServiceabilityFromToolCalls(List<CheckResults.ServiceabilityResult> rows) {
+        if (rows == null || rows.isEmpty()) return;
+        // Group by run id so we issue one query per distinct run.
+        java.util.Map<String, java.util.List<Integer>> byRun = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < rows.size(); i++) {
+            byRun.computeIfAbsent(rows.get(i).instId(), k -> new ArrayList<>()).add(i);
+        }
+        for (var entry : byRun.entrySet()) {
+            String instId = entry.getKey();
+            java.util.List<Integer> indices = entry.getValue();
+            List<Map<String, Object>> events;
+            try {
+                events = jdbc.queryForList(
+                        "SELECT a.iteration_index, a.input_json, a.output_json, a.start_ts "
+                        + "FROM agent.rule_activity_events a "
+                        + "JOIN agent.rule_executions e ON e.id = a.execution_id "
+                        + "JOIN agent.rule_domains d ON d.id = e.domain_id "
+                        + "WHERE " + OV_ID_EXPR + " = :ov "
+                        + "  AND COALESCE(d.rule_name, d.intent_label) = :rn "
+                        + "  AND a.delegate_bean = 'toolCallDelegate' "
+                        + "  AND a.activity_id = ("
+                        + "    SELECT a2.activity_id "
+                        + "    FROM agent.rule_activity_events a2 "
+                        + "    JOIN agent.rule_executions e2 ON e2.id = a2.execution_id "
+                        + "    JOIN agent.rule_domains d2 ON d2.id = e2.domain_id "
+                        + "    WHERE " + OV_ID_EXPR.replace("e.", "e2.") + " = :ov "
+                        + "      AND COALESCE(d2.rule_name, d2.intent_label) = :rn "
+                        + "      AND a2.delegate_bean = 'toolCallDelegate' "
+                        + "    GROUP BY a2.activity_id "
+                        + "    ORDER BY COUNT(*) DESC, MIN(a2.start_ts) ASC "
+                        + "    LIMIT 1) "
+                        + "ORDER BY COALESCE(a.iteration_index, 0) ASC, a.start_ts ASC",
+                        new MapSqlParameterSource("ov", instId).addValue("rn", RULE_SERVICEABILITY));
+            } catch (Exception ex) {
+                log.warn("[OV] serviceability enrichment failed for {}: {}", instId, ex.getMessage());
+                continue;
+            }
+            for (int j = 0; j < indices.size() && j < events.size(); j++) {
+                CheckResults.ServiceabilityResult r = rows.get(indices.get(j));
+                Map<String, Object> ev = events.get(j);
+                JsonNode in = parseJson(stringOf(ev.get("input_json")));
+                JsonNode outRaw = parseJson(stringOf(ev.get("output_json")));
+                rows.set(indices.get(j), mergeServiceabilityFromTool(r, in, outRaw));
+            }
+        }
+    }
+
+    /** Fill in missing fields on a parsed ServiceabilityResult using the toolCall I/O. */
+    private CheckResults.ServiceabilityResult mergeServiceabilityFromTool(
+            CheckResults.ServiceabilityResult r, JsonNode in, JsonNode outRaw) {
+
+        String origin = r.originZip();
+        String dest = r.destinationZip();
+        if (in != null) {
+            if (origin == null) origin = firstText(in, "originZip", "origin", "OriginZip",
+                    "originZipCode", "fromZip", "originAddress");
+            if (dest == null) dest = firstText(in, "destinationZip", "destination",
+                    "DestinationZip", "destinationZipCode", "toZip", "destinationAddress");
+        }
+
+        // ExceptionType: walk the raw response. Common spots are
+        // {PostalCodeException, CallInfo}.ExceptionType — but fall back
+        // to any depth via deepFindText.
+        String exceptionType = r.exceptionType();
+        if ((exceptionType == null || exceptionType.isBlank()) && outRaw != null) {
+            exceptionType = firstText(outRaw.path("PostalCodeException"),
+                    "ExceptionType", "exceptionType");
+            if (exceptionType == null || exceptionType.isBlank()) {
+                exceptionType = firstText(outRaw.path("CallInfo"),
+                        "ExceptionType", "exceptionType");
+            }
+            if (exceptionType == null || exceptionType.isBlank()) {
+                exceptionType = deepFindText(outRaw, "ExceptionType", "exceptionType");
+            }
+        }
+
+        // If the raw response says CallInfo.StatusCode = "Exception",
+        // override the post-transform's optimistic isServiceable=true.
+        Boolean isServiceable = r.isServiceable();
+        if (outRaw != null && (Boolean.TRUE.equals(isServiceable) || isServiceable == null)) {
+            String statusCode = firstText(outRaw.path("CallInfo"), "StatusCode", "statusCode");
+            if (statusCode != null && statusCode.equalsIgnoreCase("Exception")) {
+                isServiceable = false;
+            }
+        }
+
+        return new CheckResults.ServiceabilityResult(
+                r.instId(), r.orderId(),
+                r.lineId(), r.itemCode(),
+                origin, dest,
+                isServiceable,
+                exceptionType,
+                r.status());
+    }
+
+    /**
+     * Best-effort recursive search for a textual value under any of the
+     * supplied keys, at any depth. Used to find {@code ExceptionType}
+     * etc. when the upstream API nests it inside a result envelope.
+     */
+    private static String deepFindText(JsonNode node, String... keys) {
+        if (node == null || node.isMissingNode() || node.isNull()) return null;
+        for (String k : keys) {
+            JsonNode v = node.path(k);
+            if (v.isTextual() && !v.asText().isBlank()) return v.asText();
+        }
+        if (node.isObject()) {
+            for (JsonNode child : node) {
+                String found = deepFindText(child, keys);
+                if (found != null) return found;
+            }
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                String found = deepFindText(child, keys);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     public CheckResults.ContainerAvailabilitySummary containerAvailabilitySummary(String workflowId,
@@ -612,7 +916,7 @@ public class OrderValidationAnalyticsService {
                 + "SELECT COUNT(*) AS total, "
                 + "       COUNT(*) FILTER (WHERE container_status='pass') AS passed, "
                 + "       COUNT(*) FILTER (WHERE container_status IS NULL) AS skipped "
-                + "FROM ov_runs "
+                + "FROM ov_runs_overall "
                 + "WHERE started_at >= :fr AND started_at <= :to",
                 new MapSqlParameterSource()
                         .addValue("workflow_id", workflowId)
@@ -628,9 +932,172 @@ public class OrderValidationAnalyticsService {
                 workflowId, since, until, RULE_CONTAINER, search, limit, offset,
                 this::parseContainerAvailability);
 
+        // For every run in this page that ran the container rule, walk
+        // the order's Lines[] (from Get_OrderID payload) and add
+        // synthetic rows for IDEL lines the FEEL guard filtered out —
+        // with a human-readable reason for each (already delivered,
+        // container/schedule already assigned, etc.).
+        enrichContainerWithSkippedIdelLines(workflowId, since, until, search, limit, offset, recent);
+
         return new CheckResults.ContainerAvailabilitySummary(
                 total, rate, skipped, total - passed - skipped,
                 Collections.emptyList(), recent, recent.size());
+    }
+
+    /**
+     * Inspect each run's Get_OrderID payload, find every IDEL line, and
+     * add a synthetic {@link CheckResults.ContainerAvailabilityResult}
+     * row for any line that's NOT already in {@code recent} — with a
+     * skip-reason derived from the line's fields. This makes the
+     * "Per-order container check results" section show why a check
+     * didn't fire instead of showing nothing at all.
+     */
+    private void enrichContainerWithSkippedIdelLines(String workflowId, long since, long until,
+                                                     String search, int limit, int offset,
+                                                     List<CheckResults.ContainerAvailabilityResult> recent) {
+        // List the runs in the same window/page so we know which orders
+        // to inspect. Pull order_id too so the synthetic rows can carry
+        // a real orderId.
+        var p = new MapSqlParameterSource()
+                .addValue("workflow_id", workflowId)
+                .addValue("fr", since)
+                .addValue("to", until)
+                .addValue("lim", Math.min(Math.max(limit, 1), 200))
+                .addValue("off", Math.max(offset, 0));
+        StringBuilder where = new StringBuilder("WHERE started_at >= :fr AND started_at <= :to ");
+        if (search != null && !search.isBlank()) {
+            where.append("AND (order_id ILIKE :s OR COALESCE(journey_type,'') ILIKE :s) ");
+            p.addValue("s", "%" + search + "%");
+        }
+        List<Map<String, Object>> runRows;
+        try {
+            runRows = jdbc.queryForList(OV_RUNS_CTE
+                    + "SELECT id, order_id FROM ov_runs_overall "
+                    + where
+                    + "ORDER BY started_at DESC LIMIT :lim OFFSET :off",
+                    p);
+        } catch (Exception ex) {
+            log.warn("[OV] container enrichment run-list query failed: {}", ex.getMessage());
+            return;
+        }
+
+        // Index existing rows by (runId, lineId) to skip duplicates.
+        java.util.Map<String, java.util.Set<String>> seenByRun = new java.util.HashMap<>();
+        for (CheckResults.ContainerAvailabilityResult r : recent) {
+            if (r.lineId() == null) continue;
+            seenByRun.computeIfAbsent(r.instId(), k -> new java.util.HashSet<>()).add(r.lineId());
+        }
+
+        for (Map<String, Object> rr : runRows) {
+            String instId = stringOf(rr.get("id"));
+            String orderId = stringOf(rr.get("order_id"));
+            JsonNode payload = fetchOrderPayload(instId);
+            if (payload == null) continue;
+            JsonNode lines = findLinesArray(payload);
+            if (lines == null || !lines.isArray()) continue;
+
+            java.util.Set<String> seen = seenByRun.getOrDefault(instId, java.util.Collections.emptySet());
+            for (JsonNode line : lines) {
+                String itemCode = firstText(line, "ItemCode", "itemCode", "item_code");
+                if (itemCode == null || !"IDEL".equalsIgnoreCase(itemCode)) continue;
+                String lineId = firstText(line, "LineIdentity", "LineId", "lineId", "line_id");
+                if (lineId != null && seen.contains(lineId)) continue;
+
+                String reason = deriveContainerSkipReason(line);
+                recent.add(new CheckResults.ContainerAvailabilityResult(
+                        instId, orderId,
+                        lineId,
+                        "IDEL",
+                        false,
+                        java.util.Collections.emptyList(),
+                        reason));
+            }
+        }
+    }
+
+    /** Read the order JSON for a single run (output of the first non-looped toolCall). */
+    private JsonNode fetchOrderPayload(String instId) {
+        try {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "WITH calls AS ("
+                    + "  SELECT a.start_ts, a.output_json, a.activity_id "
+                    + "  FROM agent.rule_activity_events a "
+                    + "  JOIN agent.rule_executions e ON e.id = a.execution_id "
+                    + "  WHERE " + OV_ID_EXPR + " = :ov "
+                    + "    AND a.delegate_bean = 'toolCallDelegate'"
+                    + "), "
+                    + "with_cnt AS ("
+                    + "  SELECT c.*, COUNT(*) OVER (PARTITION BY c.activity_id) AS cnt FROM calls c"
+                    + "), "
+                    + "with_max AS ("
+                    + "  SELECT w.*, MAX(cnt) OVER () AS max_cnt FROM with_cnt w"
+                    + ") "
+                    + "SELECT output_json FROM with_max "
+                    + "WHERE (max_cnt = cnt AND cnt = 1) OR (cnt < max_cnt) "
+                    + "ORDER BY start_ts ASC LIMIT 1",
+                    new MapSqlParameterSource("ov", instId));
+            if (rows.isEmpty()) return null;
+            return parseJson(stringOf(rows.get(0).get("output_json")));
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    /** Find the order's Lines[] array anywhere inside the order payload. */
+    private static JsonNode findLinesArray(JsonNode payload) {
+        if (payload == null) return null;
+        for (String k : new String[]{"Lines", "lines", "OrderLines", "orderLines"}) {
+            JsonNode n = payload.path(k);
+            if (n.isArray()) return n;
+        }
+        // Recurse one level deep (typical envelope: { order: { Lines: [...] } }).
+        if (payload.isObject()) {
+            for (JsonNode child : payload) {
+                if (child.isObject()) {
+                    for (String k : new String[]{"Lines", "lines", "OrderLines", "orderLines"}) {
+                        JsonNode n = child.path(k);
+                        if (n.isArray()) return n;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Inspect a single Line object and explain why the container-check
+     * FEEL filter excluded it. The filter is roughly:
+     * {@code Lines[ItemCode='IDEL' and DeliveryDate=null and (ContainerId=null or ScheduledDate=null)]}.
+     */
+    private static String deriveContainerSkipReason(JsonNode line) {
+        String deliveryDate = firstText(line, "DeliveryDate", "deliveryDate", "delivery_date");
+        String containerId = firstText(line, "ContainerId", "containerId", "container_id");
+        String scheduledDate = firstText(line, "ScheduledDate", "scheduledDate", "scheduled_date");
+
+        boolean hasDelivery = deliveryDate != null && !deliveryDate.isBlank();
+        boolean hasContainer = containerId != null && !containerId.isBlank();
+        boolean hasSchedule = scheduledDate != null && !scheduledDate.isBlank();
+
+        if (hasDelivery) {
+            return "Already delivered on " + shortDate(deliveryDate);
+        }
+        if (hasContainer && hasSchedule) {
+            return "Container " + containerId + " scheduled for " + shortDate(scheduledDate);
+        }
+        if (hasContainer) {
+            return "Container " + containerId + " assigned · awaiting schedule";
+        }
+        if (hasSchedule) {
+            return "Scheduled for " + shortDate(scheduledDate) + " · awaiting container";
+        }
+        return "Eligible for container check but no result recorded";
+    }
+
+    /** Trim ISO timestamps down to the date portion for readability. */
+    private static String shortDate(String iso) {
+        if (iso == null) return "";
+        int t = iso.indexOf('T');
+        return t > 0 ? iso.substring(0, t) : iso;
     }
 
     // ── Parsers (defensive: fall back to nulls when shape doesn't match) ──
@@ -687,12 +1154,34 @@ public class OrderValidationAnalyticsService {
                 String s = v.asText();
                 if (!s.isEmpty()) return s;
             } else if (v.isNumber()) {
-                return v.asString();
+                return numberToPlainString(v);
             } else if (v.isBoolean()) {
                 return v.asString();
             }
         }
         return null;
+    }
+
+    /**
+     * Convert a numeric {@link JsonNode} to a non-exponential string.
+     * Jackson serializes large doubles like {@code 8011862085.0} as
+     * {@code 8.011862085E9}; calling {@code v.asString()} on those
+     * round-trips back through scientific notation. Convert via
+     * {@link java.math.BigDecimal#toPlainString()} so the UI shows a
+     * clean integer like {@code 8011862085}.
+     */
+    private static String numberToPlainString(JsonNode v) {
+        try {
+            java.math.BigDecimal bd = v.decimalValue();
+            // If the value is a whole number, drop any fractional part
+            // entirely so we render "8011862085" not "8011862085.0".
+            if (bd.scale() <= 0 || bd.stripTrailingZeros().scale() <= 0) {
+                return bd.toBigInteger().toString();
+            }
+            return bd.toPlainString();
+        } catch (Exception ignored) {
+            return v.asString();
+        }
     }
 
     /** Try each key in order; return the first boolean value found, or null. */
@@ -750,16 +1239,32 @@ public class OrderValidationAnalyticsService {
         if (rows == null || rows.isEmpty()) return;
         List<Map<String, Object>> events;
         try {
+            // Pull only the looped toolCall events — same heuristic as
+            // runActivities: pick events whose activity_id is the
+            // most-frequent toolCallDelegate id for this rule. Drops
+            // singleton calls like Get_OrderID, works regardless of
+            // whether the rule uses BPMN multi-instance or a FEEL
+            // for-loop (where iteration_index would be null).
             events = jdbc.queryForList(
-                    "SELECT a.iteration_index, a.input_json "
+                    "SELECT a.iteration_index, a.input_json, a.start_ts "
                     + "FROM agent.rule_activity_events a "
                     + "JOIN agent.rule_executions e ON e.id = a.execution_id "
                     + "JOIN agent.rule_domains d ON d.id = e.domain_id "
                     + "WHERE " + OV_ID_EXPR + " = :ov "
                     + "  AND COALESCE(d.rule_name, d.intent_label) = :rn "
                     + "  AND a.delegate_bean = 'toolCallDelegate' "
-                    + "  AND a.iteration_index IS NOT NULL "
-                    + "ORDER BY a.iteration_index ASC",
+                    + "  AND a.activity_id = ("
+                    + "    SELECT a2.activity_id "
+                    + "    FROM agent.rule_activity_events a2 "
+                    + "    JOIN agent.rule_executions e2 ON e2.id = a2.execution_id "
+                    + "    JOIN agent.rule_domains d2 ON d2.id = e2.domain_id "
+                    + "    WHERE " + OV_ID_EXPR.replace("e.", "e2.") + " = :ov "
+                    + "      AND COALESCE(d2.rule_name, d2.intent_label) = :rn "
+                    + "      AND a2.delegate_bean = 'toolCallDelegate' "
+                    + "    GROUP BY a2.activity_id "
+                    + "    ORDER BY COUNT(*) DESC, MIN(a2.start_ts) ASC "
+                    + "    LIMIT 1) "
+                    + "ORDER BY COALESCE(a.iteration_index, 0) ASC, a.start_ts ASC",
                     new MapSqlParameterSource("ov", instId).addValue("rn", ruleName));
         } catch (Exception ex) {
             log.warn("[OV] enrichment query failed for rule {}: {}", ruleName, ex.getMessage());
@@ -877,7 +1382,7 @@ public class OrderValidationAnalyticsService {
 
         return jdbc.query(OV_RUNS_CTE
                 + "SELECT r.id, r.order_id, r.journey_type, e.outputs_json "
-                + "FROM ov_runs r "
+                + "FROM ov_runs_overall r "
                 + "JOIN agent.rule_executions e ON " + OV_ID_EXPR + " = r.id "
                 + "JOIN agent.rule_domains d ON d.id = e.domain_id "
                 + where
@@ -912,7 +1417,7 @@ public class OrderValidationAnalyticsService {
 
         List<List<T>> nested = jdbc.query(OV_RUNS_CTE
                 + "SELECT r.id, r.order_id, r.journey_type, e.outputs_json "
-                + "FROM ov_runs r "
+                + "FROM ov_runs_overall r "
                 + "JOIN agent.rule_executions e ON " + OV_ID_EXPR + " = r.id "
                 + "JOIN agent.rule_domains d ON d.id = e.domain_id "
                 + where

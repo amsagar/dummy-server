@@ -100,6 +100,19 @@ export const orderValidationApi = {
       `/runs/${encodeURIComponent(instId)}/activities/${encodeURIComponent(defId)}`,
     );
   },
+  /**
+   * Raw order JSON captured by the first non-looped tool call of this
+   * run (typically {@code Get_OrderID}). Returns
+   * {@code { orderId, activityId, payload }} where {@code payload}
+   * is the full response body.
+   */
+  runOrderPayload(instId: string): Promise<{
+    orderId: string | null;
+    activityId: string | null;
+    payload: unknown;
+  }> {
+    return get(`/runs/${encodeURIComponent(instId)}/order-payload`);
+  },
 };
 
 export interface OrderValidationUiSettings {

@@ -87,7 +87,7 @@ function RunDetailBody({ detail, onOpen }: { detail: RunDetail; onOpen: (t: Pane
       <Card>
         <CardContent className="!pt-5 grid grid-cols-2 lg:grid-cols-4 gap-4">
           <Meta label="Order ID" value={detail.orderId} mono />
-          <Meta label="Journey type" value={detail.journeyType ?? "—"} />
+          <Meta label="Order type" value={detail.journeyType ?? "—"} />
           <Meta label="Workflow state" value={<Badge variant="muted">{detail.state}</Badge>} />
           <Meta label="Overall" value={statusPill(detail.overallStatus)} />
           <Meta

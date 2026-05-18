@@ -87,7 +87,7 @@ export default function RuleExecutionDetailPage() {
   if (!execution) return <div className="text-sm text-gray-500">Loading execution…</div>;
 
   return (
-    <div className="space-y-4 max-w-[1500px]">
+    <div className="space-y-4 w-full min-h-[calc(100vh-10rem)]">
       <div className="flex items-center justify-between">
         <Link to="/rule-executions" className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900">
           <ArrowLeft className="h-3.5 w-3.5" /> Back to executions
@@ -128,13 +128,13 @@ export default function RuleExecutionDetailPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-3">
+      <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_360px] gap-3 items-start">
         <div className="space-y-3">
           {domain?.bpmnXml ? (
             <div className="relative">
               <BpmnDiagram
                 xml={domain.bpmnXml}
-                className="h-[50vh]"
+                className="h-[62vh] min-h-[420px]"
                 executionDecorations={decorations}
                 selectedElementId={selectedActivityId}
                 onElementClick={(id) => setSelectedActivityId(id)}

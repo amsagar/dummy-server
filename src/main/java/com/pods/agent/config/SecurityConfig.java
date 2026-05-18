@@ -29,12 +29,15 @@ public class SecurityConfig {
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
-                        // Order-validation analytics: read-only, intentionally public
-                        // so the standalone order-validation-ui can render without an
-                        // auth flow. The endpoints expose only aggregates of completed
-                        // workflow runs — see OrderValidationAnalyticsController.
-                        .requestMatchers(HttpMethod.GET, "/api/v1/order-validation/**").permitAll()
-                        .requestMatchers(HttpMethod.PUT, "/api/v1/order-validation/settings").permitAll()
+                        // Order-validation surface: intentionally public so the
+                        // standalone order-validation-ui can render without an auth
+                        // flow. Analytics are read-only aggregates; the POSTs are
+                        // chat (AI assistant) and workflow submission, both scoped
+                        // to the configured workflow at the service layer — see
+                        // OrderValidationAnalyticsController, OrderValidationChatController
+                        // and OrderValidationWorkflowController.
+                        .requestMatchers("/api/v1/order-validation/**").permitAll()
+                        .requestMatchers("/api/v1/workflow/**").permitAll()
                         .requestMatchers("/api/v1/decision-tables/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/decision-tables").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/decision-tables").permitAll()

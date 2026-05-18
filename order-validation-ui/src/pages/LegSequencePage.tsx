@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { ExternalLink, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +23,6 @@ const PAGE_SIZE = 25;
 
 export function LegSequencePage() {
   const { workflowId, dateRange } = useSettings();
-  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [offset, setOffset] = useState(0);
@@ -74,52 +72,30 @@ export function LegSequencePage() {
               />
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Failures by journey type</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {isLoading ? (
-                    <Skeleton className="h-32 w-full" />
-                  ) : (data?.failuresByJourney.length ?? 0) === 0 ? (
-                    <div className="text-sm text-muted-foreground">No failures in this range.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {data!.failuresByJourney.map((f) => (
-                        <div
-                          key={f.journeyType}
-                          className="flex items-center justify-between py-1.5 border-b border-border last:border-0"
-                        >
-                          <span className="text-sm">{f.journeyType}</span>
-                          <span className="text-sm text-muted-foreground">{formatNumber(f.count)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>How the check works</CardTitle>
-                </CardHeader>
-                <CardContent className="text-sm text-muted-foreground space-y-2">
-                  <p>
-                    The workflow extracts leg lines from <code className="text-pods-blue">order.Lines</code>,
-                    maps their <code className="text-pods-blue">ItemCode</code> to a service code
-                    (e.g. IDEL → NEW), sorts by <code className="text-pods-blue">Sequence</code>, and sends
-                    the array to the <span className="text-foreground">Leg Sequences</span> decision table
-                    along with the order's journey type.
-                  </p>
-                  <p>
-                    A <code>matched: false</code> response means no rule in the table matches the
-                    journey/sequence pair — typically because the order is missing a leg (e.g. RDL at
-                    position 3) or because the table doesn't yet have a row for that journey shape.
-                  </p>
-                </CardContent>
-              </Card>
-            </div>
+            <Card>
+              <CardHeader>
+                <CardTitle>Failures by journey type</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {isLoading ? (
+                  <Skeleton className="h-32 w-full" />
+                ) : (data?.failuresByJourney.length ?? 0) === 0 ? (
+                  <div className="text-sm text-muted-foreground">No failures in this range.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {data!.failuresByJourney.map((f) => (
+                      <div
+                        key={f.journeyType}
+                        className="flex items-center justify-between py-1.5 border-b border-border last:border-0"
+                      >
+                        <span className="text-sm">{f.journeyType}</span>
+                        <span className="text-sm text-muted-foreground">{formatNumber(f.count)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
 
             <Card>
               <CardHeader>
@@ -153,11 +129,10 @@ export function LegSequencePage() {
                       <TableHeader>
                         <TableRow>
                           <TableHead>Order ID</TableHead>
-                          <TableHead>Journey type</TableHead>
+                          <TableHead>Order type</TableHead>
                           <TableHead>Actual sequence</TableHead>
                           <TableHead>Matched rule</TableHead>
                           <TableHead>Result</TableHead>
-                          <TableHead className="w-20" />
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -168,7 +143,7 @@ export function LegSequencePage() {
                             onClick={() => setPanel({ instId: r.instId, orderId: r.orderId })}
                           >
                             <TableCell className="font-mono text-xs">{r.orderId}</TableCell>
-                            <TableCell>{r.journeyType ?? "—"}</TableCell>
+                            <TableCell className="text-sm">{r.journeyType ?? "—"}</TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1 flex-wrap">
                                 {(r.actualSequence ?? []).map((s, i, arr) => (
@@ -186,14 +161,6 @@ export function LegSequencePage() {
                             </TableCell>
                             <TableCell>
                               <Badge variant={r.valid ? "pass" : "fail"}>{r.valid ? "Pass" : "Fail"}</Badge>
-                            </TableCell>
-                            <TableCell onClick={(e) => e.stopPropagation()}>
-                              <button
-                                onClick={() => navigate(`/runs/${r.instId}`)}
-                                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                              >
-                                Open run <ExternalLink className="size-3" />
-                              </button>
                             </TableCell>
                           </TableRow>
                         ))}

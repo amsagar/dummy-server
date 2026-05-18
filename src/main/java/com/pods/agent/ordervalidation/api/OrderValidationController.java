@@ -97,4 +97,17 @@ public class OrderValidationController {
                                                   @PathVariable String defId) {
         return analytics.runActivities(instId, defId);
     }
+
+    /**
+     * Returns the order payload captured by the first non-looped tool
+     * call of this run (typically the {@code Get_OrderID} fetch),
+     * shaped as {@code { orderId, payload, activityId }}. Used by the
+     * OV-UI to surface the raw order JSON without forcing the user to
+     * drill into individual activity events.
+     */
+    @GetMapping("/runs/{instId}/order-payload")
+    public ResponseEntity<java.util.Map<String, Object>> orderPayload(@PathVariable String instId) {
+        java.util.Map<String, Object> body = analytics.orderPayload(instId);
+        return body == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(body);
+    }
 }

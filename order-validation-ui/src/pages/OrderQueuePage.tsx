@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { FileJson, Plus, Search } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Sheet } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { JsonTree } from "@/components/JsonTree";
 import { NoWorkflowSelected } from "@/components/NoWorkflowSelected";
 import { SubmitOrderDialog } from "@/components/SubmitOrderDialog";
 import { Pagination } from "@/components/Pagination";
@@ -77,6 +79,7 @@ export function OrderQueuePage() {
   const [offset, setOffset] = useState(0);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [startedToast, setStartedToast] = useState<string | null>(null);
+  const [payloadFor, setPayloadFor] = useState<{ instId: string; orderId: string } | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -203,12 +206,12 @@ export function OrderQueuePage() {
                         <TableRow>
                           <TableHead>Order ID</TableHead>
                           <TableHead>Source</TableHead>
-                          <TableHead>Journey type</TableHead>
-                          <TableHead className="text-right">Leg lines</TableHead>
+                          <TableHead>Order type</TableHead>
                           <TableHead>Leg seq.</TableHead>
                           <TableHead>Serviceability</TableHead>
                           <TableHead>Container</TableHead>
                           <TableHead>Overall</TableHead>
+                          <TableHead className="text-right w-[100px]">Payload</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -220,12 +223,24 @@ export function OrderQueuePage() {
                           >
                             <TableCell className="font-mono text-xs">{r.orderId}</TableCell>
                             <TableCell>{sourcePill(r.source)}</TableCell>
-                            <TableCell>{r.journeyType ?? "—"}</TableCell>
-                            <TableCell className="text-right">{r.legLines ?? "—"}</TableCell>
+                            <TableCell className="text-sm">{r.journeyType ?? "—"}</TableCell>
                             <TableCell>{statusPill(r.legSequenceStatus)}</TableCell>
                             <TableCell>{statusPill(r.serviceabilityStatus)}</TableCell>
                             <TableCell>{containerPill(r.containerStatus)}</TableCell>
                             <TableCell>{statusPill(r.overallStatus)}</TableCell>
+                            <TableCell className="text-right">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPayloadFor({ instId: r.instId, orderId: r.orderId });
+                                }}
+                                className="inline-flex items-center gap-1 text-xs text-pods-blue hover:underline"
+                                title="View raw order JSON"
+                              >
+                                <FileJson className="size-3.5" /> View
+                              </button>
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -256,6 +271,13 @@ export function OrderQueuePage() {
                 </span>
               </div>
             )}
+            {payloadFor && (
+              <OrderPayloadSheet
+                instId={payloadFor.instId}
+                orderId={payloadFor.orderId}
+                onClose={() => setPayloadFor(null)}
+              />
+            )}
           </div>
         )}
       </main>
@@ -268,5 +290,63 @@ export function OrderQueuePage() {
         />
       )}
     </>
+  );
+}
+
+function OrderPayloadSheet({
+  instId,
+  orderId,
+  onClose,
+}: {
+  instId: string;
+  orderId: string;
+  onClose: () => void;
+}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["orderPayload", instId],
+    queryFn: () => orderValidationApi.runOrderPayload(instId),
+  });
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={`Order ${orderId}`}
+      description="Raw order JSON captured by the Get_OrderID tool call"
+      width="w-[min(1200px,96vw)] max-w-[96vw]"
+    >
+      {isLoading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-5 w-40" />
+          <Skeleton className="h-64 w-full" />
+        </div>
+      ) : error ? (
+        <div className="text-sm text-error">
+          Failed to load order payload: {(error as Error).message}
+        </div>
+      ) : !data?.payload ? (
+        <div className="text-sm text-muted-foreground">
+          No tool call output was recorded for this run — the order payload
+          isn't available.
+        </div>
+      ) : (
+        <div className="space-y-3 h-full flex flex-col min-h-0">
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            {data.activityId && (
+              <>
+                <span>Activity:</span>
+                <span className="font-mono">{data.activityId}</span>
+              </>
+            )}
+          </div>
+          <div className="flex-1 min-h-0">
+            <JsonTree
+              value={data.payload}
+              defaultOpenDepth={1}
+              bodyClassName="max-h-none h-[calc(100vh-220px)]"
+            />
+          </div>
+        </div>
+      )}
+    </Sheet>
   );
 }

@@ -178,9 +178,15 @@ interface Props {
   value: unknown;
   defaultOpenDepth?: number;
   emptyText?: string;
+  bodyClassName?: string;
 }
 
-export function JsonTree({ value, defaultOpenDepth = 1, emptyText = "—" }: Props) {
+export function JsonTree({
+  value,
+  defaultOpenDepth = 1,
+  emptyText = "—",
+  bodyClassName,
+}: Props) {
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
 
@@ -228,7 +234,12 @@ export function JsonTree({ value, defaultOpenDepth = 1, emptyText = "—" }: Pro
           </span>
         )}
       </div>
-      <div className="bg-muted border border-border rounded-md p-3 overflow-auto max-h-[50vh] text-xs font-mono leading-5">
+      <div
+        className={cn(
+          "bg-muted border border-border rounded-md p-3 overflow-auto max-h-[50vh] text-xs font-mono leading-5",
+          bodyClassName,
+        )}
+      >
         <TreeNode
           value={value}
           depth={0}

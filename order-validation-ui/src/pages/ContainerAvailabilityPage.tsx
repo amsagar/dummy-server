@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { ChevronRight, ExternalLink, Search } from "lucide-react";
+import { ChevronRight, Search } from "lucide-react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +46,6 @@ function groupByOrder(rows: ContainerAvailabilityResult[]): OrderGroup[] {
 
 export function ContainerAvailabilityPage() {
   const { workflowId, dateRange } = useSettings();
-  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [offset, setOffset] = useState(0);
@@ -106,31 +104,6 @@ export function ContainerAvailabilityPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Skip reasons</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {isLoading ? (
-                  <Skeleton className="h-32 w-full" />
-                ) : (data?.skipReasons.length ?? 0) === 0 ? (
-                  <div className="text-sm text-muted-foreground">No skipped lines.</div>
-                ) : (
-                  <div className="space-y-2">
-                    {data!.skipReasons.map((r) => (
-                      <div
-                        key={r.reason}
-                        className="flex items-center justify-between py-1.5 border-b border-border last:border-0"
-                      >
-                        <span className="text-sm">{r.reason}</span>
-                        <span className="text-sm text-muted-foreground">{formatNumber(r.count)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <CardTitle>Per-order container check results</CardTitle>
                   <div className="relative w-full max-w-xs">
@@ -164,7 +137,6 @@ export function ContainerAvailabilityPage() {
                           group={g}
                           expanded={expanded.has(g.instId)}
                           onToggle={() => toggle(g.instId)}
-                          onOpenRun={() => navigate(`/runs/${g.instId}`)}
                           onOpenLine={(i) =>
                             setPanel({
                               instId: g.instId,
@@ -205,13 +177,11 @@ function OrderGroupRow({
   group,
   expanded,
   onToggle,
-  onOpenRun,
   onOpenLine,
 }: {
   group: OrderGroup;
   expanded: boolean;
   onToggle: () => void;
-  onOpenRun: () => void;
   onOpenLine: (i: number) => void;
 }) {
   const available = group.lines.filter((l) => l.checked && l.availableDates.length > 0).length;
@@ -234,15 +204,6 @@ function OrderGroupRow({
           {available > 0 && <Badge variant="pass">{available} available</Badge>}
           {unavailable > 0 && <Badge variant="warn">{unavailable} need rescheduling</Badge>}
           {skipped > 0 && <Badge variant="muted">{skipped} skipped</Badge>}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenRun();
-            }}
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Open run <ExternalLink className="size-3" />
-          </button>
         </div>
       </button>
       {expanded && (

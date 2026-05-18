@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { ChevronRight, ExternalLink, Search } from "lucide-react";
+import { ChevronRight, Search } from "lucide-react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -48,7 +47,6 @@ function groupByOrder(rows: ServiceabilityResult[]): OrderGroup[] {
 
 export function ServiceabilityPage() {
   const { workflowId, dateRange } = useSettings();
-  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [offset, setOffset] = useState(0);
@@ -165,7 +163,6 @@ export function ServiceabilityPage() {
                           group={g}
                           expanded={expanded.has(g.instId)}
                           onToggle={() => toggle(g.instId)}
-                          onOpenRun={() => navigate(`/runs/${g.instId}`)}
                           onOpenLeg={(i) =>
                             setPanel({
                               instId: g.instId,
@@ -206,13 +203,11 @@ function OrderGroupRow({
   group,
   expanded,
   onToggle,
-  onOpenRun,
   onOpenLeg,
 }: {
   group: OrderGroup;
   expanded: boolean;
   onToggle: () => void;
-  onOpenRun: () => void;
   onOpenLeg: (i: number) => void;
 }) {
   const serviceable = group.legs.filter((l) => l.isServiceable === true).length;
@@ -235,15 +230,6 @@ function OrderGroupRow({
           {serviceable > 0 && <Badge variant="pass">{serviceable} serviceable</Badge>}
           {exceptions > 0 && <Badge variant="warn">{exceptions} exception{exceptions === 1 ? "" : "s"}</Badge>}
           {skipped > 0 && <Badge variant="muted">{skipped} skipped</Badge>}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenRun();
-            }}
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Open run <ExternalLink className="size-3" />
-          </button>
         </div>
       </button>
       {expanded && (
