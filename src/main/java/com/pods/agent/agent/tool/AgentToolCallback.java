@@ -57,6 +57,12 @@ public class AgentToolCallback implements ToolCallback {
     private final int toolOutputVfsSpillThresholdChars;
     private final String toolIoLogMode;
     private final boolean productionEnvironment;
+    /**
+     * Optional workspace sub-root the LLM is restricted to. When set,
+     * filesystem tools (read/glob/grep) reject paths outside this prefix.
+     * Used by ov-* profiles to confine the model to {@code orders/}.
+     */
+    private final String workspaceSubroot;
 
     public AgentToolCallback(AgentTool tool,
                              ToolExecutionService toolExecutionService,
@@ -73,7 +79,7 @@ public class AgentToolCallback implements ToolCallback {
         this(tool, toolExecutionService, policyEngine, pendingInteractionService, sender,
                 sessionId, turnId, userId, approvalTimeoutMs, objectMapper,
                 runtimeEventRepository, skillExecutionGate, null, false, 16_384,
-                "metadata", false);
+                "metadata", false, null);
     }
 
     public AgentToolCallback(AgentTool tool,
@@ -93,6 +99,30 @@ public class AgentToolCallback implements ToolCallback {
                              int toolOutputVfsSpillThresholdChars,
                              String toolIoLogMode,
                              boolean productionEnvironment) {
+        this(tool, toolExecutionService, policyEngine, pendingInteractionService, sender,
+                sessionId, turnId, userId, approvalTimeoutMs, objectMapper,
+                runtimeEventRepository, skillExecutionGate, workspace, bypassApprovalGate,
+                toolOutputVfsSpillThresholdChars, toolIoLogMode, productionEnvironment, null);
+    }
+
+    public AgentToolCallback(AgentTool tool,
+                             ToolExecutionService toolExecutionService,
+                             GuardrailPolicyEngine policyEngine,
+                             PendingInteractionService pendingInteractionService,
+                             SseEventSender sender,
+                             String sessionId,
+                             String turnId,
+                             String userId,
+                             long approvalTimeoutMs,
+                             ObjectMapper objectMapper,
+                             RuntimeEventRepository runtimeEventRepository,
+                             SkillExecutionGate skillExecutionGate,
+                             java.nio.file.Path workspace,
+                             boolean bypassApprovalGate,
+                             int toolOutputVfsSpillThresholdChars,
+                             String toolIoLogMode,
+                             boolean productionEnvironment,
+                             String workspaceSubroot) {
         this.tool = tool;
         this.toolExecutionService = toolExecutionService;
         this.policyEngine = policyEngine;
@@ -110,6 +140,7 @@ public class AgentToolCallback implements ToolCallback {
         this.toolOutputVfsSpillThresholdChars = Math.max(0, toolOutputVfsSpillThresholdChars);
         this.toolIoLogMode = toolIoLogMode == null ? "metadata" : toolIoLogMode.trim().toLowerCase();
         this.productionEnvironment = productionEnvironment;
+        this.workspaceSubroot = workspaceSubroot;
     }
 
     @Override
@@ -227,7 +258,16 @@ public class AgentToolCallback implements ToolCallback {
             // the parent runTurn doesn't propagate here — we re-bind explicitly per tool call.
             execution = com.pods.agent.service.workspace.WorkspaceContextHolder.withWorkspace(
                     workspace,
-                    () -> UserContextHolder.withUser(userId, () -> toolExecutionService.execute(tool, payload)));
+                    () -> UserContextHolder.withUser(userId, () -> {
+                        if (workspaceSubroot != null && !workspaceSubroot.isBlank()) {
+                            com.pods.agent.service.ToolExecutionService.bindOvSubroot(workspaceSubroot);
+                        }
+                        try {
+                            return toolExecutionService.execute(tool, payload);
+                        } finally {
+                            com.pods.agent.service.ToolExecutionService.clearOvSubroot();
+                        }
+                    }));
         } catch (Exception e) {
             String err = "Tool execution exception: " + e.getMessage();
             sender.sendToolResult(sessionId, callId, tool.getName(), err, "error");

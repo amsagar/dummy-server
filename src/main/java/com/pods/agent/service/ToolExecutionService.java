@@ -99,6 +99,34 @@ public class ToolExecutionService {
         this.turnToolCache = turnToolCache;
     }
 
+    /**
+     * Order-validation VFS materializer. Setter-injected so the framework
+     * core compiles standalone (tests, contexts without OV).
+     */
+    private com.pods.agent.ordervalidation.service.OvOrderVfsService ovOrderVfsService;
+
+    @Autowired(required = false)
+    public void setOvOrderVfsService(com.pods.agent.ordervalidation.service.OvOrderVfsService svc) {
+        this.ovOrderVfsService = svc;
+    }
+
+    /**
+     * The "ov-*" agent profiles need their FS reads scoped to the
+     * {@code orders/} subtree so the model can't glob the workspace
+     * root and surface unrelated skill manifest files. Holder is set
+     * by {@code AgentRuntimeService} around the tool dispatch.
+     */
+    private static final ThreadLocal<String> OV_SUBROOT = new ThreadLocal<>();
+
+    public static void bindOvSubroot(String subroot) {
+        if (subroot == null || subroot.isBlank()) OV_SUBROOT.remove();
+        else OV_SUBROOT.set(subroot.endsWith("/") ? subroot : subroot + "/");
+    }
+
+    public static void clearOvSubroot() {
+        OV_SUBROOT.remove();
+    }
+
     public ToolExecutionService(ObjectMapper objectMapper,
                                 McpClientService mcpClientService,
                                 McpRuntimeAdapter mcpRuntimeAdapter,
@@ -526,8 +554,74 @@ public class ToolExecutionService {
         }
     }
 
+    /**
+     * Materializes one OV run's data into the session workspace and
+     * returns a short summary + a file index. The model then drills in
+     * with the standard {@code read} / {@code glob} / {@code grep} tools.
+     */
+    private ExecutionResult executeOvLoadOrder(String userText) {
+        if (ovOrderVfsService == null) {
+            return new ExecutionResult(false, null, "ovLoadOrder is unavailable in this context");
+        }
+        try {
+            Map<String, Object> args = parseArgs(userText);
+            String orderId = stringArg(args, "orderId", null);
+            if (orderId == null || orderId.isBlank()) {
+                return new ExecutionResult(false, null, "orderId is required");
+            }
+            Path workspace = WorkspaceContextHolder.current();
+            if (workspace == null) {
+                return new ExecutionResult(false, null, "no active session workspace");
+            }
+            // Derive the sessionId from the workspace path.
+            // SessionWorkspaceService roots at $TMPDIR/pods-agent-vfs/$sessionId.
+            String sessionId = workspace.getFileName().toString();
+            Path orderDir = ovOrderVfsService.materialize(sessionId, orderId);
+
+            // List up to 50 files in the order subtree (relative paths).
+            List<String> files = new ArrayList<>();
+            try (var walk = Files.walk(orderDir)) {
+                walk.filter(Files::isRegularFile)
+                        .map(orderDir::relativize)
+                        .map(Path::toString)
+                        .sorted()
+                        .limit(50)
+                        .forEach(files::add);
+            } catch (IOException e) {
+                /* best-effort listing */
+            }
+
+            String summary = "";
+            Path summaryPath = orderDir.resolve("summary.md");
+            if (Files.isRegularFile(summaryPath)) {
+                try {
+                    summary = Files.readString(summaryPath);
+                } catch (IOException ignored) {
+                    summary = "(summary.md unavailable)";
+                }
+            }
+
+            // The path returned to the model is workspace-relative so it
+            // composes naturally with read/glob/grep paths.
+            String relDir = workspace.relativize(orderDir).toString();
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("orderId", orderId);
+            body.put("path", relDir);
+            body.put("files", files);
+            body.put("summary", summary);
+            return new ExecutionResult(true, objectMapper.writeValueAsString(body), null);
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return new ExecutionResult(false, null, ex.getMessage());
+        } catch (Exception ex) {
+            return new ExecutionResult(false, null, "ovLoadOrder failed: " + ex.getMessage());
+        }
+    }
+
     private ExecutionResult executeIntegration(AgentTool tool, String userText) {
         String name = tool.getName().toLowerCase();
+        if ("ovloadorder".equals(name)) {
+            return executeOvLoadOrder(userText);
+        }
         if ("dtevaluate".equals(name) || "decisiontableevaluate".equals(name)) {
             if (decisionTableService == null) {
                 return new ExecutionResult(false, null, "Decision table service is unavailable");
@@ -982,6 +1076,18 @@ public class ToolExecutionService {
         Path resolved = root.resolve(raw).normalize();
         if (!resolved.startsWith(root)) {
             throw new IllegalArgumentException("Path escapes workspace root");
+        }
+        // When an ov-* profile binds a sub-root, file-system tools may
+        // only touch paths inside it. Without this the model could
+        // glob `.pods-agent/skills/**` or escape the order's own
+        // subtree on a typo.
+        String sub = OV_SUBROOT.get();
+        if (sub != null && !sub.isEmpty()) {
+            Path allowed = root.resolve(sub).normalize();
+            if (!resolved.startsWith(allowed) && !resolved.equals(allowed)) {
+                throw new IllegalArgumentException(
+                        "Path outside allowed scope: must be under '" + sub + "'");
+            }
         }
         return resolved;
     }

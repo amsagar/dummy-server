@@ -79,6 +79,18 @@ public class AgentToolCallbackFactory {
                                            SkillExecutionGate skillExecutionGate,
                                            java.nio.file.Path workspace,
                                            boolean bypassApprovalGate) {
+        return buildForTurn(sessionId, turnId, sender, selectedTools, skillExecutionGate,
+                workspace, bypassApprovalGate, null);
+    }
+
+    public List<ToolCallback> buildForTurn(String sessionId,
+                                           String turnId,
+                                           SseEventSender sender,
+                                           List<AgentTool> selectedTools,
+                                           SkillExecutionGate skillExecutionGate,
+                                           java.nio.file.Path workspace,
+                                           boolean bypassApprovalGate,
+                                           String workspaceSubroot) {
         long timeoutMs = runtimeTuningProperties.getHitlReplyTimeoutMs();
         String userId = UserContextHolder.currentUserId();
         List<AgentTool> tools = (selectedTools == null || selectedTools.isEmpty())
@@ -104,7 +116,8 @@ public class AgentToolCallbackFactory {
                         bypassApprovalGate,
                         runtimeTuningProperties.getToolOutputVfsSpillThresholdChars(),
                         runtimeTuningProperties.getToolIoLogMode(),
-                        runtimeTuningProperties.isProductionEnvironment()))
+                        runtimeTuningProperties.isProductionEnvironment(),
+                        workspaceSubroot))
                 .collect(Collectors.toList());
 
         java.util.Set<String> registeredNames = tools.stream()

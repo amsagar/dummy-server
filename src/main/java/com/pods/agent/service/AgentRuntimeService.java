@@ -268,11 +268,20 @@ public class AgentRuntimeService {
         String profileId = state == null ? null : state.getAgentProfileId();
         boolean isOrderValidationProfile = profileId != null && profileId.startsWith("ov-");
         if (isOrderValidationProfile) {
+            // Allow-list for ov-* profiles: the OV-specific analytics
+            // tools + the workspace materializer + read-only file-system
+            // tools scoped via ToolExecutionService.bindOvSubroot("orders/").
+            // `write`/`edit`/`apply_patch` stay out — the sandbox is
+            // read-only for the model.
             Set<String> allowed = Set.of(
                     "ovListRunsForOrder",
                     "ovGetRunDetail",
                     "ovStartValidation",
                     "ovDashboardStats",
+                    "ovLoadOrder",
+                    "read",
+                    "glob",
+                    "grep",
                     "question");
             tools = tools.stream()
                     .filter(t -> t != null && t.getName() != null && allowed.contains(t.getName()))
@@ -283,14 +292,14 @@ public class AgentRuntimeService {
             // appear in the general chat tool catalog and any model would
             // happily pick ovListRunsForOrder on the word "validate" — that's
             // exactly the leak this branch prevents. Strip the whole family
-            // so general chat sessions never see them. Keeping the names in
-            // a Set (rather than a prefix check) avoids accidentally
-            // shadowing any future tool that legitimately starts with "ov".
+            // (including the new ovLoadOrder) so general chat sessions
+            // never see them.
             Set<String> orderValidationOnly = Set.of(
                     "ovListRunsForOrder",
                     "ovGetRunDetail",
                     "ovStartValidation",
-                    "ovDashboardStats");
+                    "ovDashboardStats",
+                    "ovLoadOrder");
             tools = tools.stream()
                     .filter(t -> t == null || t.getName() == null || !orderValidationOnly.contains(t.getName()))
                     .toList();
@@ -323,9 +332,21 @@ public class AgentRuntimeService {
                 .toList()
                 : List.of();
 
+        // When an ov-* profile runs, the model is sandboxed to the
+        // orders/ subtree of the workspace — read/glob/grep refuse any
+        // path outside it. This stops the model from grepping skill
+        // manifests, memory dumps, or unrelated workspace fixtures.
+        String workspaceSubroot = isOrderValidationProfile ? "orders/" : null;
+        // ChatService binds the session workspace on the calling thread
+        // via WorkspaceContextHolder.withWorkspace(...) before reaching
+        // here. Capture it now so the per-tool AgentToolCallback can
+        // re-bind it on the Spring AI scheduler thread (the ThreadLocal
+        // doesn't cross thread boundaries by itself).
+        java.nio.file.Path turnWorkspace =
+                com.pods.agent.service.workspace.WorkspaceContextHolder.current();
         List<ToolCallback> toolCallbacks = agentToolCallbackFactory.buildForTurn(
                 session.getSessionId(), turnId, sender, tools, skillExecutionGate,
-                null, false);
+                turnWorkspace, false, workspaceSubroot);
         // Keep skill guidance in base system prompt and load full skill content only when
         // model explicitly calls the native `skill` tool.
         String stepContext = buildStepContext(userText, selectedSkillContext, mcpContext, runtimeMode, session, "",

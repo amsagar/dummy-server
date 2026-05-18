@@ -206,7 +206,23 @@ public class FrameworkToolPackService {
                 seed("websearch", "General web search. Prefer a domain-specific MCP/integration tool when the user's question is about a registered service (GitHub, Stripe, Linear, etc.).", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("codesearch", "Search code on the public web. Prefer a domain-specific MCP/integration tool when the user's question is about a known repo or service.", "web", "web", false, false, Map.of("search_term", "string"), false),
                 seed("task", "Dispatch a background worker task within the agent runtime.", "workflow", "workflow", false, false, Map.of("task", "string"), false),
-                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false)
+                seed("skill", "Run or inspect a registered skill by name.", "integration", "integration", false, false, Map.of("name", "string"), false),
+                // Order-validation companion tool. Materializes one order's
+                // run data into the session workspace under
+                // orders/<orderId>/ so the model can read/glob/grep it.
+                // Available only to the ov-* agent profiles — outside
+                // those, AgentRuntimeService strips it from the catalog.
+                seed("ovLoadOrder",
+                        "Load all available data for ONE order's validation run into the workspace under orders/<orderId>/ so file-system tools (read, glob, grep) can analyze it. Call this BEFORE answering any detailed question about a specific order. Idempotent — calling twice refreshes the cache (2-hour TTL).",
+                        "integration", "integration", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "orderId", Map.of("type", "string",
+                                                "description", "Order id like 600030447, or a synthetic run id (sessionId__turnId).")
+                                ),
+                                "required", List.of("orderId")
+                        ), true)
         );
     }
 
