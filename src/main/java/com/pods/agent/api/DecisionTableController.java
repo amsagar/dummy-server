@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/v1/decision-tables")
+@RequestMapping({"/api/v1/decision-tables", "/api/v1/order-validation/decision-tables"})
 @Tag(name = "Decision Tables", description = "Decision table CRUD and evaluation APIs")
 public class DecisionTableController {
     private final DecisionTableService decisionTableService;

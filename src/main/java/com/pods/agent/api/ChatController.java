@@ -32,7 +32,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 @RestController
-@RequestMapping("/api/v1/chat")
+@RequestMapping({"/api/v1/chat", "/api/v1/order-validation/chat"})
 @Tag(name = "Chat", description = "Streaming chat interface")
 @Slf4j
 public class ChatController {

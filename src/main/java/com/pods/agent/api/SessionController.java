@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
  * DELETE /api/v1/sessions/{id}          — delete session + messages
  */
 @RestController
-@RequestMapping("/api/v1/sessions")
+@RequestMapping({"/api/v1/sessions", "/api/v1/order-validation/sessions"})
 @Tag(name = "Sessions", description = "Chat session management")
 @Slf4j
 public class SessionController {

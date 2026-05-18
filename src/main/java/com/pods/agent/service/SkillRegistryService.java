@@ -53,7 +53,17 @@ public class SkillRegistryService {
     public List<SkillSnapshot> getEnabledSkills() {
         List<SkillSnapshot> all = new ArrayList<>(defaultSkills);
         all.addAll(enabledSkillCache.values());
-        return List.copyOf(all);
+        com.pods.agent.ordervalidation.service.OvScope scope =
+                com.pods.agent.ordervalidation.service.OvScopeContextHolder.current();
+        if (scope == null || scope.allowedSkillIds() == null) {
+            return List.copyOf(all);
+        }
+        // OV-scoped requests: restrict the registry to the configured
+        // allow-list. Built-in defaults are passed through unless the
+        // allow-list is empty — empty means "deny all" by design.
+        return all.stream()
+                .filter(s -> scope.isSkillAllowed(s.skill().getId()))
+                .toList();
     }
 
     public SkillSnapshot getEnabledSkillByName(String name) {

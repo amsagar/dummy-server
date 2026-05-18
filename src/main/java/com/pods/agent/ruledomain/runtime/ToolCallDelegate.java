@@ -150,6 +150,18 @@ public class ToolCallDelegate implements JavaDelegate {
 
         Object parsed = parseToolBody(result.body());
 
+        // Stage the RAW API response as the activity event's output —
+        // this is what users want to see when they drill into a tool
+        // call in the run-detail UI. The post-transform that follows
+        // narrows the result down to whatever the rule cares about
+        // (e.g. a single isServiceable bool), but for postmortem
+        // inspection the raw response is the truth.
+        try {
+            staging.output(objectMapper.writeValueAsString(parsed));
+        } catch (Exception ignored) {
+            // serialization failure is non-fatal for activity logging
+        }
+
         Object finalValue = parsed;
         if (postTransformJson != null && !postTransformJson.isBlank()) {
             Map<String, String> transform = parseStringMap(postTransformJson, "postTransform");
@@ -168,13 +180,6 @@ public class ToolCallDelegate implements JavaDelegate {
         }
 
         BpmnVariables.set(execution, outputBinding, finalValue);
-
-        // Record what we bound for postmortem inspection.
-        try {
-            staging.output(objectMapper.writeValueAsString(finalValue));
-        } catch (Exception ignored) {
-            // serialization failure is non-fatal for activity logging
-        }
     }
 
     private ToolExecutionService.ExecutionResult executeWithTimeoutRetry(

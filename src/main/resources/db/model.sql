@@ -559,3 +559,35 @@ CREATE TABLE IF NOT EXISTS agent.rule_activity_events (
 
 CREATE INDEX IF NOT EXISTS idx_rule_activity_events_execution
     ON agent.rule_activity_events (execution_id, start_ts ASC);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Order-validation package: settings table ONLY.
+--
+-- There is no dedicated "order_validation_runs" table or view. The
+-- OV-UI derives every metric live in the OrderValidationAnalyticsService
+-- by querying `agent.rule_executions JOIN agent.rule_domains` and
+-- grouping per-rule rows that share `(session_id, turn_id)`. The
+-- `order_validation_settings` singleton row below carries the
+-- workflow + assistant scope config.
+-- ────────────────────────────────────────────────────────────────────────
+
+-- Tear down any leftover view/table/column from earlier iterations.
+-- These run unconditionally and are no-ops on a fresh DB.
+DROP VIEW IF EXISTS agent.order_validation_runs;
+DROP TABLE IF EXISTS agent.order_validation_runs CASCADE;
+ALTER TABLE agent.rule_executions DROP COLUMN IF EXISTS ov_run_id;
+
+CREATE TABLE IF NOT EXISTS agent.order_validation_settings (
+    id                          TEXT PRIMARY KEY DEFAULT 'default',
+    workflow_id                 TEXT,
+    chat_model_ref              TEXT,
+    response_mode               TEXT NOT NULL DEFAULT 'basic',
+    allowed_skill_ids           TEXT,
+    allowed_rule_domain_ids     TEXT,
+    allowed_decision_tables     TEXT,
+    updated_at                  BIGINT NOT NULL
+);
+
+INSERT INTO agent.order_validation_settings (id, response_mode, updated_at)
+VALUES ('default', 'basic', (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT)
+ON CONFLICT (id) DO NOTHING;

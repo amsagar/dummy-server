@@ -52,7 +52,7 @@ public class ModelController {
         return ResponseEntity.ok(modelRegistryService.listAll());
     }
 
-    @GetMapping("/api/v1/models/enabled")
+    @GetMapping({"/api/v1/models/enabled", "/api/v1/order-validation/models/enabled"})
     @Operation(summary = "List enabled models only")
     public ResponseEntity<List<ModelConfig>> listEnabled() {
         return ResponseEntity.ok(modelRegistryService.listEnabled());

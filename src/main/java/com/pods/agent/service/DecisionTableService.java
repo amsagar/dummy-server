@@ -62,6 +62,12 @@ public class DecisionTableService {
     }
 
     public EvaluationResult evaluate(String name, Map<String, Object> inputs) {
+        com.pods.agent.ordervalidation.service.OvScope scope =
+                com.pods.agent.ordervalidation.service.OvScopeContextHolder.current();
+        if (scope != null && !scope.isDecisionTableAllowed(name)) {
+            throw new IllegalArgumentException(
+                    "Decision table '" + name + "' is not allowed for the order-validation assistant scope");
+        }
         DecisionTable table = getByName(name);
         DmnDecisionTable parsed = cache.computeIfAbsent(name, key -> DmnDecisionTable.fromJsonString(table.getName(), table.getDmnJson()));
         return parsed.evaluate(inputs == null ? Map.of() : inputs);
