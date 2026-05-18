@@ -85,11 +85,12 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
     return unionVariables(perRule);
   }, [allLoaded, detailQueries]);
 
-  // Classify the union. A variable is "required" if it's referenced by
-  // the FIRST tool's inputBindings in ANY rule — that's the user-provided
-  // identifier (e.g. orderId). Everything else is suspect.
-  const { required, suspect } = useMemo(() => {
-    if (!allLoaded) return { required: [] as BpmnVarRef[], suspect: [] as BpmnVarRef[] };
+  // A variable is "required" if it's referenced by the FIRST tool's
+  // inputBindings in ANY rule — that's the user-provided identifier
+  // (e.g. orderId). We only render required fields; suspect/derived
+  // variables are computed by the BPMN at runtime.
+  const required = useMemo(() => {
+    if (!allLoaded) return [] as BpmnVarRef[];
     const reqUnion = new Set<string>();
     for (const q of detailQueries) {
       const xml = q.data?.bpmnXml;
@@ -98,13 +99,7 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
       const { required: req } = classifyVariables(xml, localVars);
       for (const v of req) reqUnion.add(v.name);
     }
-    const required: BpmnVarRef[] = [];
-    const suspect: BpmnVarRef[] = [];
-    for (const v of inputVars) {
-      if (reqUnion.has(v.name)) required.push(v);
-      else suspect.push(v);
-    }
-    return { required, suspect };
+    return inputVars.filter((v) => reqUnion.has(v.name));
   }, [allLoaded, detailQueries, inputVars]);
 
   const deprecatedCount = useMemo(
@@ -211,16 +206,6 @@ export function QuickTestSkillDialog({ skillId, skillName, rules, onClose }: Pro
               subtitle="Values the lookup tool of one or more rules consumes — same map is sent to every rule"
               variant="required"
               variables={required}
-              values={values}
-              onChange={(name, val) => setValues((prev) => ({ ...prev, [name]: val }))}
-            />
-          )}
-          {allLoaded && suspect.length > 0 && (
-            <FieldGroup
-              title="Likely compiler defect"
-              subtitle="These variables are referenced as bare ${vars} but should have been derived from a prior tool's response. Provide values to test, but the affected rules should be re-compiled."
-              variant="suspect"
-              variables={suspect}
               values={values}
               onChange={(name, val) => setValues((prev) => ({ ...prev, [name]: val }))}
             />

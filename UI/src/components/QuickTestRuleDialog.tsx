@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import {
   extractBpmnVariables,
   classifyVariables,
-  suspectHint,
   defaultForVar,
   looksMultiline,
   coerce,
@@ -62,7 +61,7 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
   });
 
   const inputVars = useMemo(() => extractBpmnVariables(detail?.bpmnXml), [detail]);
-  const { required, suspect } = useMemo(
+  const { required } = useMemo(
     () => classifyVariables(detail?.bpmnXml, inputVars),
     [detail, inputVars],
   );
@@ -137,18 +136,6 @@ export function QuickTestRuleDialog({ ruleId, ruleLabel, onClose }: Props) {
               subtitle="Values the lookup tool consumes"
               variant="required"
               variables={required}
-              values={values}
-              onChange={(name, val) =>
-                setValues((prev) => ({ ...prev, [name]: val }))
-              }
-            />
-          )}
-          {detail && suspect.length > 0 && (
-            <FieldGroup
-              title="Likely compiler defect"
-              subtitle="These are referenced as bare ${vars} but should have been derived from a prior tool's response. Provide a value to test, but the rule should be re-compiled."
-              variant="suspect"
-              variables={suspect}
               values={values}
               onChange={(name, val) =>
                 setValues((prev) => ({ ...prev, [name]: val }))
@@ -251,7 +238,7 @@ export function DeprecatedBanner({ lastError }: { lastError?: string | null }) {
 interface FieldGroupProps {
   title: string;
   subtitle?: string;
-  variant: "required" | "suspect";
+  variant?: "required";
   variables: BpmnVarRef[];
   values: Record<string, string>;
   onChange: (name: string, value: string) => void;
@@ -260,24 +247,14 @@ interface FieldGroupProps {
 export function FieldGroup({
   title,
   subtitle,
-  variant,
   variables,
   values,
   onChange,
 }: FieldGroupProps) {
-  const isSuspect = variant === "suspect";
   return (
-    <div
-      className={`rounded border p-3 space-y-3 ${
-        isSuspect ? "border-orange-200 bg-orange-50/40" : "border-gray-200"
-      }`}
-    >
+    <div className="rounded border p-3 space-y-3 border-gray-200">
       <div>
-        <div
-          className={`text-[11px] font-semibold uppercase tracking-wide ${
-            isSuspect ? "text-orange-800" : "text-gray-700"
-          }`}
-        >
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-700">
           {title}
         </div>
         {subtitle && (
@@ -315,11 +292,6 @@ export function FieldGroup({
               className="w-full rounded border bg-white p-2 text-xs font-mono"
               placeholder="Scalar, or JSON for objects/arrays"
             />
-          )}
-          {isSuspect && (
-            <div className="text-[11px] text-orange-700 mt-0.5">
-              {suspectHint(v.name)}
-            </div>
           )}
         </div>
       ))}

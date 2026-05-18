@@ -24,6 +24,8 @@ import {
   Server,
   Table2,
   Workflow,
+  BarChart3,
+  ListChecks,
   Settings as SettingsIcon,
   LogOut,
   UserCircle2,
@@ -44,6 +46,9 @@ import DecisionTablesPage from "./pages/DecisionTablesPage";
 import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
 import RuleDomainsPage from "./pages/RuleDomainsPage";
 import RuleDomainEditorPage from "./pages/RuleDomainEditorPage";
+import RuleDomainAnalyticsPage from "./pages/RuleDomainAnalyticsPage";
+import RuleExecutionsPage from "./pages/RuleExecutionsPage";
+import RuleExecutionDetailPage from "./pages/RuleExecutionDetailPage";
 import SettingsPage from "./pages/SettingsPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
@@ -67,6 +72,8 @@ function Sidebar() {
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
     { icon: Workflow, name: "Rule Domains", path: "/rule-domains" },
+    { icon: ListChecks, name: "Executions", path: "/rule-executions" },
+    { icon: BarChart3, name: "Analytics", path: "/rule-analytics" },
     { icon: Server, name: "MCP Registry", path: "/mcp-registry" },
     { icon: SettingsIcon, name: "Settings", path: "/settings/rule-domain" },
   ];
@@ -201,6 +208,8 @@ function Header() {
     "/skills": "Skills",
     "/decision-tables": "Decision Tables",
     "/rule-domains": "Rule Domains",
+    "/rule-executions": "Executions",
+    "/rule-analytics": "Analytics",
     "/settings/rule-domain": "Settings",
     "/mcp-registry": "MCP Registry",
     "/mcp-registry/": "MCP Registry",
@@ -210,6 +219,7 @@ function Header() {
     (location.pathname.startsWith("/tools/") ? "Tools" : undefined) ||
     (location.pathname.startsWith("/decision-tables/") ? "Decision Tables" : undefined) ||
     (location.pathname.startsWith("/rule-domains/") ? "Rule Domains" : undefined) ||
+    (location.pathname.startsWith("/rule-executions/") ? "Executions" : undefined) ||
     (location.pathname.startsWith("/settings/") ? "Settings" : undefined) ||
     (location.pathname.startsWith("/mcp-registry/") ? "MCP Registry" : undefined) ||
     pageTitle[location.pathname] ||
@@ -271,6 +281,9 @@ export default function App() {
                 <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
                 <Route path="/rule-domains" element={<RuleDomainsPage />} />
                 <Route path="/rule-domains/:id" element={<RuleDomainEditorPage />} />
+                <Route path="/rule-analytics" element={<RuleDomainAnalyticsPage />} />
+                <Route path="/rule-executions" element={<RuleExecutionsPage />} />
+                <Route path="/rule-executions/:execId" element={<RuleExecutionDetailPage />} />
                 <Route path="/settings" element={<Navigate to="/settings/rule-domain" replace />} />
                 <Route path="/settings/rule-domain" element={<SettingsPage />} />
                 <Route path="/mcp-registry" element={<McpRegistryPage />} />

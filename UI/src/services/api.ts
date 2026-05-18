@@ -236,6 +236,54 @@ export const api = {
       }
     ).then(handleResponse),
   },
+  ruleExecutions: {
+    list: (params: {
+      skillId?: string;
+      domainId?: string;
+      ruleName?: string;
+      status?: 'success' | 'failed';
+      since?: number;
+      until?: number;
+      page?: number;
+      pageSize?: number;
+    } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.skillId) qs.set('skillId', params.skillId);
+      if (params.domainId) qs.set('domainId', params.domainId);
+      if (params.ruleName) qs.set('ruleName', params.ruleName);
+      if (params.status) qs.set('status', params.status);
+      if (params.since != null) qs.set('since', String(params.since));
+      if (params.until != null) qs.set('until', String(params.until));
+      qs.set('page', String(params.page ?? 0));
+      qs.set('pageSize', String(params.pageSize ?? 50));
+      return fetch(`${BASE_URL}/rule-executions?${qs.toString()}`, { headers: getHeaders() })
+        .then(handleResponse);
+    },
+    activityEvents: (execId: string) => fetch(
+      `${BASE_URL}/rule-executions/${encodeURIComponent(execId)}/activity-events`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    analyticsSummary: (days: number = 30) => fetch(
+      `${BASE_URL}/rule-executions/analytics/summary?days=${days}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    analyticsTimeseries: (days: number = 30) => fetch(
+      `${BASE_URL}/rule-executions/analytics/timeseries?days=${days}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    analyticsTopErrors: (days: number = 7, limit: number = 10) => fetch(
+      `${BASE_URL}/rule-executions/analytics/top-errors?days=${days}&limit=${limit}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    analyticsSlowRules: (days: number = 7, limit: number = 10) => fetch(
+      `${BASE_URL}/rule-executions/analytics/slow-rules?days=${days}&limit=${limit}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+    analyticsPerSkill: (days: number = 30) => fetch(
+      `${BASE_URL}/rule-executions/analytics/per-skill?days=${days}`,
+      { headers: getHeaders() }
+    ).then(handleResponse),
+  },
   decisionTables: {
     list: () => fetch(`${BASE_URL}/decision-tables`, { headers: getHeaders() }).then(handleResponse),
     get: (name: string) => fetch(`${BASE_URL}/decision-tables/${encodeURIComponent(name)}`, { headers: getHeaders() }).then(handleResponse),
