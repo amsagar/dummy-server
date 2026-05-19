@@ -19,6 +19,13 @@ public class ChatRequest {
     private String agentProfileId;
 
     /**
+     * Optional id of a {@code response_mode} row in {@code agent_profiles}.
+     * When set, its system_prompt is appended to the base profile's prompt
+     * as a style addendum — see AgentOrchestrator.buildSystemPrompt.
+     */
+    private String responseModeId;
+
+    /**
      * Model to use for this turn.
      * Example: { "providerID": "anthropic", "modelID": "claude-opus-4-6" }
      *

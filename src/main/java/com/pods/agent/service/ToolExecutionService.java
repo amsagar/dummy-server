@@ -50,6 +50,14 @@ public class ToolExecutionService {
     private static final int READ_MAX_LINES = 5000;
     private static final int READ_LEGACY_BYTE_CAP = 65_536;
 
+    // glob/grep pagination caps. Defaults preserve historical behavior; max
+    // values bound memory + payload size when callers ask for big windows.
+    private static final int GLOB_DEFAULT_LIMIT = 200;
+    private static final int GLOB_MAX_LIMIT = 2000;
+    private static final int GREP_DEFAULT_LIMIT = 300;
+    private static final int GREP_MAX_LIMIT = 2000;
+    private static final int GREP_FILE_WALK_LIMIT = 5000;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .build();
@@ -867,31 +875,53 @@ public class ToolExecutionService {
     private ExecutionResult fsGlob(Map<String, Object> args) throws IOException {
         String pattern = stringArg(args, "glob", "**/*");
         Path root = safePath(stringArg(args, "path", "."));
+        int offset = Math.max(0, intArg(args, "offset", 0));
+        int limit = Math.min(GLOB_MAX_LIMIT, Math.max(1, intArg(args, "limit", GLOB_DEFAULT_LIMIT)));
+
         PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
-        List<String> matches;
+        List<String> allMatches;
         try (Stream<Path> stream = Files.walk(root)) {
-            matches = stream
+            allMatches = stream
                     .filter(Files::isRegularFile)
                     .map(root::relativize)
                     .filter(matcher::matches)
                     .map(Path::toString)
                     .sorted()
-                    .limit(200)
                     .toList();
         }
-        return new ExecutionResult(true, toJson(matches), null);
+
+        int total = allMatches.size();
+        int from = Math.min(offset, total);
+        int to = Math.min(from + limit, total);
+        List<String> page = allMatches.subList(from, to);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("matches", page);
+        body.put("total", total);
+        body.put("offset", from);
+        body.put("limit", limit);
+        if (to < total) {
+            body.put("nextOffset", to);
+            body.put("hint", "call again with {\"offset\":" + to + "} to page");
+        }
+        return new ExecutionResult(true, toJson(body), null);
     }
 
     private ExecutionResult fsGrep(Map<String, Object> args) throws IOException {
         String pattern = stringArg(args, "pattern", null);
         if (pattern == null || pattern.isBlank()) return new ExecutionResult(false, null, "pattern is required");
         Path root = safePath(stringArg(args, "path", "."));
+        int offset = Math.max(0, intArg(args, "offset", 0));
+        int limit = Math.min(GREP_MAX_LIMIT, Math.max(1, intArg(args, "limit", GREP_DEFAULT_LIMIT)));
+
         Pattern compiled = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE);
+        // Collect hits across the file-walk cap (independent of the user's
+        // result-window limit) so paging through results stays consistent.
         List<String> hits = new ArrayList<>();
         try (Stream<Path> stream = Files.walk(root)) {
             stream.filter(Files::isRegularFile)
                     .sorted(Comparator.comparing(Path::toString))
-                    .limit(500)
+                    .limit(GREP_FILE_WALK_LIMIT)
                     .forEach(p -> {
                         try {
                             List<String> lines = Files.readAllLines(p);
@@ -904,7 +934,22 @@ public class ToolExecutionService {
                         }
                     });
         }
-        return new ExecutionResult(true, toJson(hits.stream().limit(300).toList()), null);
+
+        int total = hits.size();
+        int from = Math.min(offset, total);
+        int to = Math.min(from + limit, total);
+        List<String> page = hits.subList(from, to);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("hits", page);
+        body.put("total", total);
+        body.put("offset", from);
+        body.put("limit", limit);
+        if (to < total) {
+            body.put("nextOffset", to);
+            body.put("hint", "call again with {\"offset\":" + to + "} to page");
+        }
+        return new ExecutionResult(true, toJson(body), null);
     }
 
     private ExecutionResult fsWrite(Map<String, Object> args, boolean requireExisting) throws IOException {

@@ -117,7 +117,11 @@ export const orderValidationApi = {
 
 export interface OrderValidationUiSettings {
   chatModelRef: string | null;
-  responseMode: "basic" | "detailed";
+  /**
+   * Foreign key into the Response Modes table (`agent_profiles`, kind='response_mode').
+   * `null` falls back to the OV base prompt with no style addendum.
+   */
+  responseModeId: string | null;
   workflowId: string | null;
   // Allow-lists for the scoped AI assistant. `null` means unrestricted;
   // `[]` means deny-all; populated array means only these are exposed.
@@ -132,6 +136,24 @@ export const orderValidationSettingsApi = {
   },
   update(s: OrderValidationUiSettings): Promise<OrderValidationUiSettings> {
     return send<OrderValidationUiSettings>("PUT", "/settings", s, BASE);
+  },
+};
+
+export interface ResponseModeRow {
+  id: string;
+  name: string;
+  systemPrompt: string;
+  enabled: boolean;
+  kind: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// Response modes are managed in the main admin UI (Response Modes page).
+// The OV-UI only reads the list to populate the Settings dropdown.
+export const responseModesApi = {
+  list(): Promise<ResponseModeRow[]> {
+    return get<ResponseModeRow[]>("/response-modes", {}, "/api/v1");
   },
 };
 

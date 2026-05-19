@@ -33,7 +33,7 @@ public class OrderValidationSettingsRepository {
                 new MapSqlParameterSource("id", ID),
                 (rs, i) -> new OrderValidationUiSettings(
                         rs.getString("chat_model_ref"),
-                        rs.getString("response_mode"),
+                        rs.getString("response_mode_id"),
                         rs.getString("workflow_id"),
                         parseList(rs.getString("allowed_skill_ids")),
                         parseList(rs.getString("allowed_rule_domain_ids")),
@@ -42,11 +42,15 @@ public class OrderValidationSettingsRepository {
     }
 
     public OrderValidationUiSettings save(OrderValidationUiSettings s) {
-        String responseMode = s.responseMode() != null ? s.responseMode() : "basic";
+        // Legacy `response_mode` column (basic/detailed enum) is kept one
+        // release as a safety net; derive a sensible value when we can't
+        // recover one from the new id, so existing readers don't crash.
+        String legacyResponseMode = legacyResponseModeFor(s.responseModeId());
         var p = new MapSqlParameterSource()
                 .addValue("id", ID)
                 .addValue("chat_model_ref", s.chatModelRef())
-                .addValue("response_mode", responseMode)
+                .addValue("response_mode_id", s.responseModeId())
+                .addValue("response_mode", legacyResponseMode)
                 .addValue("workflow_id", s.workflowId())
                 .addValue("allowed_skill_ids", writeList(s.allowedSkillIds()))
                 .addValue("allowed_rule_domain_ids", writeList(s.allowedRuleDomainIds()))
@@ -54,16 +58,17 @@ public class OrderValidationSettingsRepository {
                 .addValue("updated_at", System.currentTimeMillis());
         jdbc.update("""
                 INSERT INTO agent.order_validation_settings
-                  (id, chat_model_ref, response_mode, workflow_id,
+                  (id, chat_model_ref, response_mode, response_mode_id, workflow_id,
                    allowed_skill_ids, allowed_rule_domain_ids, allowed_decision_tables,
                    updated_at)
                 VALUES
-                  (:id, :chat_model_ref, :response_mode, :workflow_id,
+                  (:id, :chat_model_ref, :response_mode, :response_mode_id, :workflow_id,
                    :allowed_skill_ids, :allowed_rule_domain_ids, :allowed_decision_tables,
                    :updated_at)
                 ON CONFLICT (id) DO UPDATE SET
                   chat_model_ref = EXCLUDED.chat_model_ref,
                   response_mode = EXCLUDED.response_mode,
+                  response_mode_id = EXCLUDED.response_mode_id,
                   workflow_id = EXCLUDED.workflow_id,
                   allowed_skill_ids = EXCLUDED.allowed_skill_ids,
                   allowed_rule_domain_ids = EXCLUDED.allowed_rule_domain_ids,
@@ -71,6 +76,14 @@ public class OrderValidationSettingsRepository {
                   updated_at = EXCLUDED.updated_at
                 """, p);
         return load();
+    }
+
+    private static String legacyResponseModeFor(String responseModeId) {
+        if (responseModeId == null) return "basic";
+        // The legacy response_mode enum only has two values; map both known
+        // detailed-flavor personas to 'detailed' and everything else to 'basic'.
+        return ("ov-developers".equalsIgnoreCase(responseModeId)
+                || "ov-detailed".equalsIgnoreCase(responseModeId)) ? "detailed" : "basic";
     }
 
     private List<String> parseList(String json) {

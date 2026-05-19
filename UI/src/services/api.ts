@@ -297,4 +297,25 @@ export const api = {
         body: JSON.stringify({ inputs }),
       }).then(handleResponse),
   },
+  responseModes: {
+    list: () => fetch(`${BASE_URL}/response-modes`, { headers: getHeaders() }).then(handleResponse),
+    get: (id: string) => fetch(`${BASE_URL}/response-modes/${encodeURIComponent(id)}`, { headers: getHeaders() }).then(handleResponse),
+    create: (payload: { name: string; systemPrompt: string }) =>
+      fetch(`${BASE_URL}/response-modes`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }).then(handleResponse),
+    update: (id: string, payload: { name: string; systemPrompt: string }) =>
+      fetch(`${BASE_URL}/response-modes/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }).then(handleResponse),
+    delete: (id: string) =>
+      fetch(`${BASE_URL}/response-modes/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: getHeaders(),
+      }).then(handleResponse),
+  },
 };

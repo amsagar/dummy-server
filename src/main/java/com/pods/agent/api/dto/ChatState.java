@@ -22,6 +22,11 @@ public class ChatState {
     private String runtimeMode;
     private String modelSelectionMode;
     private String agentProfileId;
+    /**
+     * Optional response-mode profile id (kind='response_mode'). When set, the
+     * orchestrator appends its system_prompt to the base profile as a style addendum.
+     */
+    private String responseModeId;
     private String rollingSummary;
 
     public ChatState copy() {
@@ -32,6 +37,7 @@ public class ChatState {
                 .runtimeMode(this.runtimeMode)
                 .modelSelectionMode(this.modelSelectionMode)
                 .agentProfileId(this.agentProfileId)
+                .responseModeId(this.responseModeId)
                 .rollingSummary(this.rollingSummary)
                 .build();
     }

@@ -17,6 +17,11 @@ public class AgentProfile {
     private String modelStrategy;
     private boolean enabled;
     private String metadata;
+    /**
+     * Discriminator. 'system' rows are base profiles consumed by the orchestrator;
+     * 'response_mode' rows are user-managed style addenda surfaced by the OV-UI dropdown.
+     */
+    private String kind;
     private long createdAt;
     private long updatedAt;
 }

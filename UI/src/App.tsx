@@ -26,6 +26,7 @@ import {
   Workflow,
   BarChart3,
   ListChecks,
+  MessageSquare,
   Settings as SettingsIcon,
   LogOut,
   UserCircle2,
@@ -44,6 +45,7 @@ import McpRegistryPage from "./pages/McpRegistryPage";
 import McpServerToolsPage from "./pages/McpServerToolsPage";
 import DecisionTablesPage from "./pages/DecisionTablesPage";
 import DecisionTableEditorPage from "./pages/DecisionTableEditorPage";
+import PersonasPage from "./pages/PersonasPage";
 import RuleDomainsPage from "./pages/RuleDomainsPage";
 import RuleDomainEditorPage from "./pages/RuleDomainEditorPage";
 import RuleDomainAnalyticsPage from "./pages/RuleDomainAnalyticsPage";
@@ -71,6 +73,7 @@ function Sidebar() {
     { icon: Wrench, name: "Tools", path: "/tools" },
     { icon: FolderTree, name: "Skills", path: "/skills" },
     { icon: Table2, name: "Decision Tables", path: "/decision-tables" },
+    { icon: MessageSquare, name: "Personas", path: "/personas" },
     { icon: Workflow, name: "Rule Domains", path: "/rule-domains" },
     { icon: ListChecks, name: "Executions", path: "/rule-executions" },
     { icon: BarChart3, name: "Analytics", path: "/rule-analytics" },
@@ -279,6 +282,8 @@ export default function App() {
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/decision-tables" element={<DecisionTablesPage />} />
                 <Route path="/decision-tables/:name" element={<DecisionTableEditorPage />} />
+                <Route path="/personas" element={<PersonasPage />} />
+                <Route path="/response-modes" element={<Navigate to="/personas" replace />} />
                 <Route path="/rule-domains" element={<RuleDomainsPage />} />
                 <Route path="/rule-domains/:id" element={<RuleDomainEditorPage />} />
                 <Route path="/rule-analytics" element={<RuleDomainAnalyticsPage />} />

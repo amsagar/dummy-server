@@ -196,8 +196,32 @@ public class FrameworkToolPackService {
                                 ),
                                 "required", List.of("path")
                         ), false),
-                seed("glob", "Glob files in the local workspace by path pattern. Local workspace only — does not list remote repos, GitHub contents, or external storage.", "filesystem", "filesystem", false, false, Map.of("path", "string", "glob", "string"), false),
-                seed("grep", "Search text patterns in local workspace files. Local workspace only — does not search remote repos, GitHub, web, or external systems.", "filesystem", "filesystem", false, false, Map.of("path", "string", "pattern", "string"), false),
+                seed("glob",
+                        "Glob files in the local workspace by path pattern. Supports pagination via `offset` (0-based index of the first match to return) and `limit` (max matches per call); the response carries `total` and a `nextOffset` hint when more results exist. Local workspace only — does not list remote repos, GitHub contents, or external storage.",
+                        "filesystem", "filesystem", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "path", Map.of("type", "string", "description", "Workspace-relative root directory to search from. Defaults to the workspace root."),
+                                        "glob", Map.of("type", "string", "description", "Glob pattern (e.g. `**/*.json`, `orders/*/run.json`). Defaults to `**/*`."),
+                                        "offset", Map.of("type", "number", "description", "0-based index of the first match to return. Default 0."),
+                                        "limit", Map.of("type", "number", "description", "Maximum number of matches to return. Default 200, capped at 2000.")
+                                ),
+                                "required", List.of()
+                        ), false),
+                seed("grep",
+                        "Search text patterns in local workspace files. Supports pagination via `offset` (0-based index of the first hit to return) and `limit` (max hits per call); the response carries `total` and a `nextOffset` hint when more results exist. Local workspace only — does not search remote repos, GitHub, web, or external systems.",
+                        "filesystem", "filesystem", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "path", Map.of("type", "string", "description", "Workspace-relative root directory to search under. Defaults to the workspace root."),
+                                        "pattern", Map.of("type", "string", "description", "Regex pattern (case-insensitive) to match against each file line."),
+                                        "offset", Map.of("type", "number", "description", "0-based index of the first hit to return. Default 0."),
+                                        "limit", Map.of("type", "number", "description", "Maximum number of hits to return. Default 300, capped at 2000.")
+                                ),
+                                "required", List.of("pattern")
+                        ), false),
                 seed("edit", "Surgically edit a local workspace file by replacing one occurrence of `old_text` with `new_text`. The match must be UNIQUE in the file — include enough surrounding context to disambiguate. Use this for one-shot string replacements. For multi-hunk edits, use apply_patch instead. Local files only.", "filesystem", "filesystem", false, true, Map.of("path", "string", "old_text", "string", "new_text", "string"), false),
                 seed("write", "Overwrite a local workspace file with the entire `content` (whole-file rewrite). Use sparingly — prefer `edit` or `apply_patch` for targeted changes. Local files only.", "filesystem", "filesystem", false, true, Map.of("path", "string", "content", "string"), false),
                 seed("apply_patch", "Apply one or more diff hunks to a local workspace file. `content` must contain blocks of:\n<<<<<<< ORIGINAL\n<exact existing text>\n=======\n<replacement text>\n>>>>>>> UPDATED\nORIGINAL must match the file byte-for-byte (including indentation) and must be unique. Multiple hunks are supported by stacking blocks. Local files only.", "filesystem", "filesystem", false, true, Map.of("path", "string", "content", "string"), false),

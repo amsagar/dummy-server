@@ -331,8 +331,25 @@ public class AgentOrchestrator {
             AgentProfile profile = agentProfileRepository.findById(profileId).orElse(null);
             if (profile != null && profile.getSystemPrompt() != null && !profile.getSystemPrompt().isBlank()) {
                 StringBuilder p = new StringBuilder(profile.getSystemPrompt());
+
+                // Optional response-mode addendum. The base profile (e.g. ov-base)
+                // owns scope/tools/format; the response mode injects the operator's
+                // chosen voice on top. Only honor rows of kind='response_mode' and
+                // only when enabled — soft-deleted modes silently fall through.
+                String responseModeId = state.getResponseModeId();
+                if (responseModeId != null && !responseModeId.isBlank()) {
+                    AgentProfile mode = agentProfileRepository.findById(responseModeId).orElse(null);
+                    if (mode != null
+                            && mode.isEnabled()
+                            && "response_mode".equalsIgnoreCase(mode.getKind())
+                            && mode.getSystemPrompt() != null
+                            && !mode.getSystemPrompt().isBlank()) {
+                        p.append("\n\n").append(mode.getSystemPrompt());
+                    }
+                }
+
                 p.append("\n\nCurrent date: ");
-                String ptz = (state != null && state.getTimezone() != null) ? state.getTimezone() : "America/New_York";
+                String ptz = (state.getTimezone() != null) ? state.getTimezone() : "America/New_York";
                 try {
                     p.append(ZonedDateTime.now(ZoneId.of(ptz)).format(DateTimeFormatter.RFC_1123_DATE_TIME));
                 } catch (Exception e) {

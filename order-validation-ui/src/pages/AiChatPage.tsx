@@ -22,7 +22,7 @@ import { AssistantBubble } from "@/components/chat/AssistantBubble";
 import { UserBubble } from "@/components/chat/UserBubble";
 import { SystemEventGroup } from "@/components/chat/SystemEventGroup";
 import { chatApi } from "@/services/chatApi";
-import { orderValidationSettingsApi } from "@/services/api";
+import { orderValidationSettingsApi, responseModesApi } from "@/services/api";
 import { cn } from "@/lib/utils";
 import { SPINNER_VERBS } from "@/lib/spinnerVerbs";
 import type { ChatSession, SystemEvent } from "@/types/chat";
@@ -85,8 +85,17 @@ export function AiChatPage() {
     queryFn: () => orderValidationSettingsApi.get(),
   });
 
-  const profileId = settings?.responseMode === "detailed" ? "ov-detailed" : "ov-basic";
+  // The OV chat always uses the locked-down ov-base profile (scope + tools + format).
+  // Voice/style is layered on top via the operator's selected response mode.
+  const profileId = "ov-base";
+  const responseModeId = settings?.responseModeId ?? null;
   const modelRef = parseModelRef(settings?.chatModelRef);
+
+  const { data: responseModes } = useQuery({
+    queryKey: ["response-modes"],
+    queryFn: () => responseModesApi.list(),
+  });
+  const activeResponseMode = responseModes?.find((m) => m.id === responseModeId) ?? null;
 
   const sessions = sessionsData?.sessions ?? [];
 
@@ -242,6 +251,7 @@ export function AiChatPage() {
             model: modelRef ?? undefined,
             modelSelectionMode: "manual",
             agentProfileId: profileId,
+            responseModeId: responseModeId ?? undefined,
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           },
           (event) => handleSseEvent(event, assistantMsg.id, systemMsg.id),
@@ -267,7 +277,7 @@ export function AiChatPage() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [streaming, sessionId, modelRef, profileId],
+    [streaming, sessionId, modelRef, profileId, responseModeId],
   );
 
   const send = async () => {
@@ -452,7 +462,7 @@ export function AiChatPage() {
     <>
       <TopBar
         title="AI Assistant"
-        subtitle={settings ? `Mode: ${settings.responseMode === "detailed" ? "Detailed" : "Basic"}` : undefined}
+        subtitle={activeResponseMode ? `Persona: ${activeResponseMode.name}` : settings ? "Persona: Default" : undefined}
       />
       <main className="flex-1 flex overflow-hidden">
         <aside className="w-[260px] shrink-0 border-r border-border bg-card flex flex-col">

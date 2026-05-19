@@ -41,6 +41,11 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/decision-tables/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/decision-tables").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/decision-tables").permitAll()
+                        // Response modes: admin CRUD authored from the main UI dashboard
+                        // and consumed by the order-validation-ui Settings dropdown.
+                        .requestMatchers("/api/v1/response-modes/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/response-modes").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/response-modes").permitAll()
                         // AI Chat surface for the standalone order-validation-ui.
                         // Sessions/models endpoints expose data scoped to the
                         // default user the controller falls back to when no JWT

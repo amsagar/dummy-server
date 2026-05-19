@@ -88,4 +88,9 @@ export interface ChatStreamRequest {
   timezone?: string;
   modelSelectionMode?: "manual" | "auto";
   agentProfileId?: string;
+  /**
+   * Optional Response Mode id (agent_profiles row, kind='response_mode').
+   * The orchestrator appends the row's system_prompt to the base profile as a style addendum.
+   */
+  responseModeId?: string;
 }

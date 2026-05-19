@@ -6,6 +6,7 @@ import {
   orderValidationApi,
   orderValidationScopeApi,
   orderValidationSettingsApi,
+  responseModesApi,
 } from "@/services/api";
 import { chatApi } from "@/services/chatApi";
 import { useSettings } from "@/hooks/useSettings";
@@ -36,7 +37,7 @@ export function SettingsPage() {
   const updateSettings = useMutation({
     mutationFn: (next: {
       chatModelRef?: string | null;
-      responseMode?: "basic" | "detailed";
+      responseModeId?: string | null;
       workflowId?: string | null;
       allowedSkillIds?: string[] | null;
       allowedRuleDomainIds?: string[] | null;
@@ -44,7 +45,8 @@ export function SettingsPage() {
     }) =>
       orderValidationSettingsApi.update({
         chatModelRef: next.chatModelRef ?? settings?.chatModelRef ?? null,
-        responseMode: next.responseMode ?? settings?.responseMode ?? "basic",
+        responseModeId:
+          next.responseModeId !== undefined ? next.responseModeId : settings?.responseModeId ?? null,
         workflowId: next.workflowId ?? settings?.workflowId ?? null,
         allowedSkillIds:
           next.allowedSkillIds !== undefined ? next.allowedSkillIds : settings?.allowedSkillIds ?? null,
@@ -110,9 +112,14 @@ export function SettingsPage() {
     updateSettings.mutate({ chatModelRef: ref || null });
   };
 
-  const onResponseModeChange = (mode: string) => {
-    updateSettings.mutate({ responseMode: (mode as "basic" | "detailed") || "basic" });
+  const onResponseModeChange = (id: string) => {
+    updateSettings.mutate({ responseModeId: id ? id : null });
   };
+
+  const { data: responseModes } = useQuery({
+    queryKey: ["response-modes"],
+    queryFn: () => responseModesApi.list(),
+  });
 
   return (
     <>
@@ -218,15 +225,22 @@ export function SettingsPage() {
                     </Select>
                   </label>
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-xs font-medium text-foreground/80">Response mode</span>
+                    <span className="text-xs font-medium text-foreground/80">Persona</span>
                     <Select
-                      value={settings?.responseMode ?? "basic"}
+                      value={settings?.responseModeId ?? ""}
                       onChange={(e) => onResponseModeChange(e.target.value)}
                       className="w-full"
                     >
-                      <option value="basic">Basic — one-paragraph headline summary</option>
-                      <option value="detailed">Detailed — per-check breakdown with bullets</option>
+                      <option value="">— Default (no persona) —</option>
+                      {(responseModes ?? []).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
+                      ))}
                     </Select>
+                    <span className="text-[11px] text-foreground/60">
+                      Authored in the main UI dashboard under Personas.
+                    </span>
                   </label>
                   {updateSettings.error && (
                     <div className="text-xs text-error">

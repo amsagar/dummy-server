@@ -537,6 +537,9 @@ public class ChatService {
         if (request.getAgentProfileId() != null && !request.getAgentProfileId().isBlank()) {
             state.setAgentProfileId(request.getAgentProfileId());
         }
+        if (request.getResponseModeId() != null && !request.getResponseModeId().isBlank()) {
+            state.setResponseModeId(request.getResponseModeId());
+        }
         var resolved = request.resolvedModel();
         if (resolved != null) {
             state.setModel(resolved);
