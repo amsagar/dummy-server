@@ -119,6 +119,40 @@ public class ToolExecutionService {
     }
 
     /**
+     * OV workflow runner. Backs {@code ovStartValidation}. Setter-injected
+     * so the framework core compiles standalone.
+     */
+    private com.pods.agent.ordervalidation.service.OrderValidationRunService ovRunService;
+
+    @Autowired(required = false)
+    public void setOvRunService(com.pods.agent.ordervalidation.service.OrderValidationRunService svc) {
+        this.ovRunService = svc;
+    }
+
+    /**
+     * OV analytics — backs {@code ovListRunsForOrder} /
+     * {@code ovGetRunDetail} / {@code ovDashboardStats}.
+     */
+    private com.pods.agent.ordervalidation.service.OrderValidationAnalyticsService ovAnalyticsService;
+
+    @Autowired(required = false)
+    public void setOvAnalyticsService(com.pods.agent.ordervalidation.service.OrderValidationAnalyticsService svc) {
+        this.ovAnalyticsService = svc;
+    }
+
+    /**
+     * OV settings repo — supplies the default {@code workflowId} when the
+     * model doesn't pass one to {@code ovStartValidation} /
+     * {@code ovDashboardStats}.
+     */
+    private com.pods.agent.ordervalidation.repository.OrderValidationSettingsRepository ovSettingsRepository;
+
+    @Autowired(required = false)
+    public void setOvSettingsRepository(com.pods.agent.ordervalidation.repository.OrderValidationSettingsRepository repo) {
+        this.ovSettingsRepository = repo;
+    }
+
+    /**
      * The "ov-*" agent profiles need their FS reads scoped to the
      * {@code orders/} subtree so the model can't glob the workspace
      * root and surface unrelated skill manifest files. Holder is set
@@ -625,10 +659,157 @@ public class ToolExecutionService {
         }
     }
 
+    /**
+     * Kicks off a fresh OV workflow run for one orderId. Runs synchronously so
+     * the resulting {@code rule_executions} rows are committed before this returns —
+     * a follow-up {@code ovLoadOrder(runId)} will find them.
+     */
+    private ExecutionResult executeOvStartValidation(String userText) {
+        if (ovRunService == null) {
+            return new ExecutionResult(false, null, "ovStartValidation is unavailable in this context");
+        }
+        try {
+            Map<String, Object> args = parseArgs(userText);
+            String orderId = stringArg(args, "orderId", null);
+            if (orderId == null || orderId.isBlank()) {
+                return new ExecutionResult(false, null, "orderId is required");
+            }
+            String workflowId = stringArg(args, "workflowId", null);
+            if (workflowId == null || workflowId.isBlank()) {
+                workflowId = (ovSettingsRepository != null)
+                        ? ovSettingsRepository.load().workflowId()
+                        : null;
+            }
+            if (workflowId == null || workflowId.isBlank()) {
+                return new ExecutionResult(false, null,
+                        "OV workflow not configured — set it in the OV-UI Settings page first");
+            }
+            var summary = ovRunService.start(workflowId, orderId, "agent", false);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("runId", summary.instanceId());
+            body.put("workflowId", summary.defId());
+            body.put("state", summary.state());
+            body.put("startedAt", summary.startedAt());
+            body.put("endedAt", summary.endedAt());
+            if (summary.errorClass() != null) body.put("errorClass", summary.errorClass());
+            if (summary.errorMessage() != null) body.put("errorMessage", summary.errorMessage());
+            return new ExecutionResult(true, objectMapper.writeValueAsString(body), null);
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return new ExecutionResult(false, null, ex.getMessage());
+        } catch (Exception ex) {
+            return new ExecutionResult(false, null, "ovStartValidation failed: " + ex.getMessage());
+        }
+    }
+
+    /** Lists historical runs for an orderId, newest first. */
+    private ExecutionResult executeOvListRunsForOrder(String userText) {
+        if (ovAnalyticsService == null) {
+            return new ExecutionResult(false, null, "ovListRunsForOrder is unavailable in this context");
+        }
+        try {
+            Map<String, Object> args = parseArgs(userText);
+            String orderId = stringArg(args, "orderId", null);
+            if (orderId == null || orderId.isBlank()) {
+                return new ExecutionResult(false, null, "orderId is required");
+            }
+            int limit = intArg(args, "limit", 10);
+            List<Map<String, Object>> rows = ovAnalyticsService.listRunsForOrder(orderId, limit);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("orderId", orderId);
+            body.put("count", rows.size());
+            body.put("runs", rows);
+            return new ExecutionResult(true, objectMapper.writeValueAsString(body), null);
+        } catch (Exception ex) {
+            return new ExecutionResult(false, null, "ovListRunsForOrder failed: " + ex.getMessage());
+        }
+    }
+
+    /** Inline RunDetail JSON for one synthetic runId — same shape ovLoadOrder writes to run.json. */
+    private ExecutionResult executeOvGetRunDetail(String userText) {
+        if (ovAnalyticsService == null) {
+            return new ExecutionResult(false, null, "ovGetRunDetail is unavailable in this context");
+        }
+        try {
+            Map<String, Object> args = parseArgs(userText);
+            String runId = stringArg(args, "runId", null);
+            if (runId == null || runId.isBlank()) {
+                return new ExecutionResult(false, null, "runId is required");
+            }
+            var detail = ovAnalyticsService.runDetail(runId);
+            if (detail == null) {
+                return new ExecutionResult(false, null, "No run found for runId " + runId);
+            }
+            return new ExecutionResult(true, objectMapper.writeValueAsString(detail), null);
+        } catch (Exception ex) {
+            return new ExecutionResult(false, null, "ovGetRunDetail failed: " + ex.getMessage());
+        }
+    }
+
+    /** Time-windowed dashboard aggregates over a workflow. */
+    private ExecutionResult executeOvDashboardStats(String userText) {
+        if (ovAnalyticsService == null) {
+            return new ExecutionResult(false, null, "ovDashboardStats is unavailable in this context");
+        }
+        try {
+            Map<String, Object> args = parseArgs(userText);
+            String workflowId = stringArg(args, "workflowId", null);
+            if (workflowId == null || workflowId.isBlank()) {
+                workflowId = (ovSettingsRepository != null)
+                        ? ovSettingsRepository.load().workflowId()
+                        : null;
+            }
+            if (workflowId == null || workflowId.isBlank()) {
+                return new ExecutionResult(false, null,
+                        "OV workflow not configured — set it in the OV-UI Settings page first");
+            }
+            Long fromTs = longArg(args, "fromTs");
+            Long toTs = longArg(args, "toTs");
+            // Default window: last 24h ending now.
+            if (toTs == null) toTs = System.currentTimeMillis();
+            if (fromTs == null) fromTs = toTs - 24L * 60 * 60 * 1000;
+            var metrics = ovAnalyticsService.dashboard(workflowId, fromTs, toTs);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("workflowId", workflowId);
+            body.put("fromTs", fromTs);
+            body.put("toTs", toTs);
+            body.put("metrics", metrics);
+            return new ExecutionResult(true, objectMapper.writeValueAsString(body), null);
+        } catch (Exception ex) {
+            return new ExecutionResult(false, null, "ovDashboardStats failed: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Parse a numeric arg as long (epoch-millis timestamps overflow int).
+     * Returns null when the key is absent or unparseable.
+     */
+    private Long longArg(Map<String, Object> args, String key) {
+        Object value = args.get(key);
+        if (value == null) return null;
+        if (value instanceof Number n) return n.longValue();
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private ExecutionResult executeIntegration(AgentTool tool, String userText) {
         String name = tool.getName().toLowerCase();
         if ("ovloadorder".equals(name)) {
             return executeOvLoadOrder(userText);
+        }
+        if ("ovstartvalidation".equals(name)) {
+            return executeOvStartValidation(userText);
+        }
+        if ("ovlistrunsfororder".equals(name)) {
+            return executeOvListRunsForOrder(userText);
+        }
+        if ("ovgetrundetail".equals(name)) {
+            return executeOvGetRunDetail(userText);
+        }
+        if ("ovdashboardstats".equals(name)) {
+            return executeOvDashboardStats(userText);
         }
         if ("dtevaluate".equals(name) || "decisiontableevaluate".equals(name)) {
             if (decisionTableService == null) {

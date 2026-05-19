@@ -681,7 +681,29 @@ VALUES (
     || '## Output format — strict' || E'\n'
     || 'PLAIN TEXT ONLY. No emojis, no checkmarks (no ✅, ❌, ⚠), no icons, no decorative symbols '
     || 'anywhere in your replies. Markdown bold/lists are fine; emojis are not. The dashboard '
-    || 'renders your text into a professional surface; emojis look unprofessional.' || E'\n',
+    || 'renders your text into a professional surface; emojis look unprofessional.' || E'\n\n'
+    || '## Fallback — order has no run yet' || E'\n'
+    || 'When `ovLoadOrder` fails with "No OV run found for order/instId …", do NOT apologize and '
+    || 'stop. The order simply has not been validated yet. Recover automatically:' || E'\n\n'
+    || '1. Call `toolsearch` with a query like `"start order validation run"` (topK 5) to '
+    || 'discover the tool that triggers a fresh run. Do NOT hardcode the tool name — let the '
+    || 'retrieval ranker pick the right one in case the catalog changes.' || E'\n'
+    || '2. Invoke the top-ranked tool with `{ orderId: "<the order>" }`. It is synchronous — it '
+    || 'returns only after the BPMN finishes — so you will get a `runId` and `state` '
+    || '(COMPLETED or FAILED) in the response.' || E'\n'
+    || '3. If `state = FAILED`, report the failure verbatim (quote `errorMessage`) and stop — '
+    || 'do NOT retry on your own.' || E'\n'
+    || '4. If `state = COMPLETED`, call `ovLoadOrder` again with the returned `runId` to '
+    || 'materialize the freshly-recorded files into your workspace.' || E'\n'
+    || '5. Then answer the operator''s original question using the materialized data and the '
+    || 'active persona''s voice. Make it clear in the reply that the run was just kicked off.' || E'\n\n'
+    || 'Trigger validation ONLY when the operator clearly asked to validate / re-validate / '
+    || 'check / kick off / submit an order. If they are only asking for the existing status of '
+    || 'an order that has no run, say so plainly and ask whether they want you to start one — '
+    || 'do not silently run a workflow that hits live PODS APIs.' || E'\n\n'
+    || 'For follow-ups about historical runs (e.g. "show me last week''s run for this order"), '
+    || 'use `ovListRunsForOrder` + `ovGetRunDetail` rather than `ovLoadOrder` — those return '
+    || 'concise JSON without materializing a workspace tree.' || E'\n',
     'manual',
     TRUE,
     'system',

@@ -246,6 +246,85 @@ public class FrameworkToolPackService {
                                                 "description", "Order id like 600030447, or a synthetic run id (sessionId__turnId).")
                                 ),
                                 "required", List.of("orderId")
+                        ), true),
+
+                // Order-validation kickoff. Triggers a fresh BPMN run for one
+                // orderId on the configured OV workflow. Synchronous — returns
+                // after the BPMN persists, so a follow-up ovLoadOrder(runId)
+                // finds the new rows in rule_executions immediately.
+                seed("ovStartValidation",
+                        "Trigger a fresh order-validation workflow run for one orderId. "
+                        + "Use this to validate, re-validate, start, or kick off a check on an order — "
+                        + "especially when ovLoadOrder reports the order has no prior run. "
+                        + "Synchronous: returns after the BPMN completes with the recorded runId and state "
+                        + "(COMPLETED or FAILED). workflowId defaults to the OV workflow configured in the "
+                        + "OV-UI Settings if omitted.",
+                        "integration", "integration", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "orderId", Map.of("type", "string",
+                                                "description", "Order id to validate, e.g. 5038081."),
+                                        "workflowId", Map.of("type", "string",
+                                                "description", "Optional. Overrides the configured OV workflow id.")
+                                ),
+                                "required", List.of("orderId")
+                        ), true),
+
+                // List historical runs for one order — newest first.
+                seed("ovListRunsForOrder",
+                        "List the most recent order-validation runs recorded for one orderId, newest first. "
+                        + "Returns an array of { runId, state, startedAt, endedAt, durationMs }. Use this when "
+                        + "the operator asks how many times an order has been validated, or to pick a specific "
+                        + "historical runId for ovGetRunDetail / ovLoadOrder.",
+                        "integration", "integration", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "orderId", Map.of("type", "string",
+                                                "description", "Order id to look up, e.g. 600030447."),
+                                        "limit", Map.of("type", "number",
+                                                "description", "Maximum number of runs to return. Default 10, capped at 50.")
+                                ),
+                                "required", List.of("orderId")
+                        ), true),
+
+                // Inline run detail — same shape ovLoadOrder writes to run.json,
+                // returned without materializing the workspace tree.
+                seed("ovGetRunDetail",
+                        "Return the full RunDetail for one synthetic runId — overall status, per-check verdicts "
+                        + "(leg sequence, serviceability, container availability), error class, and activity "
+                        + "timeline. Use after ovListRunsForOrder when the operator wants a specific historical "
+                        + "run rather than the latest. For deep analysis of large files, prefer ovLoadOrder + "
+                        + "the file-system tools.",
+                        "integration", "integration", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "runId", Map.of("type", "string",
+                                                "description", "Synthetic run id of the form sessionId__turnId.")
+                                ),
+                                "required", List.of("runId")
+                        ), true),
+
+                // Time-windowed dashboard aggregates over a workflow.
+                seed("ovDashboardStats",
+                        "Aggregated dashboard metrics (run counts, pass/fail/review breakdowns, average duration) "
+                        + "for the OV workflow over an optional time window. Use for questions like "
+                        + "\"how many orders failed this week\" or \"what's our clear rate today\". "
+                        + "workflowId defaults to the configured OV workflow.",
+                        "integration", "integration", false, false,
+                        Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "workflowId", Map.of("type", "string",
+                                                "description", "Optional. Defaults to the configured OV workflow."),
+                                        "fromTs", Map.of("type", "number",
+                                                "description", "Start of the window in epoch millis (inclusive). Default: 24h ago."),
+                                        "toTs", Map.of("type", "number",
+                                                "description", "End of the window in epoch millis (exclusive). Default: now.")
+                                ),
+                                "required", List.of()
                         ), true)
         );
     }

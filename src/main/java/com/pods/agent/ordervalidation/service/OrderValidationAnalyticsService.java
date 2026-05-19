@@ -471,6 +471,52 @@ public class OrderValidationAnalyticsService {
     }
 
     /**
+     * List the most recent validation runs recorded for one orderId,
+     * newest first. Backs the {@code ovListRunsForOrder} chat tool.
+     *
+     * <p>Each row is grouped by {@link #OV_ID_EXPR} so the returned
+     * {@code runId} can be fed straight into {@link #runDetail(String)}
+     * or {@code ovLoadOrder}. State is derived from per-rule successes
+     * (any non-success or any FEEL-driven {@code valid=false} →
+     * {@code FAILED}, else {@code COMPLETED}); we keep it cheap here
+     * and let callers fetch a full {@link RunDetail} for per-check
+     * breakdowns.
+     */
+    public List<Map<String, Object>> listRunsForOrder(String orderId, int limit) {
+        int cap = Math.max(1, Math.min(limit, 50));
+        return jdbc.queryForList(
+                "SELECT " + OV_ID_EXPR + " AS run_id, "
+                + "       MIN(e.created_at) AS started_at, "
+                + "       MAX(e.created_at) AS ended_at, "
+                + "       BOOL_AND(e.success) AS all_success "
+                + "FROM agent.rule_executions e "
+                + "WHERE e.inputs_json IS NOT NULL "
+                + "  AND NULLIF(e.inputs_json, '')::jsonb ->> 'orderId' = :oid "
+                + "GROUP BY " + OV_ID_EXPR + " "
+                + "ORDER BY started_at DESC "
+                + "LIMIT :lim",
+                new MapSqlParameterSource()
+                        .addValue("oid", orderId)
+                        .addValue("lim", cap))
+                .stream()
+                .map(row -> {
+                    Map<String, Object> out = new java.util.LinkedHashMap<>();
+                    long startedAt = ((Number) row.get("started_at")).longValue();
+                    Long endedAt = row.get("ended_at") == null
+                            ? null : ((Number) row.get("ended_at")).longValue();
+                    boolean allSuccess = row.get("all_success") != null
+                            && (Boolean) row.get("all_success");
+                    out.put("runId", row.get("run_id"));
+                    out.put("state", allSuccess ? "COMPLETED" : "FAILED");
+                    out.put("startedAt", startedAt);
+                    out.put("endedAt", endedAt);
+                    out.put("durationMs", endedAt == null ? null : endedAt - startedAt);
+                    return out;
+                })
+                .toList();
+    }
+
+    /**
      * Returns the activity events that match the UI's high-level
      * concept ({@code evaluateLegSequence}, {@code callServiceability},
      * {@code callContainerAvailability}) within this synthetic run.
