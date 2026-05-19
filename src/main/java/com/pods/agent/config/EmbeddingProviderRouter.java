@@ -8,6 +8,7 @@ import com.pods.agent.repository.ModelRepository;
 import com.pods.agent.service.EncryptionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.azure.openai.AzureOpenAiEmbeddingModel;
+import org.springframework.ai.azure.openai.AzureOpenAiEmbeddingOptions;
 import org.springframework.ai.document.MetadataMode;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.ollama.OllamaEmbeddingModel;
@@ -96,7 +97,15 @@ public class EmbeddingProviderRouter {
                     .endpoint(endpoint)
                     .credential(new AzureKeyCredential(apiKey))
                     .buildClient();
-            return new AzureOpenAiEmbeddingModel(client);
+            // Azure uses deployment names — without an explicit deployment, Spring AI
+            // falls back to a baked-in default ("text-embedding-ada-002") and Azure
+            // 404s with DeploymentNotFound. The convention in this codebase (matches
+            // the chat path in ModelProviderRouter) is that the modelID stored on the
+            // credentials row IS the deployment name. Mirror that here.
+            var options = AzureOpenAiEmbeddingOptions.builder()
+                    .deploymentName(modelID)
+                    .build();
+            return new AzureOpenAiEmbeddingModel(client, MetadataMode.EMBED, options);
         } catch (Exception e) {
             throw wrap(providerID, modelID, e);
         }
